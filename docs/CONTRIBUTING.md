@@ -1,6 +1,6 @@
 # Git 协作与提交规则
 
-本文件维护 LISA 的版本管理约定。当前由一人开发，产品规则以 [项目方案](docs/PROJECT_PLAN.md) 为准，文档更新规则见 [README](README.md#文档维护)。当前只有需求文档和独立原型，尚无正式应用构建、测试或 CI 流程。
+本文件维护 LISA 的版本管理约定。当前由一人开发，产品规则以 [项目方案](PROJECT_PLAN.md) 为准，文档更新规则见 [README](../README.md#文档维护)。当前只有需求文档和独立原型，尚无正式应用构建、测试或 CI 流程。
 
 ## 分支与同步
 
@@ -40,20 +40,20 @@
 
 开发助手使用的 `AGENTS.md`、`AGENTS.override.md`、根目录 `.codex/`、`.agents/` 及个人编辑器配置仅在本地保留，不纳入版本管理。它们与应用使用的通用角色 prompt 分开；仓库文档不依赖这些本地文件才能阅读或使用。
 
-[.gitignore](.gitignore) 排除本地环境配置、凭据、运行数据、依赖、缓存、构建产物和测试报告。项目根目录的 `data/`、`runtime/`、`storage/`、`pgdata/`、`volumes/`、`backups/`、`exports/`、`indexes/`、`logs/` 预留给本地运行数据；部署时也可存放在仓库外。这些约定不要求现在创建目录或决定正式源码结构。
+[.gitignore](../.gitignore) 排除本地环境配置、凭据、运行数据、依赖、缓存、构建产物和测试报告。项目根目录的 `data/`、`runtime/`、`storage/`、`pgdata/`、`volumes/`、`backups/`、`exports/`、`indexes/`、`logs/` 预留给本地运行数据；部署时也可存放在仓库外。这些约定不要求现在创建目录或决定正式源码结构。
 
 用户聊天、作品、个人演化 prompt、记忆、QQ 会话凭据、模型请求记录和数据库备份不进入 Git。通用模板、演示作品和合成测试数据放在明确的源码或示例位置，避免混入运行数据目录。新增数据输出位置时同步检查忽略规则；不以忽略所有 JSON、SQL、Markdown 或锁文件的方式隐藏源码。
 
 允许提交 `.env.example`、`.env.sample` 及对应分环境模板，但内容只能是说明和占位值，不得带真实密钥、账号或私人数据。个人编辑器配置默认忽略；团队确需共享时，单独审查具体文件并调整白名单。
 
-[.gitattributes](.gitattributes) 统一文本为 LF，Windows `.bat`、`.cmd` 使用 CRLF，二进制素材保持原样。文本文件使用 UTF-8；PowerShell 读取文档显式指定 `-Encoding UTF8`。规则通过仓库文件生效，不要求修改个人全局 Git 配置。
+[.gitattributes](../.gitattributes) 统一文本为 LF，Windows `.bat`、`.cmd` 使用 CRLF，二进制素材保持原样。文本文件使用 UTF-8；PowerShell 读取文档显式指定 `-Encoding UTF8`。规则通过仓库文件生效，不要求修改个人全局 Git 配置。
 
 忽略规则不会自动移除已经跟踪的文件。发现敏感内容被提交时，先撤销或轮换凭据，再按影响范围清理版本记录；不要只添加忽略规则后继续推送。
 
 ## 提交前检查
 
 1. 用 `git status --short` 与 `git diff` 核对本次范围，保留其他任务的未提交改动。
-2. 逐个路径暂存，例如 `git add README.md CONTRIBUTING.md`；检查 `git diff --cached --stat` 和 `git diff --cached`，确认没有私人数据或生成物。
+2. 在项目根目录逐个路径暂存，例如 `git add README.md docs/CONTRIBUTING.md`；检查 `git diff --cached --stat` 和 `git diff --cached`，确认没有私人数据或生成物。
 3. 执行 `git diff --cached --check`，修正意外的空白问题。
 4. 文档改动检查本地链接、表格、状态及文档一致性。原型交互变化按前端规范做浏览器验收；正式应用建立后再运行与改动相关的真实构建与测试命令。当前不虚构测试命令或通过结果。
 5. 使用约定格式提交；推送前复核目标远端、分支和待推送提交。
