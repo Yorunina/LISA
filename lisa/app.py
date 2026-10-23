@@ -1,0 +1,124 @@
+import logging
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from uuid import uuid4
+
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+from lisa import (
+    account_deletion,
+    auth,
+    characters,
+    contact_policy,
+    memory,
+    onboarding,
+    retrieval_config,
+    scheduling,
+    works,
+)
+from lisa.db import make_engine
+from lisa.models import BudgetDay
+from lisa.settings import ROOT, Settings
+
+logger = logging.getLogger("lisa.api")
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or Settings()
+    engine = make_engine(settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        engine.dispose()
+
+    app = FastAPI(title="LISA", lifespan=lifespan)
+    app.state.settings = settings
+    app.state.engine = engine
+
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        request.state.request_id = uuid4().hex
+        if (
+            request.url.path.startswith("/api/")
+            and request.method not in {"GET", "HEAD", "OPTIONS"}
+            and request.headers.get("X-LISA-Request") != "1"
+        ):
+            response = JSONResponse({"detail": "请通过 LISA 页面提交操作。"}, status_code=403)
+        else:
+            response = await call_next(request)
+        response.headers["X-Request-ID"] = request.state.request_id
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        # No URL query, credentials, usernames or request/response bodies in logs.
+        logger.info(
+            "request=%s method=%s status=%s",
+            request.state.request_id,
+            request.method,
+            response.status_code,
+        )
+        return response
+
+    @app.exception_handler(SQLAlchemyError)
+    async def database_error(request: Request, exc: SQLAlchemyError):
+        logger.error("request=%s database_error=%s", request.state.request_id, type(exc).__name__)
+        return JSONResponse(
+            {
+                "detail": "服务暂时无法保存或读取数据，请稍后重试。",
+                "request_id": request.state.request_id,
+            },
+            status_code=503,
+        )
+
+    @app.get("/api/health")
+    def health():
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ok"}
+
+    app.include_router(auth.router)
+    app.include_router(account_deletion.router)
+    app.include_router(onboarding.router)
+    app.include_router(works.router)
+    app.include_router(memory.router)
+    app.include_router(scheduling.router)
+    app.include_router(contact_policy.router)
+    app.include_router(retrieval_config.router)
+    app.include_router(characters.router)
+
+    @app.get("/api/service-status")
+    def service_status(user=Depends(auth.current_user)):
+        if (
+            not (settings.chat_enabled or settings.chat_test_enabled)
+            or not settings.model_api_key.get_secret_value()
+        ):
+            return {"status": "unavailable", "message": "正常对话尚未开放，绑定与性格设置已保存。"}
+        with Session(engine) as db:
+            day = db.get(BudgetDay, datetime.now(UTC).date())
+            minimum = (
+                settings.model_max_output_tokens * settings.model_output_per_million / 1_000_000
+            )
+            if day and day.spent_usd + day.reserved_usd + minimum > settings.model_daily_usd:
+                return {
+                    "status": "budget_exhausted",
+                    "message": "今日服务额度已用尽，阅读和手动保存仍可使用。",
+                }
+        return {
+            "status": "ready",
+            "message": (
+                "正常私聊已开放。请用已绑定 QQ 直接发送消息。"
+                "图片、语音等内容暂无法读取，请用文字说明。"
+                if settings.chat_enabled
+                else "对话测试已开放。请用已绑定 QQ 发送“测试对话 你想说的话”。"
+                "初始化前的消息不会自动补答。"
+            ),
+        }
+
+    if (ROOT / "dist").is_dir():
+        app.mount("/", StaticFiles(directory=ROOT / "dist", html=True), name="web")
+    return app

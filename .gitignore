@@ -1,3 +1,6 @@
+# Project documents and prototype live in /.docs/ and are versioned.
+# Do not blanket-ignore dot directories, Markdown, manifests or lockfiles.
+
 # Local credentials; commit only templates containing placeholder values.
 .env
 .env.*
@@ -11,6 +14,16 @@
 *.pem
 *.p12
 *.pfx
+
+# Machine-local environment/package-manager configuration and shell history.
+# Keep version pins, dependency manifests, lockfiles and setup scripts versioned.
+/.envrc
+/.direnv/
+/.npmrc
+/.pypirc
+/pip.ini
+/.python_history
+/.node_repl_history
 
 # Private runtime data. Keep fixtures and public templates outside these roots.
 /data/
@@ -40,10 +53,12 @@ __pycache__/
 *.egg-info/
 .eggs/
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 .tox/
 .nox/
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/
@@ -53,16 +68,23 @@ coverage.xml
 node_modules/
 .vite/
 *.tsbuildinfo
-build/
-dist/
-coverage/
-playwright-report/
-test-results/
-blob-report/
+/build/
+/dist/
+/coverage/
+/playwright-report/
+/test-results/
+/test-results-*/
+/blob-report/
+
+# Project-local package/tool caches (runtime/ also contains persistent data).
+/.cache/
+/.npm/
+/.uv-cache/
 
 # Machine-specific editor / agent settings and temporary files.
 /.idea/
 /.vscode/
+/.vs/
 /.codex/
 /.agents/
 AGENTS.md
@@ -73,5 +95,10 @@ Desktop.ini
 *.swp
 *.swo
 *~
+*.tmp
+*.temp
+# Patch/merge leftovers; source patches themselves remain versioned.
+*.orig
+*.rej
 /tmp/
 /temp/

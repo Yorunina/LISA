@@ -1,0 +1,38 @@
+[project]
+name = "lisa"
+version = "0.1.0"
+description = "LISA literary companion: web application and persistent worker"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "alembic>=1.16,<2",
+    "fastapi>=0.115,<1",
+    "httpx2>=2.16,<3",
+    "openai>=3.36.1",
+    "pgvector>=0.4,<1",
+    "procrastinate>=3,<4",
+    "psycopg[binary,pool]>=3.2,<4",
+    "pydantic-settings>=2,<3",
+    "python-dotenv>=1,<2",
+    "sqlalchemy>=2,<3",
+    "tzdata>=2025.2",
+    "uvicorn>=0.35,<1",
+    "websockets>=15,<17",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8,<10",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.12,<1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
