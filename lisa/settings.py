@@ -28,7 +28,8 @@ class Settings(BaseSettings):
     model_base_url: str = "https://test.mcii.cc/v1"
     model_api_key: SecretStr = SecretStr("")
     model_name: str = "gpt-6-astra"
-    model_daily_usd: Decimal = Field(default=Decimal("0.50"), gt=0)
+    # Amounts use CNY; legacy *_usd names remain compatible with stored data and clients.
+    model_daily_usd: Decimal = Field(default=Decimal("10.00"), gt=0)
     model_task_usd: Decimal = Field(default=Decimal("0.15"), gt=0)
     model_input_per_million: Decimal = Field(default=Decimal("10"), gt=0)
     model_output_per_million: Decimal = Field(default=Decimal("50"), gt=0)
@@ -43,6 +44,13 @@ class Settings(BaseSettings):
     chat_test_enabled: bool = False
     writing_max_chars: int = Field(default=600, ge=100, le=2000)
     writing_output_tokens: int = Field(default=1200, ge=256, le=4096)
+    style_max_files: int = Field(default=16, ge=1, le=64)
+    style_max_upload_bytes: int = Field(default=8_388_608, ge=1024, le=33_554_432)
+    style_corpus_ttl_hours: int = Field(default=24, ge=1, le=72)
+    style_distillation_max_calls: int = Field(default=28, ge=3, le=64)
+    style_distillation_chunk_bytes: int = Field(default=24_000, ge=4000, le=64_000)
+    style_distillation_max_input_bytes: int = Field(default=64_000, ge=16_000, le=128_000)
+    style_distillation_output_tokens: int = Field(default=1600, ge=600, le=4096)
     autonomy_enabled: bool = False
     proactive_enabled: bool = False
     autonomous_scene_interval_minutes: int = Field(default=120, ge=1, le=1440)

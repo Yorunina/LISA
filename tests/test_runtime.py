@@ -70,5 +70,6 @@ async def test_worker_registers_separate_index_consumer(monkeypatch):
         (("lisa",), 2),
         (("lisa_author",), 1),
         (("lisa_index",), 1),
+        (("lisa_style",), 1),
     }
     assert all(not item["wait"] and not item["install_signal_handlers"] for item in consumers)

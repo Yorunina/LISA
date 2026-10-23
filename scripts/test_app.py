@@ -49,7 +49,7 @@ def seed_browser_invites(env: dict[str, str]) -> None:
         with Session(engine) as session:
             for table in reversed(Base.metadata.sorted_tables):
                 session.execute(delete(table))
-            codes = issue_invites(session, 5)
+            codes = issue_invites(session, 6)
             recovery_user = Account(
                 username="recovery_reader",
                 password_hash=hash_password("synthetic-password-2026"),
@@ -69,6 +69,27 @@ def seed_browser_invites(env: dict[str, str]) -> None:
             session.add(
                 PersonaVersion(
                     persona_id=persona.id, version=1, name=persona.name, prompt=persona.prompt
+                )
+            )
+            styles_user = Account(
+                username="styles_reader",
+                password_hash=hash_password("synthetic-password-2026"),
+            )
+            session.add(styles_user)
+            session.flush()
+            session.get(Invite, hash_token(codes[5])).used_by = styles_user.id
+            session.add(QQBinding(user_id=styles_user.id, qq_id="700000097"))
+            styles_persona = Persona(
+                user_id=styles_user.id, name="测试小莎", prompt="合成风格验收人格。", version=1
+            )
+            session.add(styles_persona)
+            session.flush()
+            session.add(
+                PersonaVersion(
+                    persona_id=styles_persona.id,
+                    version=1,
+                    name=styles_persona.name,
+                    prompt=styles_persona.prompt,
                 )
             )
             env["LISA_TEST_BINDING_CODE"] = issue_code(session, "binding", "700000001")

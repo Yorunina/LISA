@@ -196,13 +196,21 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         source_ids = [message.id for message in batch]
         memory_revision = user.memory_revision
         current_texts = [message.content for message in batch]
+        snapshot = dict(task.input_snapshot or {})
+        if "persona" not in snapshot:
+            snapshot["persona"] = {
+                "name": persona.name, "prompt": persona.prompt, "version": persona.version
+            }
+            task.input_snapshot = snapshot
+        persona_snapshot = snapshot["persona"]
         instructions = (
             "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
             "你及虚拟生活是虚构设定。不声称已完成尚未保存的作品或任务。"
             "用户消息可能延迟送达，以标注的消息时间理解旧消息，不假装刚刚发生。"
             "标注无法读取的非文本消息只代表用户发来了消息，不能推断图片或语音内容；请对方用文字说明。"
             f"当前 UTC 时间：{datetime.now(UTC).isoformat()}。\n"
-            f"用户选定的性格名称：{persona.name}\n性格设定：\n{persona.prompt}"
+            f"用户选定的性格名称：{persona_snapshot['name']}\n"
+            f"性格设定：\n{persona_snapshot['prompt']}"
         )
         instructions += (
             MEMORY_INSTRUCTIONS

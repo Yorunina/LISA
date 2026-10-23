@@ -92,7 +92,7 @@ def test_disabled_index_sweep_has_no_database_or_provider_work(
     db = Mock()
     assert enqueue_pending_indexes(db, settings) == 0
     queue = create_queue(settings)
-    assert not queue.periodic_registry.periodic_tasks
+    assert ("lisa.index_sweep", "") not in queue.periodic_registry.periodic_tasks
     queue.tasks["lisa.index_sweep"].func(timestamp=0)
     ensure.assert_not_called()
     db.flush.assert_not_called()

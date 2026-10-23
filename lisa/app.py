@@ -19,6 +19,9 @@ from lisa import (
     onboarding,
     retrieval_config,
     scheduling,
+    style_corpus,
+    style_distillation,
+    style_profiles,
     works,
 )
 from lisa.db import make_engine
@@ -90,6 +93,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(contact_policy.router)
     app.include_router(retrieval_config.router)
     app.include_router(characters.router)
+    app.include_router(style_corpus.router)
+    app.include_router(style_profiles.router)
+    app.include_router(style_distillation.router)
 
     @app.get("/api/service-status")
     def service_status(user=Depends(auth.current_user)):

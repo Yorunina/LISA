@@ -55,6 +55,34 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
         finally:
             engine.dispose()
 
+    @app.task(name="lisa.style", queue="lisa_style", retry=ExplicitRetry())
+    async def style_task(task_id: str):
+        from lisa.db import make_engine
+        from lisa.style_distillation import execute_style
+
+        engine = make_engine(settings)
+        try:
+            await execute_style(settings, engine, task_id)
+        finally:
+            engine.dispose()
+
+    @app.task(name="lisa.style_cleanup", queue="lisa_style", lock="style-cleanup")
+    def style_cleanup(timestamp: int):
+        from lisa.db import make_engine
+        from lisa.style_corpus import clear_expired_corpora
+        from lisa.style_distillation import cleanup_trials
+
+        engine = make_engine(settings)
+        try:
+            with Session(engine) as db, db.begin():
+                clear_expired_corpora(db)
+                cleanup_trials(db)
+        finally:
+            engine.dispose()
+
+    # Cleanup protects temporary uploads even when autonomous features are disabled.
+    app.periodic(cron="* * * * *")(style_cleanup)
+
     @app.task(name="lisa.index_sweep", queue="lisa_index", lock="index-sweep")
     def index_sweep(timestamp: int):
         from lisa.db import make_engine
@@ -145,6 +173,10 @@ def enqueue_contact(db: Session, task_id, user_id) -> int:
 
 def enqueue_author(db: Session, task_id, user_id) -> int:
     return _enqueue(db, task_id, "lisa.author", "lisa_author", f"author:{user_id}")
+
+
+def enqueue_style(db: Session, task_id, user_id) -> int:
+    return _enqueue(db, task_id, "lisa.style", "lisa_style", f"style:{user_id}")
 
 
 def _enqueue(db, task_id, task_name, queue_name, lock, *, delay=0) -> int:

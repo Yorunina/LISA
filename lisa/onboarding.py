@@ -148,6 +148,9 @@ def save_persona(body: PersonaInput, user: User, db: DB):
     persona = db.scalar(select(Persona).where(Persona.user_id == user.id))
     if persona and persona.name == body.name and persona.prompt == body.prompt:
         return setup_state(db, user)
+    from lisa.style_profiles import clear_personality_application
+
+    clear_personality_application(db, user.id)
     if persona:
         persona.name, persona.prompt = body.name, body.prompt
         persona.version += 1

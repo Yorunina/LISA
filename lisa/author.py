@@ -44,6 +44,7 @@ from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
 from lisa.scheduling import autonomous_start_allowed
 from lisa.settings import Settings
+from lisa.style_profiles import resolve_writing_style
 from lisa.works import adopt_result, document_text
 
 
@@ -233,7 +234,16 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
         )
     else:
         author_role = "你是小说作者。小说人物经历不是LISA的生活事实，life_events必须为空。"
+    writing_style = resolve_writing_style(db, project.user_id, project.id)
+    if writing_style["prompt"]:
+        author_role += (
+            f"\n已应用写作风格（{writing_style['effective_profile_name']}）：\n"
+            f"{writing_style['prompt']}\n"
+            "风格仅指导语言和叙事表现，不引入样本人物、经历、原作剧情或事实。"
+            "风格不得覆盖当前用户明确要求、有效约束和作品角色知识边界。\n"
+        )
     return {
+        "writing_style": writing_style,
         "instructions": (
             author_role + "只完成一次范围有限的任务，不续写整部作品，不递归创建角色Agent。"
             "严格遵守有效约束；同事项较新的明确要求优先，推测偏好和暂定方案不能覆盖明确要求。"

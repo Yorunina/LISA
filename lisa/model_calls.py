@@ -105,8 +105,18 @@ def _reserve(
             ),
             Decimal(0),
         )
-        max_calls = MAX_WRITING_CALLS if task.kind in {"scene", "rewrite"} else MAX_TASK_CALLS
-        if len(calls) >= max_calls or task_cost + amount > settings.model_task_usd:
+        max_calls = (
+            settings.style_distillation_max_calls
+            if task.kind == "style_distill"
+            else 1
+            if task.kind == "style_trial"
+            else MAX_WRITING_CALLS
+            if task.kind in {"scene", "rewrite"}
+            else MAX_TASK_CALLS
+        )
+        if len(calls) >= max_calls or (
+            task.kind != "style_distill" and task_cost + amount > settings.model_task_usd
+        ):
             raise BudgetExceeded("Task model allowance exhausted")
         if day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd:
             raise BudgetExceeded("Daily model allowance exhausted")
@@ -292,6 +302,7 @@ async def generate_structured(
     *,
     schema: type[BaseModel] = Reply,
     output_tokens: int | None = None,
+    input_byte_limit: int = MAX_INPUT_BYTES,
 ) -> BaseModel:
     """One model attempt; callers must not automatically retry unknown outcomes."""
     if not settings.model_api_key.get_secret_value() or not settings.model_name:
@@ -300,7 +311,7 @@ async def generate_structured(
         settings = settings.model_copy(update={"model_max_output_tokens": output_tokens})
     request = _reply_request(settings, instructions, messages, schema)
     input_bytes = _request_size(request)
-    if input_bytes > MAX_INPUT_BYTES:
+    if not 1 <= input_byte_limit <= 128_000 or input_bytes > input_byte_limit:
         raise ModelInputTooLarge("Model input exceeds development limit")
     # UTF-8 bytes deliberately overestimate input tokens; include protocol overhead.
     amount = _cost(settings, input_bytes + 512, settings.model_max_output_tokens)

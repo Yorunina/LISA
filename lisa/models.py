@@ -116,6 +116,68 @@ class PersonaVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class StyleCorpus(Base):
+    """Only temporary source storage; payload is erased on every terminal outcome."""
+
+    __tablename__ = "style_corpora"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    state: Mapped[str] = mapped_column(String(16), default="ready")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    preview: Mapped[dict] = mapped_column(JSONB, default=dict)
+    task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class StyleProfile(Base):
+    __tablename__ = "style_profiles"
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    name: Mapped[str] = mapped_column(String(80))
+    latest_version: Mapped[int] = mapped_column(default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StyleProfileVersion(Base):
+    __tablename__ = "style_profile_versions"
+    __table_args__ = (UniqueConstraint("profile_id", "version"),)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    profile_id: Mapped[UUID] = mapped_column(
+        ForeignKey("style_profiles.id", ondelete="CASCADE"), index=True
+    )
+    version: Mapped[int]
+    prompt: Mapped[str] = mapped_column(Text)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    report: Mapped[dict] = mapped_column(JSONB, default=dict)
+    source_task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class StyleApplication(Base):
+    __tablename__ = "style_applications"
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(String(16), primary_key=True)
+    version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("style_profile_versions.id", ondelete="CASCADE")
+    )
+
+
+class ProjectStyleOverride(Base):
+    __tablename__ = "project_style_overrides"
+    project_id: Mapped[UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    version_id: Mapped[UUID] = mapped_column(
+        ForeignKey("style_profile_versions.id", ondelete="CASCADE")
+    )
+
+
 class ServiceEvent(Base):
     __tablename__ = "service_events"
     __table_args__ = (UniqueConstraint("bot_id", "message_id"),)
@@ -254,6 +316,7 @@ class Task(Base):
     )
     request: Mapped[dict] = mapped_column(JSONB, default=dict, server_default=text("'{}'::jsonb"))
     input_snapshot: Mapped[dict | None] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB)
     adopted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     retry_of: Mapped[UUID | None] = mapped_column(
         ForeignKey("tasks.id", ondelete="SET NULL", name="fk_tasks_retry")

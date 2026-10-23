@@ -7,9 +7,11 @@ import { AccountDeletion } from './account-deletion';
 import type { WorksHandle } from './works';
 import type { MemoryHandle } from './memory';
 import type { ContactSettingsHandle } from './contact-settings';
+import type { StyleProfilesHandle } from './style-profiles';
 const Works = lazy(() => import('./works').then(module => ({ default: module.Works })));
 const Memory = lazy(() => import('./memory').then(module => ({ default: module.Memory })));
 const ContactSettingsPanel = lazy(() => import('./contact-settings').then(module => ({ default: module.ContactSettingsPanel })));
+const StyleProfiles = lazy(() => import('./style-profiles').then(module => ({ default: module.StyleProfiles })));
 
 type Setup = {
   qq_id: string | null;
@@ -18,7 +20,7 @@ type Setup = {
   presets: unknown[];
 };
 type Binding = { qq_id: string; expires_at: string };
-type LeaveAction = 'logout' | 'overview' | 'works' | 'memory' | 'account' | 'contact';
+type LeaveAction = 'logout' | 'overview' | 'works' | 'memory' | 'account' | 'contact' | 'styles';
 type ServiceStatus = {
   status: 'ready' | 'unavailable' | 'budget_exhausted';
   message: string;
@@ -53,10 +55,12 @@ function ServiceNotice() {
 }
 
 export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () => Promise<void>; onDeleted: () => void }) {
-  const [section, setSection] = useState<'account' | 'works' | 'memory' | 'contact'>('account');
+  const [section, setSection] = useState<'account' | 'works' | 'memory' | 'contact' | 'styles'>('account');
   const works = useRef<WorksHandle>(null);
   const memory = useRef<MemoryHandle>(null);
   const contact = useRef<ContactSettingsHandle>(null);
+  const styles = useRef<StyleProfilesHandle>(null);
+  const [styleProjectId, setStyleProjectId] = useState<string | null>(null);
   const [setup, setSetup] = useState<Setup | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -121,7 +125,7 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
 
   async function leavePage(action: LeaveAction, discard = false) {
     setError('');
-    if (action === 'works' || action === 'memory' || action === 'account' || action === 'contact') {
+    if (action === 'works' || action === 'memory' || action === 'account' || action === 'contact' || action === 'styles') {
       if (discard) { setName(setup?.persona?.name ?? ''); setPrompt(setup?.persona?.prompt ?? ''); }
       setSection(action);
       return;
@@ -143,6 +147,7 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
     if (section === 'works' && works.current) works.current.requestLeave(() => { void leavePage(action); });
     else if (section === 'memory' && memory.current) memory.current.requestLeave(() => { void leavePage(action); });
     else if (section === 'contact' && contact.current) contact.current.requestLeave(() => { void leavePage(action); });
+    else if (section === 'styles' && styles.current) styles.current.requestLeave(() => { void leavePage(action); });
     else if (dirty) setLeave(action);
     else void leavePage(action);
   }
@@ -195,8 +200,8 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
   if (loading) return <main id="main" className="study-page" role="status">正在打开书房…</main>;
 
   return <>
-    <header className="topbar"><nav className="study-nav" aria-label="书房导航"><button className="text-button" aria-current={section === 'works' ? 'page' : undefined} onClick={() => { if (section !== 'works') requestLeave('works'); }} disabled={busy}>我的作品</button><button className="text-button" aria-current={section === 'memory' ? 'page' : undefined} onClick={() => { if (section !== 'memory') requestLeave('memory'); }} disabled={busy}>记忆</button><button className="text-button" aria-current={section === 'account' || section === 'contact' ? 'page' : undefined} onClick={() => { if (section !== 'account') requestLeave('account'); }} disabled={busy}>账号与 LISA 性格</button></nav><button className="text-button" onClick={() => requestLeave('logout')} disabled={busy}>退出登录</button></header>
-    {section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : <main id="main" tabIndex={-1}>
+    <header className="topbar"><nav className="study-nav" aria-label="书房导航"><button className="text-button" aria-current={section === 'works' ? 'page' : undefined} onClick={() => { if (section !== 'works') requestLeave('works'); }} disabled={busy}>我的作品</button><button className="text-button" aria-current={section === 'memory' ? 'page' : undefined} onClick={() => { if (section !== 'memory') requestLeave('memory'); }} disabled={busy}>记忆</button><button className="text-button" aria-current={section === 'account' || section === 'contact' || section === 'styles' ? 'page' : undefined} onClick={() => { if (section !== 'account') requestLeave('account'); }} disabled={busy}>账号与 LISA 性格</button></nav><button className="text-button" onClick={() => requestLeave('logout')} disabled={busy}>退出登录</button></header>
+    {section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} onStyles={projectId => { setStyleProjectId(projectId); void leavePage('styles'); }} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : section === 'styles' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取风格方案…</main>}><StyleProfiles ref={styles} initialized={!!setup?.initialized} initialProjectId={styleProjectId} onBack={() => requestLeave('account')} onApplied={() => { void request<Setup>('/setup').then(state => { setSetup(state); setName(state.persona?.name ?? ''); setPrompt(state.persona?.prompt ?? ''); setEditing(!state.persona); }).catch(showFailure); }} /></Suspense> : <main id="main" tabIndex={-1}>
       <div className="study-page">
         <p className="eyebrow">我的书房</p><h1 ref={heading} tabIndex={-1}>欢迎，{user.username}。</h1>
         <p className="page-subtitle">{setup?.initialized ? '绑定与性格设置已保存。' : '完成 QQ 绑定与性格设置，准备与你的 LISA 相识。'}</p>
@@ -223,6 +228,7 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
                   <div className="save-bar"><button className="primary" disabled={busy}>{busy ? '正在保存…' : '保存性格'}</button><p role="status">{busy ? '请稍候' : dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : setup.persona ? `当前版本 ${setup.persona.version}` : '保存后完成性格初始化'}</p></div>
                 </form>
               </section> : <section className="welcome-paper"><span className="paper-flower" aria-hidden="true">✳</span><h2>{setup.persona?.name}</h2><p>性格设置已保存。你们的经历，会从这里慢慢积累。</p><button className="secondary" onClick={() => { setEditing(true); setSaved(false); }}>调整 LISA 性格</button></section>}
+              <section className="account-contact-entry" aria-labelledby="styles-entry-title"><div><h2 id="styles-entry-title">性格与写作风格</h2><p>从 QQ 记录或作品提炼方案，保存、试用，再明确应用。保留多个版本。</p></div><button className="secondary" onClick={() => { setStyleProjectId(null); requestLeave('styles'); }} disabled={busy}>管理风格方案</button></section>
               {setup.initialized && <section className="account-contact-entry" aria-labelledby="contact-entry-title"><div><h2 id="contact-entry-title">联系偏好</h2><p>主动联系默认关闭。设置是否允许联系、免打扰时段与联系频率。</p></div><button className="secondary" onClick={() => requestLeave('contact')} disabled={busy}>设置联系偏好</button></section>}
             </>}
           </>}

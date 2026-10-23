@@ -57,6 +57,24 @@ def task_account(db):
     return task.id, user.id
 
 
+def test_distillation_uses_shared_daily_budget_without_individual_money_cap(
+    model_settings, engine, db, task_account
+):
+    chat_id, user_id = task_account
+    style = Task(user_id=user_id, kind="style_distill", source="web", status="running")
+    db.add(style)
+    db.commit()
+    with pytest.raises(BudgetExceeded):
+        model_calls._reserve(model_settings, engine, chat_id, user_id, Decimal("0.20"))
+    model_calls._reserve(model_settings, engine, style.id, user_id, Decimal("0.20"))
+    with pytest.raises(BudgetExceeded, match="Daily"):
+        model_calls._reserve(model_settings, engine, style.id, user_id, Decimal("0.35"))
+    db.expire_all()
+    day = db.scalar(select(BudgetDay))
+    assert day.reserved_usd == Decimal("0.20")
+    assert len(db.scalars(select(ModelCall)).all()) == 1
+
+
 def response(*, reply="可以，我们慢慢写。", status="completed", usage=True):
     return SimpleNamespace(
         status=status,

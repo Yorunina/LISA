@@ -51,7 +51,7 @@ const taskErrors: Record<string, string> = {
   project_completed: '作品已完结，这项尚未开始的续写已取消。',
   new_user_message: '收到新消息，原自主安排已取消，待交流后重新安排。',
 };
-const money = (value: string | number) => `$${Number(value || 0).toFixed(6)}`;
+const money = (value: string | number) => `¥${Number(value || 0).toFixed(6)}`;
 const scheduleNames: Record<Schedule['status'], string> = { no_plan: '暂无后续计划', scheduled: '已有后续计划', paused: '自主续写已暂停', waiting: '等待当前任务处理', disabled: '自主续写尚未开启' };
 const pauseReasons: Record<string, string> = {
   inactive: '连续 24 小时未在 QQ 回复，自主续写已暂停。新的 QQ 回复后再按条件安排。',
@@ -76,7 +76,7 @@ function ScheduleNote({ schedule, failed, projectId }: { schedule: Schedule | nu
   </div>;
 }
 
-export function Works({ ref }: { ref: Ref<WorksHandle> }) {
+export function Works({ ref, onStyles }: { ref: Ref<WorksHandle>; onStyles: (projectId: string) => void }) {
   const [project, setProject] = useState<Project | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [finishingTasks, setFinishingTasks] = useState<FinishingTask[]>([]);
@@ -367,6 +367,7 @@ export function Works({ ref }: { ref: Ref<WorksHandle> }) {
         <p>{project.is_current ? '当前作品' : '正在查看旧作'} · {project.completed ? '已完结，仍可阅读和局部修订。' : '未完结'}</p>
         <div className="button-row">
           {(!project.is_current || project.completed) && <button className="secondary" disabled={busy} onClick={() => void changeProjectState('activate')}>{project.completed ? '继续创作' : '设为当前作品'}</button>}
+          <button className="text-button" disabled={busy} onClick={() => requestLeave(() => onStyles(project.id))}>作品写作风格</button>
           <button className="text-button" disabled={busy || !chapters.length} onClick={() => void exportBody()}>导出正文</button>
           {!project.completed && <button className="text-button" disabled={busy} onClick={() => void changeProjectState('complete')}>标记完结</button>}
         </div>

@@ -1,5 +1,26 @@
 export type User = { id: string; username: string };
 
+export type StyleKind = 'personality' | 'writing';
+export type StyleReport = Record<string, unknown>;
+export type StyleVersion = { id: string; version: number; prompt: string; summary: string; report: StyleReport; created_at: string; source_task_id?: string | null };
+export type StyleProfile = { id: string; kind: StyleKind; name: string; latest_version: number; versions: StyleVersion[] };
+export type StyleApplications = { personality: string | null; writing: string | null };
+export type StyleLibrary = { profiles: StyleProfile[]; applications: StyleApplications };
+export type WritingStyle = { override_version_id: string | null; effective_version_id: string | null; effective_profile_name: string | null; prompt: string; source: 'override' | 'default' | 'none' };
+
+// Encode bytes rather than decoding in the browser so the parser can identify UTF-8/GB18030.
+export async function styleFile(file: File): Promise<{ name: string; content_base64: string }> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 8192) binary += String.fromCharCode(...bytes.subarray(index, index + 8192));
+  return { name: file.name, content_base64: btoa(binary) };
+}
+
+export function abandonStyleCorpusOnClose(id: string) {
+  // Best effort on tab close; server expiry also covers disconnected clients.
+  void fetch(`/api/style/corpora/${id}`, { method: 'DELETE', credentials: 'same-origin', headers: { 'X-LISA-Request': '1' }, keepalive: true }).catch(() => {});
+}
+
 export class ApiError extends Error {
   constructor(message: string, public status: number) {
     super(message);
