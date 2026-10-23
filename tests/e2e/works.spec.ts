@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
-import type { Character } from '../web/characters'
+import type { Character } from '../../web/characters'
 import { readFile } from 'node:fs/promises'
 
 const doc = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] })

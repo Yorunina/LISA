@@ -6,7 +6,7 @@ if (!python || !process.env.LISA_TEST_INVITES) {
 }
 
 export default defineConfig({
-  testDir: './e2e',
+  testDir: './tests/e2e',
   fullyParallel: false,
   workers: 1,
   retries: 0,
