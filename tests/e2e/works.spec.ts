@@ -635,7 +635,7 @@ test('scheduled continuation stays distinct from running work and a 24-hour paus
   await expect(page.getByRole('button', { name: '开始写作', exact: true })).toBeEnabled()
 })
 
-test('other-project plans and schedule failures never replace the viewed work or interrupt its editor', async ({ page }) => {
+test('other-project plans and schedule failures never replace the viewed work or interrupt its editor', async ({ page }, testInfo) => {
   await page.clock.install()
   const state = await stubStudy(page, true)
   const note = page.getByRole('status', { name: '自主续写状态' })
@@ -659,8 +659,13 @@ test('other-project plans and schedule failures never replace the viewed work or
   state.scheduleFails = false
   state.schedule = { ...schedule(), status: 'paused', pause_reason: 'limit_reached' }
   await page.clock.fastForward(5_100)
-  await expect(note).toContainText('这一轮不再安排新的自主续写')
+  await expect(note).toContainText('等待你对作品的进一步反馈')
+  await expect(note).toContainText('普通闲聊不会重置次数')
   await expect(note).not.toContainText('24 小时')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await note.scrollIntoViewIfNeeded()
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-creative-feedback-limit.png'), fullPage: true })
   state.schedule = schedule()
   await page.clock.fastForward(5_100)
   await expect(note).toContainText('暂无后续计划')

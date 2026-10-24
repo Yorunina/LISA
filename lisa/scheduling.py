@@ -38,24 +38,72 @@ def _current_project(db: Session, user_id: UUID) -> Project | None:
 
 
 def _remaining_scenes(
-    db: Session, settings: Settings, user: Account, *, exclude_task: UUID | None = None
+    db: Session,
+    settings: Settings,
+    user: Account,
+    project: Project | None,
+    *,
+    exclude_task: UUID | None = None,
 ) -> int:
-    if user.last_active_at is None:
+    if project is None:
         return settings.autonomous_scene_limit
     query = (
         select(func.count())
         .select_from(Task)
         .where(
             Task.user_id == user.id,
+            Task.project_id == project.id,
             Task.kind == "scene",
             Task.source == "autonomous",
-            or_(Task.created_at >= user.last_active_at, Task.started_at >= user.last_active_at),
         )
     )
+    if project.last_creative_feedback_at is not None:
+        feedback_at = project.last_creative_feedback_at
+        query = query.where(
+            or_(
+                Task.created_at >= feedback_at,
+                Task.started_at >= feedback_at,
+                Task.finished_at >= feedback_at,
+                Task.status.in_(["pending", "running"]),
+            )
+        )
     if exclude_task is not None:
         query = query.where(Task.id != exclude_task)
-    # Every attempt counts, including cancelled tasks and legacy QQ-agreed scenes.
+    # Feedback cannot acknowledge unfinished output; keep in-flight attempts in the allowance.
+    # Without a recorded feedback boundary, count existing history rather than grant a reset.
     return max(0, settings.autonomous_scene_limit - db.scalar(query))
+
+
+def record_creative_feedback(
+    db: Session,
+    task: Task,
+    source_ids: list[UUID],
+    evidence: str,
+) -> None:
+    """Only adopted QQ understanding with a literal current-user source can advance the boundary."""
+    if not evidence.strip() or task.kind != "chat" or task.source != "qq":
+        return
+    project = db.get(Project, task.project_id) if task.project_id else None
+    if project is None or project.user_id != task.user_id or task.status != "completed":
+        return
+    messages = db.scalars(
+        select(ChatMessage).where(
+            ChatMessage.id.in_(source_ids),
+            ChatMessage.task_id == task.id,
+            ChatMessage.user_id == task.user_id,
+            ChatMessage.role == "user",
+            ChatMessage.deleted_at.is_(None),
+            ChatMessage.context_excluded.is_(False),
+        )
+    )
+    # A repeated quote in later casual chat must not move the feedback boundary forward.
+    feedback_at = min(
+        (message.sent_at for message in messages if evidence in message.content), default=None
+    )
+    if feedback_at is not None and (
+        project.last_creative_feedback_at is None or feedback_at > project.last_creative_feedback_at
+    ):
+        project.last_creative_feedback_at = feedback_at
 
 
 def _pause_reason(
@@ -184,7 +232,7 @@ def plan_after_chat(
     if task.kind != "chat" or task.source != "qq" or task.status != "completed":
         return None
     project = _current_project(db, user.id)
-    remaining = _remaining_scenes(db, settings, user)
+    remaining = _remaining_scenes(db, settings, user, project)
     if _pause_reason(db, user, project, now, remaining) is not None:
         return None
     if project.id != task.project_id:
@@ -238,7 +286,7 @@ def enqueue_due_plans(
         if plan.status != "pending":
             continue
         project = _current_project(db, user.id)
-        remaining = _remaining_scenes(db, settings, user)
+        remaining = _remaining_scenes(db, settings, user, project)
         if (
             _pause_reason(db, user, project, now, remaining) is not None
             or project.id != plan.project_id
@@ -274,7 +322,7 @@ def autonomous_start_allowed(
     now = now or datetime.now(UTC)
     user = db.get(Account, task.user_id)
     project = _current_project(db, user.id)
-    remaining = _remaining_scenes(db, settings, user, exclude_task=task.id)
+    remaining = _remaining_scenes(db, settings, user, project, exclude_task=task.id)
     if (
         _pause_reason(db, user, project, now, remaining) is not None
         or project.id != task.project_id
@@ -298,14 +346,14 @@ def schedule_view(
     db: Session, settings: Settings, user: Account, now: datetime | None = None
 ) -> ScheduleView:
     now = now or datetime.now(UTC)
-    remaining = _remaining_scenes(db, settings, user)
+    project = _current_project(db, user.id)
+    remaining = _remaining_scenes(db, settings, user, project)
     view = ScheduleView(
         enabled=settings.autonomy_enabled, status="no_plan", remaining_scenes=remaining
     )
     if not settings.autonomy_enabled:
         view.status = "disabled"
         return view
-    project = _current_project(db, user.id)
     reason = _pause_reason(db, user, project, now, remaining)
     if reason:
         view.status, view.pause_reason = "paused", reason

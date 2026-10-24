@@ -45,7 +45,7 @@ from lisa.models import (
 from lisa.queue import enqueue_chat
 from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
-from lisa.scheduling import discard_pending_plans, plan_after_chat
+from lisa.scheduling import discard_pending_plans, plan_after_chat, record_creative_feedback
 from lisa.settings import Settings
 from lisa.sharing import chapter_link, sharing_context
 from lisa.vision import (
@@ -385,6 +385,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             if context_limited:
                 reply += "\n\n作品资料超过本轮对话的开发输入上限，创作修改或写作任务请在网页操作。"
             if isinstance(decision, Dialogue):
+                record_creative_feedback(db, task, source_ids, decision.feedback_evidence)
                 notice = apply_decision(db, user, project_id, current_texts, decision)
                 if notice:
                     reply += "\n\n" + notice

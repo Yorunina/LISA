@@ -62,7 +62,7 @@ const pauseReasons: Record<string, string> = {
   no_project: '尚未选定可继续的当前作品。',
   no_agreement: '当前作品还没有已确认的创作共识。',
   completed: '当前作品已完结，不再自主续写。',
-  limit_reached: '这一轮不再安排新的自主续写，等待新的交流。',
+  limit_reached: '本作品的累计自主续写已达上限，等待你对作品的进一步反馈；普通闲聊不会重置次数。',
   account_unavailable: '账号当前不可用于自主续写。',
 };
 

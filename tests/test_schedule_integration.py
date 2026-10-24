@@ -16,8 +16,17 @@ from test_works import project as project
 from lisa.author import execute_author
 from lisa.chat import execute_chat
 from lisa.model_calls import ModelBusy
-from lisa.models import Account, ActivityPlan, Chapter, OutboundMessage, Project, QQBinding, Task
-from lisa.scheduling import enqueue_due_plans
+from lisa.models import (
+    Account,
+    ActivityPlan,
+    Chapter,
+    ChatMessage,
+    OutboundMessage,
+    Project,
+    QQBinding,
+    Task,
+)
+from lisa.scheduling import enqueue_due_plans, schedule_view
 from lisa.works import create_writing_task
 
 GOAL = "写雨中发现信件的一个短场景。"
@@ -109,6 +118,192 @@ async def test_chat_saves_agreement_before_planning_and_creates_no_future_task(
     assert plan.goal == GOAL and plan.due_at > datetime.now(UTC)
     assert list(db.scalars(select(Task).where(Task.kind == "scene"))) == []
     assert enqueue_due_plans(db, autonomy_settings) == 0
+
+
+@pytest.mark.asyncio
+async def test_casual_chat_keeps_exhausted_allowance_until_grounded_creative_feedback(
+    autonomy_settings,
+    engine,
+    db,
+    owner,
+    project,
+):
+    work = db.get(Project, UUID(project["id"]))
+    work.agreement = GOAL
+    earlier = datetime.now(UTC) - timedelta(hours=1)
+    db.add_all(
+        [
+            Task(
+                user_id=owner,
+                project_id=work.id,
+                kind="scene",
+                source="autonomous",
+                status="completed",
+                created_at=earlier,
+                finished_at=earlier,
+            ),
+            Task(
+                user_id=owner,
+                project_id=work.id,
+                kind="scene",
+                source="autonomous",
+                status="failed",
+                created_at=earlier,
+                finished_at=earlier,
+            ),
+        ]
+    )
+    db.commit()
+    casual = "今天又看了一部慢节奏的电影。"
+    chat_id = receive(db, owner, "casual-no-reset", content=casual)
+    await execute_chat(
+        autonomy_settings,
+        engine,
+        chat_id,
+        generate=AsyncMock(
+            return_value=response(
+                opinions=[
+                    {
+                        "field": "preferences",
+                        "text": "可能喜欢慢节奏",
+                        "replaces": "",
+                        "evidence": casual,
+                    }
+                ],
+            )
+        ),
+    )
+    db.expire_all()
+    user = db.get(Account, owner)
+    assert user.last_active_at > earlier
+    assert db.get(Project, work.id).last_creative_feedback_at is None
+    assert schedule_view(db, autonomy_settings, user).pause_reason == "limit_reached"
+    assert list(db.scalars(select(ActivityPlan))) == []
+
+    feedback = "上一段对白不错，继续这个方向。"
+    chat_id = receive(db, owner, "creative-reset", content=feedback)
+    await execute_chat(
+        autonomy_settings,
+        engine,
+        chat_id,
+        generate=AsyncMock(
+            return_value=response(
+                feedback_evidence=feedback,
+            )
+        ),
+    )
+    db.expire_all()
+    work = db.get(Project, work.id)
+    source = db.scalar(
+        select(ChatMessage).where(
+            ChatMessage.task_id == chat_id,
+            ChatMessage.role == "user",
+        )
+    )
+    assert work.last_creative_feedback_at == source.sent_at
+    assert schedule_view(db, autonomy_settings, db.get(Account, owner)).remaining_scenes == 2
+    plan = db.scalar(select(ActivityPlan).where(ActivityPlan.status == "pending"))
+    assert plan is not None
+    # A replay of an already adopted chat cannot grant another reset or duplicate the plan.
+    await execute_chat(autonomy_settings, engine, chat_id)
+    assert enqueue_due_plans(db, autonomy_settings, now=plan.due_at) == 1
+    db.commit()
+    await execute_author(
+        autonomy_settings, engine, plan.task_id, generate=AsyncMock(return_value=RESULT)
+    )
+    db.expire_all()
+    assert db.get(Task, plan.task_id).status == "completed"
+    assert schedule_view(db, autonomy_settings, db.get(Account, owner)).remaining_scenes == 1
+
+
+@pytest.mark.asyncio
+async def test_ungrounded_or_failed_understanding_cannot_record_creative_feedback(
+    autonomy_settings,
+    engine,
+    db,
+    owner,
+    project,
+):
+    work_id = UUID(project["id"])
+    db.get(Project, work_id).agreement = GOAL
+    db.commit()
+    chat_id = receive(db, owner, "invented-feedback", content="今天吃了面。")
+    await execute_chat(
+        autonomy_settings,
+        engine,
+        chat_id,
+        generate=AsyncMock(
+            return_value=response(
+                feedback_evidence="上一段很好，继续。",
+                scene_plan=None,
+            )
+        ),
+    )
+    db.expire_all()
+    assert db.get(Project, work_id).last_creative_feedback_at is None
+    chat_id = receive(db, owner, "failed-feedback", content="上一段很好，继续。")
+    await execute_chat(
+        autonomy_settings,
+        engine,
+        chat_id,
+        generate=AsyncMock(side_effect=ValueError("synthetic invalid result")),
+    )
+    db.expire_all()
+    assert db.get(Task, chat_id).status == "failed"
+    assert db.get(Project, work_id).last_creative_feedback_at is None
+
+
+@pytest.mark.asyncio
+async def test_feedback_uses_its_own_message_time_in_a_mixed_delayed_batch(
+    autonomy_settings,
+    engine,
+    db,
+    owner,
+    project,
+):
+    work_id = UUID(project["id"])
+    now = datetime.now(UTC)
+    old_feedback_at = now - timedelta(hours=2)
+    newer_feedback_at = now - timedelta(hours=1)
+    work = db.get(Project, work_id)
+    work.agreement = GOAL
+    work.last_creative_feedback_at = newer_feedback_at
+    db.commit()
+    feedback = "旧的那一段可以。"
+    first = receive(db, owner, "old-feedback", content=feedback, sent_at=old_feedback_at)
+    second = receive(
+        db, owner, "new-casual", content=f"刚吃完饭，想起电影里的一句台词：{feedback}", sent_at=now
+    )
+    assert first == second
+    await execute_chat(
+        autonomy_settings,
+        engine,
+        first,
+        generate=AsyncMock(
+            return_value=response(
+                feedback_evidence=feedback,
+                scene_plan=None,
+            )
+        ),
+    )
+    db.expire_all()
+    assert db.get(Account, owner).last_active_at == now
+    assert db.get(Project, work_id).last_creative_feedback_at == newer_feedback_at
+    # With no newer feedback boundary, only the quoted old source supplies the time.
+    db.get(Project, work_id).last_creative_feedback_at = None
+    db.commit()
+    from lisa.scheduling import record_creative_feedback
+
+    sources = list(
+        db.scalars(
+            select(ChatMessage.id).where(
+                ChatMessage.task_id == first,
+                ChatMessage.role == "user",
+            )
+        )
+    )
+    record_creative_feedback(db, db.get(Task, first), sources, feedback)
+    assert db.get(Project, work_id).last_creative_feedback_at == old_feedback_at
 
 
 @pytest.mark.asyncio

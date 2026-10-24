@@ -273,6 +273,7 @@ class Project(Base):
     agreement: Mapped[str] = mapped_column(Text, default="", server_default="")
     preferences: Mapped[str] = mapped_column(Text, default="", server_default="")
     tentative: Mapped[str] = mapped_column(Text, default="", server_default="")
+    last_creative_feedback_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     index_revision: Mapped[int] = mapped_column(default=1, server_default="1")
     retrieval_config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

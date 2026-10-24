@@ -44,6 +44,7 @@ class Dialogue(Conversation):
     opinions: list[Opinion] = Field(max_length=4)
     commission: Commission | None
     scene_plan: ScenePlanProposal | None = None
+    feedback_evidence: str = Field(default="", max_length=1000)
 
 
 async def generate_conversation(settings, engine, task_id, user_id, instructions, messages):
@@ -102,6 +103,10 @@ def creative_context(project: Project, *, autonomy_enabled: bool = False) -> str
         "agreement明确共识，preferences推测偏好，tentative备选；后两者不能覆盖前两者。"
         "replaces是被新要求替代的原文，无则空。单次要求仅放commission.goal。"
         "普通闲聊/模糊赞同不算共识，默认opinions=[]、commission=null。"
+        "feedback_evidence仅逐字引用本批用户对当前这部作品的明确反馈："
+        "评价或纠正已写内容、确认或调整创作方向、明确要求继续写或重写；没有则空字符串。"
+        "普通闲聊、一般题材兴趣、推测偏好、假设备选、只索要链接及其他作品的反馈不算。"
+        "此依据只用于累计推进计数，不代表新的创作共识或续写委托。"
         "有共识且明确让写才requested=true；新确认共识可requested=false委托一次。"
         "scene仅一个短场景（日记则一小段LISA的虚拟生活）；"
         "rewrite须target_text引用原文，否则引导网页选片段。"

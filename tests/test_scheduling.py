@@ -14,6 +14,7 @@ from lisa.scheduling import (
     discard_pending_plans,
     enqueue_due_plans,
     plan_after_chat,
+    record_creative_feedback,
     schedule_view,
 )
 
@@ -256,7 +257,88 @@ def test_attempt_limit_counts_cancelled_failed_and_late_started_legacy_tasks(
     assert view.remaining_scenes == 0 and view.pause_reason == "limit_reached"
     user.last_active_at = now + timedelta(minutes=1)
     db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 0
+    project.last_creative_feedback_at = now + timedelta(seconds=1, microseconds=1)
+    db.flush()
     assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 2
+
+
+def test_feedback_and_attempt_allowance_stay_with_each_work(db, autonomous_settings, scene_context):
+    user, project, chat, now = scene_context
+    db.add_all(
+        [
+            Task(
+                user_id=user.id,
+                project_id=project.id,
+                kind="scene",
+                source="autonomous",
+                status="completed",
+                created_at=now - timedelta(minutes=10),
+            ),
+            Task(
+                user_id=user.id,
+                project_id=project.id,
+                kind="scene",
+                source="autonomous",
+                status="completed",
+                created_at=now - timedelta(minutes=5),
+            ),
+        ]
+    )
+    project.is_current = False
+    db.flush()
+    other = Project(user_id=user.id, title="新作品", agreement="新作的基本共识")
+    db.add(other)
+    db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 2
+    sources = list(db.scalars(select(ChatMessage).where(ChatMessage.task_id == chat.id)))
+    record_creative_feedback(db, chat, [item.id for item in sources], "按约定继续吧")
+    assert project.last_creative_feedback_at == now
+    assert other.last_creative_feedback_at is None
+    other.is_current = False
+    db.flush()
+    project.is_current = True
+    db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 2
+    project.last_creative_feedback_at = None
+    db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 0
+
+
+def test_feedback_keeps_unfinished_and_later_finished_attempts_in_allowance(
+    db,
+    autonomous_settings,
+    scene_context,
+):
+    user, project, _, now = scene_context
+    project.last_creative_feedback_at = now
+    tasks = [
+        Task(
+            user_id=user.id,
+            project_id=project.id,
+            kind="scene",
+            source="autonomous",
+            status="running",
+            created_at=now - timedelta(minutes=3),
+            started_at=now - timedelta(minutes=2),
+        ),
+        Task(
+            user_id=user.id,
+            project_id=project.id,
+            kind="scene",
+            source="autonomous",
+            status="completed",
+            created_at=now - timedelta(minutes=3),
+            started_at=now - timedelta(minutes=2),
+            finished_at=now + timedelta(seconds=1),
+        ),
+    ]
+    db.add_all(tasks)
+    db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 0
+    tasks[0].status, tasks[0].finished_at = "cancelled", now + timedelta(seconds=2)
+    db.flush()
+    assert schedule_view(db, autonomous_settings, user, now).remaining_scenes == 0
 
 
 def test_new_event_cancels_only_unstarted_autonomous_work(db, autonomous_settings, scene_context):
