@@ -5,21 +5,25 @@ from datetime import UTC, datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, or_, select, update
-from sqlalchemy.orm import Session
+from sqlalchemy import and_, func, or_, select, true, update
+from sqlalchemy.orm import Session, aliased
 
 from lisa.auth import DB, current_user
 from lisa.models import (
     Account,
     ChapterVersion,
     ChatMessage,
+    IndexChunk,
+    IndexState,
     Memory,
     MemoryUse,
     OutboundMessage,
     Project,
 )
+from lisa.retrieval import embedding_space, indexing_enabled
+from lisa.settings import Settings
 from lisa.works import document_text, lock_account, require_project
 
 router = APIRouter(prefix="/api", tags=["memory"])
@@ -181,6 +185,159 @@ def _message_view(item: ChatMessage) -> dict:
         key: getattr(item, key)
         for key in ("id", "role", "content", "kind", "sent_at", "context_excluded")
     } | {"content": message_text(item)}
+
+
+def _map_chain(items: list[Memory], key, relation_type: str, edges: set[tuple[str, str, str]]):
+    """Add sparse, explainable links between adjacent members of a group."""
+    groups: dict[object, list[Memory]] = {}
+    for item in items:
+        value = key(item)
+        if value is not None:
+            groups.setdefault(value, []).append(item)
+    for members in groups.values():
+        members.sort(key=lambda item: (item.occurred_at or item.updated_at, str(item.id)))
+        for left, right in zip(members, members[1:]):
+            edges.add((str(left.id), str(right.id), relation_type))
+
+
+def _semantic_map_edges(
+    db: Session, settings: Settings, user_id: UUID, items: list[Memory]
+) -> list[dict]:
+    """Read a few current vector neighbors without persisting derived relations."""
+    if len(items) < 2 or not indexing_enabled(settings):
+        return []
+    ids = [item.id for item in items]
+    left_state, right_state = aliased(IndexState), aliased(IndexState)
+    left_chunk, right_chunk = aliased(IndexChunk), aliased(IndexChunk)
+    left_memory, right_memory = aliased(Memory), aliased(Memory)
+    distance = left_chunk.embedding.cosine_distance(right_chunk.embedding)
+    space = embedding_space(settings)
+    rows = db.execute(
+        select(left_state.source_id, right_state.source_id, func.min(distance).label("distance"))
+        .select_from(left_state)
+        .join(left_chunk, left_chunk.state_id == left_state.id)
+        .join(left_memory, left_memory.id == left_state.source_id)
+        .join(right_state, true())
+        .join(right_chunk, right_chunk.state_id == right_state.id)
+        .join(right_memory, right_memory.id == right_state.source_id)
+        .where(
+            left_state.source_kind == "memory",
+            right_state.source_kind == "memory",
+            left_state.user_id == user_id,
+            right_state.user_id == user_id,
+            left_state.source_id.in_(ids),
+            right_state.source_id.in_(ids),
+            left_state.source_id < right_state.source_id,
+            left_state.space == space,
+            right_state.space == space,
+            left_chunk.space == space,
+            right_chunk.space == space,
+            left_memory.user_id == user_id,
+            right_memory.user_id == user_id,
+            left_memory.active.is_(True),
+            right_memory.active.is_(True),
+            left_memory.revision == left_state.revision,
+            right_memory.revision == right_state.revision,
+            left_memory.revision == left_chunk.revision,
+            right_memory.revision == right_chunk.revision,
+        )
+        .group_by(left_state.source_id, right_state.source_id)
+        .having(func.min(distance) <= 0.42)
+        .order_by(func.min(distance), left_state.source_id, right_state.source_id)
+        .limit(min(240, len(items) * 3))
+    )
+    return [
+        {
+            "source": str(source_id),
+            "target": str(target_id),
+            "type": "semantic",
+            "distance": round(float(value), 4),
+        }
+        for source_id, target_id, value in rows
+    ]
+
+
+@router.get("/memory-map")
+def memory_map(
+    request: Request,
+    db: DB,
+    user: User,
+    query: str = "",
+    project_id: UUID | None = None,
+    kind: EditableMemoryKind | None = None,
+    limit: int = Query(120, ge=1, le=200),
+):
+    """Return a read-only memory constellation built from current records and indexes."""
+    statement = select(Memory).where(Memory.user_id == user.id, Memory.active.is_(True))
+    if query:
+        statement = statement.where(Memory.content.contains(query, autoescape=True))
+    if project_id is not None:
+        statement = statement.where(
+            or_(Memory.project_id.is_(None), Memory.project_id == project_id)
+        )
+    if kind is not None:
+        statement = statement.where(Memory.kind == kind)
+    items = list(
+        db.scalars(
+            statement.order_by(
+                Memory.occurred_at.asc().nulls_last(), Memory.updated_at.asc(), Memory.id
+            ).limit(limit)
+        )
+    )
+    project_titles = {
+        item.id: item.title
+        for item in db.scalars(
+            select(Project).where(
+                Project.user_id == user.id,
+                Project.id.in_({item.project_id for item in items if item.project_id}),
+            )
+        )
+    }
+    nodes = []
+    for item in items:
+        node = _memory_view(db, item)
+        node.update(
+            {
+                "label": item.content[:96],
+                "project_title": project_titles.get(item.project_id),
+            }
+        )
+        nodes.append(node)
+
+    edge_keys: set[tuple[str, str, str]] = set()
+    _map_chain(
+        items,
+        lambda item: (
+            ("message", item.source_message_id)
+            if item.source_message_id
+            else ("chapter", item.source_chapter_id, item.source_version)
+            if item.source_chapter_id
+            else None
+        ),
+        "source",
+        edge_keys,
+    )
+    _map_chain(items, lambda item: item.project_id, "project", edge_keys)
+    _map_chain(
+        items,
+        lambda item: item.occurred_at.date()
+        if item.kind == "life" and item.occurred_at
+        else None,
+        "timeline",
+        edge_keys,
+    )
+    edges = [
+        {"source": source, "target": target, "type": relation}
+        for source, target, relation in edge_keys
+    ]
+    semantic = _semantic_map_edges(db, request.app.state.settings, user.id, items)
+    known = {(edge["source"], edge["target"]) for edge in edges}
+    edges.extend(edge for edge in semantic if (edge["source"], edge["target"]) not in known)
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "semantic_enabled": indexing_enabled(request.app.state.settings),
+    }
 
 
 @router.get("/memories")

@@ -40,6 +40,10 @@ async function stubMemory(page: Page) {
       const offset = Number(url.searchParams.get('offset') || 0)
       return route.fulfill({ json: items.slice(offset, offset + Number(url.searchParams.get('limit') || 100)) })
     }
+    if (path === '/memory-map' && req.method() === 'GET') {
+      const items = state.memories.filter(item => item.content.includes(url.searchParams.get('query') || '') && (!url.searchParams.get('kind') || item.kind === url.searchParams.get('kind')))
+      return route.fulfill({ json: { nodes: items, edges: items.length > 1 ? [{ source: items[0].id, target: items[1].id, type: 'semantic' }] : [], semantic_enabled: true } })
+    }
     if (path === '/memories' && req.method() === 'POST') {
       if (state.saveFails) return route.fulfill({ status: 503, json: { detail: '合成保存失败，请重试。' } })
       state.saves.push(body)
@@ -87,6 +91,15 @@ async function stubMemory(page: Page) {
   await expect(page.getByText('喜欢在下雨的晚上读书。', { exact: true })).toBeVisible()
   return state
 }
+
+test('memory map is a read-only visual view and opens the existing editor', async ({ page }) => {
+  await stubMemory(page)
+  await page.getByRole('tab', { name: '记忆地图' }).click()
+  await expect(page.getByRole('heading', { name: '记忆地图' })).toBeVisible()
+  await expect(page.getByText('1 条记忆', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /喜欢在下雨的晚上读书/ }).click()
+  await expect(page.getByLabel('记忆内容', { exact: true })).toHaveValue('喜欢在下雨的晚上读书。')
+})
 
 test('memory correction and use restrictions require save, failed leave preserves input, and source remains viewable', async ({ page }, testInfo) => {
   const state = await stubMemory(page)

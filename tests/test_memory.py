@@ -108,6 +108,69 @@ def test_manual_memory_validation_filters_and_epoch(client, db, owner):
     assert db.get(Account, owner).memory_revision == 2
 
 
+def test_memory_map_is_read_only_filtered_and_uses_sparse_explainable_edges(client, db, owner):
+    project = Project(user_id=owner, title="雨夜项目")
+    source = ChatMessage(
+        user_id=owner,
+        role="user",
+        content="我想把雨夜写进故事。",
+        sent_at=datetime(2026, 10, 20, tzinfo=UTC),
+    )
+    db.add_all([project, source])
+    db.flush()
+    db.add_all(
+        [
+            Memory(
+                user_id=owner,
+                project_id=project.id,
+                source_message_id=source.id,
+                kind="preference",
+                content="喜欢雨夜的安静气氛。",
+                allow_chat=True,
+            ),
+            Memory(
+                user_id=owner,
+                project_id=project.id,
+                source_message_id=source.id,
+                kind="fact",
+                content="雨夜是这部作品的 recurring 意象。",
+                allow_chat=True,
+            ),
+            Memory(
+                user_id=owner,
+                kind="life",
+                life_kind="event",
+                occurred_at=datetime(2026, 10, 20, 18, tzinfo=UTC),
+                content="LISA 在雨夜整理了旧书。",
+                allow_chat=True,
+            ),
+            Memory(
+                user_id=owner,
+                kind="life",
+                life_kind="dream",
+                occurred_at=datetime(2026, 10, 20, 21, tzinfo=UTC),
+                content="LISA 梦见雨水落在书页上。",
+                allow_chat=True,
+            ),
+        ]
+    )
+    db.commit()
+
+    response = client.get("/api/memory-map")
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["nodes"]) == 4
+    assert {edge["type"] for edge in payload["edges"]} >= {"source", "project", "timeline"}
+    assert payload["semantic_enabled"] is False
+
+    filtered = client.get("/api/memory-map", params={"project_id": str(project.id)})
+    assert filtered.status_code == 200
+    assert len(filtered.json()["nodes"]) == 4
+    assert all(
+        node["project_id"] in (None, str(project.id)) for node in filtered.json()["nodes"]
+    )
+
+
 def test_memories_and_sources_are_account_isolated(client, db, owner, conversation):
     other = Account(username="other_reader", password_hash="unused")
     db.add(other)

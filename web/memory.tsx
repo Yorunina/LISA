@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { request } from './api';
 import { ErrorNotice } from './ui';
 
@@ -11,6 +11,8 @@ type MemoryItem = {
   source_chapter_id: string | null; source_version: number | null;
 };
 type ChatMessage = { id: string; role: string; content: string; sent_at: string; context_excluded: boolean };
+type MemoryMapEdge = { source: string; target: string; type: 'source' | 'project' | 'timeline' | 'semantic'; distance?: number };
+type MemoryMapData = { nodes: MemoryItem[]; edges: MemoryMapEdge[]; semantic_enabled: boolean };
 type Source = { status: 'available' | 'deleted' | 'manual'; message: ChatMessage | null }
   | { status: 'chapter'; chapter: { id: string; title: string; version: number; content: string } };
 type Draft = Pick<MemoryItem, 'project_id' | 'kind' | 'content' | 'basis' | 'allow_chat' | 'allow_writing' | 'life_kind' | 'occurred_at'>;
@@ -29,8 +31,52 @@ const localTime = (value: string) => {
 };
 const sourceLabel = (item: MemoryItem) => item.source_chapter_id ? `来自日记 · 版本 ${item.source_version}` : item.source_message_id ? item.source_deleted ? '原始聊天已删除' : '来自原始聊天' : '手动添加';
 
+const mapKinds: MemoryKind[] = ['fact', 'preference', 'life', 'inference', 'fiction'];
+const mapColors: Record<MemoryKind, string> = { fact: '#426653', preference: '#9a6b35', life: '#6a5a8d', inference: '#8d5848', fiction: '#477783' };
+const mapEdgeColors: Record<MemoryMapEdge['type'], string> = { source: '#426653', project: '#9a6b35', timeline: '#6a5a8d', semantic: '#9a9d8e' };
+
+function MemoryMap({ data, projects, onOpen }: { data: MemoryMapData; projects: { id: string; title: string }[]; onOpen: (item: MemoryItem) => void }) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const positions = new Map<string, { x: number; y: number }>();
+  const width = 1000;
+  const height = 570;
+  const grouped = new Map<MemoryKind, MemoryItem[]>();
+  for (const kind of mapKinds) grouped.set(kind, []);
+  for (const item of data.nodes) grouped.get(item.kind)?.push(item);
+  mapKinds.forEach((kind, band) => {
+    const items = grouped.get(kind) ?? [];
+    items.forEach((item, index) => {
+      const x = items.length === 1 ? width / 2 : 72 + (index * (width - 144)) / (items.length - 1);
+      positions.set(item.id, { x, y: 72 + band * 106 });
+    });
+  });
+  const selected = data.nodes.find(item => item.id === selectedId) ?? null;
+  const projectName = (id: string | null) => id ? projects.find(project => project.id === id)?.title ?? '作品记忆' : '共同记忆';
+  function activate(item: MemoryItem) { setSelectedId(item.id); onOpen(item); }
+  function handleKey(event: ReactKeyboardEvent<SVGCircleElement>, item: MemoryItem) {
+    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(item); }
+  }
+  return <section className="memory-map" aria-labelledby="memory-map-title">
+    <div className="memory-map-intro"><div><h2 id="memory-map-title">记忆地图</h2><p>位置按记忆类型排列，连线只表示来源、作品、时间或语义相近，不代表事实因果。</p></div><span className="memory-map-count">{data.nodes.length} 条记忆</span></div>
+    <div className="memory-map-canvas">
+      <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="memory-map-title memory-map-description">
+        <desc id="memory-map-description">按记忆类型排列的记忆节点及其来源、作品、时间和语义关系。</desc>
+        {data.edges.map((edge, index) => { const from = positions.get(edge.source); const to = positions.get(edge.target); if (!from || !to) return null; return <line key={`${edge.source}-${edge.target}-${edge.type}-${index}`} x1={from.x} y1={from.y} x2={to.x} y2={to.y} stroke={mapEdgeColors[edge.type]} strokeWidth={edge.type === 'semantic' ? 1 : 1.5} strokeDasharray={edge.type === 'semantic' ? '4 5' : undefined} opacity={edge.type === 'semantic' ? 0.6 : 0.72} />; })}
+        {data.nodes.map(item => { const position = positions.get(item.id)!; const active = selectedId === item.id; return <g key={item.id} className={`memory-map-node${active ? ' is-selected' : ''}`} transform={`translate(${position.x} ${position.y})`}>
+          <circle r={active ? 10 : 7} fill={mapColors[item.kind]} role="button" tabIndex={0} aria-label={`${kinds[item.kind]}：${item.content}`} onClick={() => activate(item)} onKeyDown={event => handleKey(event, item)} />
+          <circle r={active ? 16 : 12} fill="none" stroke={mapColors[item.kind]} opacity={active ? 0.55 : 0.18} pointerEvents="none" />
+          <text x="0" y="28" textAnchor="middle">{item.content.length > 18 ? `${item.content.slice(0, 18)}…` : item.content}</text>
+        </g>; })}
+      </svg>
+    </div>
+    <div className="memory-map-legend" aria-label="记忆地图图例">{mapKinds.map(kind => <span key={kind}><i style={{ backgroundColor: mapColors[kind] }} />{kinds[kind]}</span>)}<span><i className="memory-map-line" />来源 / 作品 / 时间</span><span><i className="memory-map-line dashed" />语义相近{data.semantic_enabled ? '' : '（索引未启用）'}</span></div>
+    {selected && <div className="memory-map-detail"><p className="memory-meta"><span className="memory-kind">{kinds[selected.kind]}</span><span>{selected.kind === 'life' ? 'LISA 的生活' : projectName(selected.project_id)}</span></p><p className="memory-content">{selected.content}</p><button className="text-button" onClick={() => onOpen(selected)}>打开记忆</button></div>}
+  </section>;
+}
+
 export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   const [tab, setTab] = useState<'memory' | 'chat'>('memory');
+  const [view, setView] = useState<'list' | 'map'>('list');
   const [memories, setMemories] = useState<MemoryItem[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [projects, setProjects] = useState<{ id: string; title: string }[]>([]);
@@ -42,6 +88,9 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [mapData, setMapData] = useState<MemoryMapData | null>(null);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [mapError, setMapError] = useState('');
   const [notice, setNotice] = useState('');
   const [editing, setEditing] = useState(false);
   const [selected, setSelected] = useState<MemoryItem | null>(null);
@@ -98,6 +147,15 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     return () => { active = false; };
   }, [tab, query, kind, offset, refresh]);
   useEffect(() => {
+    if (tab !== 'memory' || view !== 'map') return;
+    let active = true;
+    setMapLoading(true); setMapError('');
+    const params = new URLSearchParams({ query, limit: '120' });
+    if (kind) params.set('kind', kind);
+    request<MemoryMapData>(`/memory-map?${params}`).then(value => { if (active) setMapData(value); }).catch(cause => { if (active) setMapError(cause instanceof Error ? cause.message : '无法读取记忆地图。'); }).finally(() => { if (active) setMapLoading(false); });
+    return () => { active = false; };
+  }, [tab, view, query, kind, refresh]);
+  useEffect(() => {
     if (!dirty) return;
     const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
     window.addEventListener('beforeunload', warn);
@@ -105,7 +163,7 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   }, [dirty]);
   useEffect(() => {
     if (!editing) return;
-    const shortcut = (event: KeyboardEvent) => {
+    const shortcut = (event: globalThis.KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
         if (!busy && !modal) form.current?.requestSubmit();
@@ -124,7 +182,7 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     setEditing(true); setTab('memory'); setError(''); setNotice('');
   }
   function switchTab(next: 'memory' | 'chat') {
-    requestLeave(() => { setTab(next); setEditing(false); setSearch(''); setQuery(''); setOffset(0); setNotice(''); });
+    requestLeave(() => { setTab(next); setView('list'); setEditing(false); setSearch(''); setQuery(''); setOffset(0); setNotice(''); });
   }
   async function save() {
     if (!form.current?.reportValidity()) return false;
@@ -198,9 +256,10 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     </section>}
     {!editing && <>
       {tab === 'chat' && <div className="memory-guidance"><p>这里是 LISA 保存的聊天记录。删除原话不会删除已形成的独立记忆；希望 LISA 忘记的内容，请同时检查记忆条目。</p><details><summary>按时间范围清理聊天</summary><form className="chat-clear-form" onSubmit={event => { event.preventDefault(); if (new Date(start) >= new Date(end)) { setError('结束时间需要晚于开始时间。'); return; } setError(''); setModal({ kind: 'clear', start, end }); }}><div className="field"><label htmlFor="chat-start">开始时间（含）</label><input id="chat-start" type="datetime-local" required value={start} onChange={event => setStart(event.target.value)} /></div><div className="field"><label htmlFor="chat-end">结束时间（不含）</label><input id="chat-end" type="datetime-local" required value={end} onChange={event => setEnd(event.target.value)} /></div><p className="field-hint">时间按当前设备的本地时区。清理覆盖这一时间段内的全部聊天，不受下方搜索条件限制。</p><button className="secondary danger" disabled={busy}>清理此时间段</button></form></details></div>}
+      {tab === 'memory' && <div className="memory-view-tabs" role="tablist" aria-label="记忆呈现方式"><button role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'is-selected' : ''} onClick={() => setView('list')}>列表</button><button role="tab" aria-selected={view === 'map'} className={view === 'map' ? 'is-selected' : ''} onClick={() => setView('map')}>记忆地图</button></div>}
       <form className="memory-search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); setOffset(0); setRefresh(value => value + 1); }}><div className="field"><label htmlFor="memory-search">{tab === 'memory' ? '搜索记忆' : '搜索聊天'}</label><input id="memory-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder={tab === 'memory' ? '输入想找的内容' : '搜索原话'} /></div>{tab === 'memory' && <div className="field"><label htmlFor="memory-filter">类型筛选</label><select id="memory-filter" value={kind} onChange={event => { setKind(event.target.value); setOffset(0); }}><option value="">全部类型</option>{Object.entries(kinds).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div>}<button className="secondary" disabled={loading}>搜索</button></form>
       {tab === 'memory' && kind === 'life' && <p className="field-hint life-timeline-note">虚拟生活时间线 · 按发生时间由近到远排列。尚无成功分享记录，不代表事件尚未成立。</p>}
-      {loading ? <p className="loading-note" role="status">正在读取{tab === 'memory' ? '记忆' : '聊天'}…</p> : error ? <button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button> : count === 0 ? <div className="empty-paper"><h2>{query || kind || offset ? '没有符合条件的记录' : tab === 'memory' ? '还没有留下记忆' : '还没有聊天记录'}</h2><p>{tab === 'memory' ? '可以手动添加，也可以从原始聊天中留下一条记忆。' : '与 LISA 的日常交流，会保存在这里。'}</p></div> : <div className="memory-list" aria-label={tab === 'memory' ? '记忆列表' : '聊天列表'}>
+      {tab === 'memory' && view === 'map' ? mapLoading ? <p className="loading-note" role="status">正在读取记忆地图…</p> : mapError ? <><ErrorNotice message={mapError} /><button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button></> : !mapData?.nodes.length ? <div className="empty-paper"><h2>{query || kind ? '没有符合条件的记忆' : '还没有留下记忆'}</h2><p>记忆地图会根据已保存的记忆显示节点和关系。</p></div> : <MemoryMap data={mapData} projects={projects} onOpen={openEditor} /> : loading ? <p className="loading-note" role="status">正在读取{tab === 'memory' ? '记忆' : '聊天'}…</p> : error ? <button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button> : count === 0 ? <div className="empty-paper"><h2>{query || kind || offset ? '没有符合条件的记录' : tab === 'memory' ? '还没有留下记忆' : '还没有聊天记录'}</h2><p>{tab === 'memory' ? '可以手动添加，也可以从原始聊天中留下一条记忆。' : '与 LISA 的日常交流，会保存在这里。'}</p></div> : <div className="memory-list" aria-label={tab === 'memory' ? '记忆条目列表' : '聊天列表'}>
         {tab === 'memory' ? memories.map(item => <article className="memory-entry" key={item.id}>
           <div className="memory-meta"><span className="memory-kind">{kinds[item.kind]}</span><span>{item.kind === 'life' ? 'LISA 的生活' : item.project_id ? projects.find(project => project.id === item.project_id)?.title ?? '作品记忆' : '共同记忆'}</span><time dateTime={item.updated_at}>{time(item.updated_at)}</time></div>
           {item.kind === 'life' && <div className="life-meta"><span>{item.life_kind === 'dream' ? '做过的梦' : '已发生的虚拟事件'}</span>{item.occurred_at && <span>发生于 {time(item.occurred_at)}</span>}<span>{item.shared_at ? `已分享 · ${time(item.shared_at)}` : '尚无成功分享记录'}</span></div>}
@@ -208,7 +267,7 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
           <div className="memory-entry-footer"><p>{[item.allow_chat ? '用于交流' : '不用于交流', item.allow_writing ? '用于创作' : '不用于创作'].join(' · ')}<span>{sourceLabel(item)}</span></p><div className="memory-actions">{(item.source_chapter_id || item.source_message_id) && !item.source_deleted && <button className="text-button" disabled={busy} onClick={() => void viewSource(item)}>查看来源</button>}<button className="text-button" disabled={busy} onClick={() => openEditor(item)}>纠正与用途</button><button className="text-button danger" disabled={busy} onClick={() => { setError(''); setModal({ kind: 'memory-delete', item }); }}>删除记忆</button></div></div>
         </article>) : messages.map(item => <article className="memory-entry" key={item.id}><div className="memory-meta"><span className="memory-kind">{item.role === 'user' ? '我' : 'LISA'}</span><time dateTime={item.sent_at}>{time(item.sent_at)}</time>{item.context_excluded && <span>仅供查看，不再作为模型依据</span>}</div><p className="memory-content">{item.content}</p><div className="memory-actions"><button className="text-button" disabled={busy || item.context_excluded} onClick={() => openEditor(null, item)}>记为记忆</button><button className="text-button danger" disabled={busy} onClick={() => { setError(''); setModal({ kind: 'chat-delete', item }); }}>删除原话</button></div></article>)}
       </div>}
-      {!loading && (offset > 0 || count === pageSize) && <nav className="memory-pagination" aria-label="记录分页"><button className="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>上一页</button><span>第 {Math.floor(offset / pageSize) + 1} 页</span><button className="secondary" disabled={count < pageSize} onClick={() => setOffset(offset + pageSize)}>下一页</button></nav>}
+      {!loading && view === 'list' && (offset > 0 || count === pageSize) && <nav className="memory-pagination" aria-label="记录分页"><button className="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>上一页</button><span>第 {Math.floor(offset / pageSize) + 1} 页</span><button className="secondary" disabled={count < pageSize} onClick={() => setOffset(offset + pageSize)}>下一页</button></nav>}
     </>}
     <dialog ref={dialog} className="leave-dialog memory-dialog" aria-labelledby="memory-dialog-title" onCancel={event => { event.preventDefault(); if (!busy) setModal(null); }}>
       {modal?.kind === 'leave' ? <><h2 id="memory-dialog-title">有未保存的记忆修改</h2><p>保存后再离开，或放弃本次修改。未保存的内容与用途不会生效。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setModal(null)} autoFocus>继续编辑</button></div></> : modal?.kind === 'source' ? <><h2 id="memory-dialog-title">记忆来源</h2>{modal.source.status === 'chapter' ? <><p className="field-hint">{modal.source.chapter.title} · 版本 {modal.source.chapter.version}</p><p className="source-content">{modal.source.chapter.content}</p><p className="field-hint">这是形成记忆时采用的日记版本，之后的改稿不会自动改写这条记忆。</p></> : modal.source.status === 'available' && modal.source.message ? <><p className="field-hint">{modal.source.message.role === 'user' ? '我' : 'LISA'} · {time(modal.source.message.sent_at)}</p><p className="source-content">{modal.source.message.content}</p>{modal.source.message.context_excluded && <p className="field-hint">这段原话仅供查看，不再作为模型依据。</p>}</> : <p>{modal.source.status === 'deleted' ? '原始聊天已删除。独立记忆仍然保留。' : '这条记忆由你手动添加。'}</p>}<button className="secondary" onClick={() => setModal(null)} autoFocus>关闭来源</button></> : modal && <><h2 id="memory-dialog-title">{modal.kind === 'memory-delete' ? '删除这条记忆？' : modal.kind === 'chat-delete' ? '删除这条聊天原文？' : '清理这个时间段的聊天？'}</h2>{modal.kind === 'memory-delete' ? <p>这条记忆将停止后续使用，相关原始对话及引用它的后续对话也不再作为模型依据。原始聊天与已有作品保留，不会从原话自动恢复这条记忆。</p> : <p>所选原文将从 LISA 保存的数据中清除，无法再查看。独立记忆与已有作品保留；保留的记忆会显示“原始聊天已删除”。希望 LISA 忘记的内容，还需另行删除记忆。</p>}{modal.kind === 'clear' && <p className="clear-range">{time(modal.start)}（含）<br />至 {time(modal.end)}（不含）<br />清理整个时间段，不受搜索条件限制。</p>}{error && <ErrorNotice message={error} />}<div className="button-row"><button className="secondary danger" disabled={busy} onClick={() => void confirmDelete()}>{busy ? '正在清理…' : modal.kind === 'memory-delete' ? '确认删除记忆' : modal.kind === 'chat-delete' ? '确认删除原话' : '确认清理聊天'}</button><button className="text-button" disabled={busy} onClick={() => setModal(null)} autoFocus>取消</button></div></>}
