@@ -97,6 +97,7 @@ def progress_context(db, user_id, *, now=None) -> tuple[dict | None, str]:
         "\n这只是已正式保存正文的一小段，不能据此宣称完成整部作品或猜测片段之外的剧情。"
         "本次仍以日常交流为主，确有自然关联时最多用一句顺带分享，也可以完全不提。"
         "不是进度播报，不催阅读或反馈。若提及，progress_mention.task_id使用提供的id，"
+        "不要把正文整段发在reply，系统会自动附上章节阅读链接，不自行编造网址。"
         "evidence逐字引用reply中提到成果的那一句；不提则null。"
         "小说中的事件属于作品人物，不是LISA亲历，不记入life_events。"
         "日记片段也不重复提取为新增生活事件；已有生活事件的分享用life_mentions。"

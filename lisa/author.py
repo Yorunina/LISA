@@ -309,6 +309,15 @@ def _messages_for_attempt(db: Session, user_id: UUID, snapshot: dict) -> list[di
     return snapshot["messages"]
 
 
+def _saved_notice(db, settings, task, chapter) -> str:
+    from lisa.sharing import chapter_link
+
+    message = f"这次有限创作已保存：《{chapter.title}》。"
+    if task.source == "qq" and task.request.get("notify_qq"):
+        return message + "\n\n" + chapter_link(db, settings, task.user_id, chapter.id)
+    return message
+
+
 def _notice(db: Session, task: Task, content: str) -> None:
     # Current live authorization covers results of QQ-initiated test requests only.
     if not task.request.get("notify_qq") or task.source != "qq":
@@ -551,7 +560,7 @@ async def execute_author(
                     _notice(
                         db,
                         task,
-                        f"这次有限创作已保存：《{chapter.title}》。你可以在网页阅读和修改。",
+                        _saved_notice(db, settings, task, chapter),
                     )
                 return
         task.status, task.error, task.finished_at = "failed", failure, datetime.now(UTC)

@@ -175,10 +175,12 @@ def _exclude_memory(db: Session, item: Memory) -> None:
 
 
 def _message_view(item: ChatMessage) -> dict:
+    from lisa.vision import message_text
+
     return {
         key: getattr(item, key)
         for key in ("id", "role", "content", "kind", "sent_at", "context_excluded")
-    }
+    } | {"content": message_text(item)}
 
 
 @router.get("/memories")
@@ -307,6 +309,7 @@ def _delete_messages(db: Session, user_id: UUID, messages: list[ChatMessage]) ->
     assistant_tasks = [m.task_id for m in messages if m.role == "assistant" and m.task_id]
     for message in messages:
         message.content, message.deleted_at, message.context_excluded = "", now, True
+        message.image_urls, message.image_description = [], ""
     if assistant_tasks:
         db.execute(
             update(OutboundMessage)
@@ -427,6 +430,10 @@ def adopt_candidates(
         return
     for candidate in candidates:
         source = next((m for m in sources if candidate.evidence in m.content), None)
+        visual = False
+        if source is None:
+            source = next((m for m in sources if candidate.evidence in m.image_description), None)
+            visual = source is not None
         if source is None or (candidate.scope == "project" and project_id is None):
             continue
         scope_id = project_id if candidate.scope == "project" else None
@@ -443,8 +450,10 @@ def adopt_candidates(
                 record_chat_references(db, source.task_id, [duplicate], [])
             continue
         # Evidence only locates the source. Keep a reasoning summary, never a quote copy.
-        basis = candidate.basis
-        if basis and (basis in source.content or candidate.evidence in basis):
+        basis = (
+            "根据关联图片的模型观察整理，未经用户确认为真实经历。" if visual else candidate.basis
+        )
+        if not visual and basis and (basis in source.content or candidate.evidence in basis):
             basis = (
                 "根据关联聊天推测；请查看仍保留的来源。" if candidate.kind == "inference" else ""
             )
@@ -453,11 +462,11 @@ def adopt_candidates(
                 user_id=user_id,
                 project_id=scope_id,
                 source_message_id=source.id,
-                kind=candidate.kind,
+                kind="inference" if visual else candidate.kind,
                 content=candidate.content,
                 basis=basis,
                 allow_chat=True,
-                allow_writing=candidate.allow_writing,
+                allow_writing=False if visual else candidate.allow_writing,
             )
         )
     db.flush()

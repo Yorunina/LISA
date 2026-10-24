@@ -32,6 +32,7 @@ class Account(Base):
     username: Mapped[str] = mapped_column(String(32), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     memory_revision: Mapped[int] = mapped_column(default=1, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_active_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -130,6 +131,56 @@ class StyleCorpus(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     cleaned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_group_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("collected_groups.id", ondelete="CASCADE"), index=True
+    )
+    source_revision: Mapped[int | None]
+
+
+class CollectedGroup(Base):
+    __tablename__ = "collected_groups"
+    __table_args__ = (UniqueConstraint("bot_id", "qq_group_id"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    bot_id: Mapped[str] = mapped_column(String(32))
+    qq_group_id: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(120))
+    enabled: Mapped[bool] = mapped_column(default=True, server_default="true")
+    revision: Mapped[int] = mapped_column(default=1, server_default="1")
+    last_ordinal: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupGrant(Base):
+    __tablename__ = "group_grants"
+
+    group_id: Mapped[UUID] = mapped_column(
+        ForeignKey("collected_groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class GroupMessage(Base):
+    __tablename__ = "group_messages"
+    __table_args__ = (
+        UniqueConstraint("group_id", "message_id"),
+        Index("ix_group_messages_group_time", "group_id", "sent_at", "id"),
+        Index("ix_group_messages_member_time", "group_id", "qq_id", "sent_at", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    group_id: Mapped[UUID] = mapped_column(ForeignKey("collected_groups.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(String(48))
+    qq_id: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(120))
+    content: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str] = mapped_column(String(16), default="text")
+    ordinal: Mapped[int] = mapped_column(BigInteger)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class StyleProfile(Base):
@@ -210,6 +261,7 @@ class Project(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(160))
     kind: Mapped[str] = mapped_column(String(16), default="novel")
+    share_token: Mapped[str | None] = mapped_column(String(43), unique=True)
     is_current: Mapped[bool] = mapped_column(default=True, server_default="true")
     completed: Mapped[bool] = mapped_column(default=False, server_default="false")
     worldbook: Mapped[str] = mapped_column(Text, default="", server_default="")
@@ -355,6 +407,8 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     context_excluded: Mapped[bool] = mapped_column(default=False, server_default="false")
+    image_urls: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    image_description: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class Memory(Base):

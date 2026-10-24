@@ -17,6 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB
+from lisa.chat_corpus import target_windows
 from lisa.model_calls import (
     BudgetExceeded,
     ModelBusy,
@@ -31,7 +32,7 @@ from lisa.style_corpus import StyleUser, clear_corpus, require_corpus
 from lisa.works import lock_account
 
 router = APIRouter(prefix="/api/style", tags=["style distillation"])
-METHOD_VERSION = "lisa-style-v1"
+METHOD_VERSION = "lisa-style-v2-target-windows"
 KINDS = {"style_distill", "style_trial"}
 LIMITATIONS = (
     "模型评审不能替代用户评价，未验证多日真实交流或长篇创作效果。",
@@ -97,7 +98,12 @@ class AnalysisPlan:
 def _chat_probes(sources: list[dict], targets: list[str]) -> list[list[dict]]:
     """At most two turn contexts; no target answer or later target message is exposed."""
     probes, context, after_target = [], [], False
+    previous_window = None
     for segment in sources:
+        window = (segment.get("file_index"), segment.get("conversation"), segment.get("window_id"))
+        if window != previous_window:
+            context, after_target = [], False
+            previous_window = window
         if segment.get("speaker") in targets:
             if context:
                 probes.append(context)
@@ -175,27 +181,52 @@ def build_plan(
     if settings.style_distillation_chunk_bytes > settings.style_distillation_max_input_bytes // 2:
         raise HTTPException(422, "服务端分块配置超过单次输入预算，请调整分析配置。")
 
+    scope = [segment for segment in all_segments if segment["id"] in selected_ids]
+    sampled, window_coverage = {}, None
+    if kind == "personality":
+        indexed = [
+            {**segment, "file": file["name"], "file_index": index}
+            for index, file in enumerate(files)
+            for segment in file["segments"]
+            if segment["id"] in selected_ids
+        ]
+        windows, window_coverage = target_windows(
+            indexed,
+            targets,
+            before=settings.style_chat_context_before,
+            after=settings.style_chat_context_after,
+            max_windows=min(
+                settings.style_chat_max_windows,
+                max(1, (settings.style_distillation_max_calls - 2) // 2),
+            ),
+            max_bytes=min(16_000, settings.style_distillation_chunk_bytes - 512),
+        )
+        for window in windows:
+            sampled.setdefault(window[0]["file_index"], []).append(window)
+        if not windows:
+            raise HTTPException(422, "目标消息无法放入分析窗口，请选择较短的消息；未开始分析。")
+
     batches, groups, coverage_files, limitations = [], [], [], []
-    selected_chars, selected_segments = 0, 0
+    analyzed_chars, analyzed_segments = 0, 0
     partial_context = False
     fingerprints: set[str] = set()
     duplicate_sources = False
     for file_index, file in enumerate(files):
-        chosen = [s for s in file["segments"] if s["id"] in selected_ids]
+        source_groups = sampled.get(file_index, []) if kind == "personality" else None
+        chosen = (
+            list({row["id"]: row for window in source_groups for row in window}.values())
+            if kind == "personality"
+            else [s for s in file["segments"] if s["id"] in selected_ids]
+        )
         if not chosen:
             continue
-        # Preserve other speakers and adjacent source order; selecting a range does not
-        # filter it down to the target's standalone utterances.
         units = []
         for segment in chosen:
-            source = {
-                **segment,
-                "file": file["name"],
-                "file_index": file_index,
-            }
-            parts = _split_segment(source, settings.style_distillation_chunk_bytes - 256)
-            partial_context |= len(parts) > 1
-            units.extend(parts)
+            source = {**segment, "file": file["name"], "file_index": file_index}
+            if kind == "writing":
+                parts = _split_segment(source, settings.style_distillation_chunk_bytes - 256)
+                partial_context |= len(parts) > 1
+                units.extend(parts)
             text = segment["text"]
             if kind == "personality" and "\n" in text:
                 text = text.split("\n", 1)[1]  # A changed QQ export header is not a new sample.
@@ -213,23 +244,23 @@ def build_plan(
                 duplicate_sources |= bool(hashes & fingerprints)
                 fingerprints.update(hashes)
         file_batches, batch = [], []
-        for unit in units:
-            if batch and _size([*batch, unit]) > settings.style_distillation_chunk_bytes:
+        for unit_group in source_groups if kind == "personality" else [[unit] for unit in units]:
+            if batch and _size([*batch, *unit_group]) > settings.style_distillation_chunk_bytes:
                 file_batches.append(batch)
                 batch = []
-            batch.append(unit)
+            batch.extend(unit_group)
         if batch:
             file_batches.append(batch)
         batches.extend(file_batches)
         groups.append(file_batches)
         chars = sum(len(s["text"]) for s in chosen)
-        selected_chars += chars
-        selected_segments += len(chosen)
+        analyzed_chars += chars
+        analyzed_segments += len(chosen)
         coverage_files.append(
             {
                 "name": file["name"],
                 "file_index": file_index,
-                "selected_segments": len(chosen),
+                "selected_segments": sum(s["id"] in selected_ids for s in file["segments"]),
                 "analyzed_segments": len(chosen),
                 "chars": chars,
                 "source_ids": [s["id"] for s in chosen],
@@ -255,10 +286,19 @@ def build_plan(
             "同一长篇相邻章节或同一聊天的切块不冒充独立留出。"
         )
     if kind == "personality":
-        limitations.append("聊天按原顺序和所选范围分批，跨批话题依赖可能影响判断。")
+        limitations.append(
+            "仅分析目标发言及同会话邻近窗口，按会话和时间分层有限取样；"
+            "其余群成员的无关消息不进入模型。条数/时间边界不保证话题完整，缺失依赖不作推测。"
+        )
+        if window_coverage["analyzed_target_messages"] < window_coverage["total_target_messages"]:
+            limitations.append(
+                "目标消息已按窗口预算取样，不是全量分析；未覆盖范围不能用于风格结论。"
+            )
+        if window_coverage["oversized_targets"]:
+            limitations.append("存在单条超出窗口预算的目标消息，已跳过且计入覆盖统计，未截断原文。")
     if partial_context:
         limitations.append("超出单批预算的长片段已完整分段覆盖，分段处的完整语境可能不足。")
-    if selected_segments < len(all_segments):
+    if len(scope) < len(all_segments):
         limitations.append("仅分析用户选择的范围，未选择部分不计入风格结论。")
     total_chars = sum(len(file["text"]) for file in files)
     parsed_chars = sum(len(s["text"]) for s in all_segments)
@@ -292,6 +332,10 @@ def build_plan(
     def segment_count(units):
         return len({unit.get("parent_id", unit["id"]) for unit in units})
 
+    def partition_chars(units):
+        values = {unit["id"]: unit for unit in units}.values() if kind == "personality" else units
+        return sum(len(unit["text"]) for unit in values)
+
     partitions = {
         "distillation": [unit for batch in batches for unit in batch],
         "development": development or [],
@@ -303,22 +347,30 @@ def build_plan(
             for role, units in partitions.items()
             if any(unit["file_index"] == entry["file_index"] for unit in units)
         )
+    group_source = payload.get("group_sampling") if kind == "personality" else None
+    if group_source:
+        limitations.append(
+            "群档案先由数据库筛选与取样，再分析目标邻近窗口；"
+            "数据库命中总数、临时快照和实际入模覆盖分开统计，未回溯NTQQ全部历史。"
+        )
     return AnalysisPlan(
         batches=batches,
         development=development,
         holdout=holdout,
         coverage={
             "total_segments": len(all_segments),
-            "selected_segments": selected_segments,
-            "analyzed_segments": selected_segments,
+            "selected_segments": len(scope),
+            "analyzed_segments": analyzed_segments,
             "total_chars": total_chars,
             "parsed_chars": parsed_chars,
-            "selected_chars": selected_chars,
-            "analyzed_chars": selected_chars,
+            "selected_chars": sum(len(s["text"]) for s in scope),
+            "analyzed_chars": analyzed_chars,
+            **({"sampling": window_coverage} if window_coverage else {}),
+            **({"group_source": group_source} if group_source else {}),
             "partitions": {
                 role: {
                     "segments": segment_count(units),
-                    "chars": sum(len(unit["text"]) for unit in units),
+                    "chars": partition_chars(units),
                 }
                 for role, units in partitions.items()
             },
@@ -384,11 +436,24 @@ def _checked_findings(value, valid_ids: set[str]) -> None:
 
 
 def _ensure_running(engine, task_id: UUID, user_id: UUID) -> None:
+    from lisa.group_records import source_available
+
     with Session(engine) as db:
         task = db.get(Task, task_id)
         user = db.get(Account, user_id)
         if task is None or task.status != "running" or user is None or not user.active:
             raise asyncio.CancelledError
+        corpus_id = task.request.get("corpus_id")
+        if corpus_id:
+            corpus = db.get(StyleCorpus, UUID(corpus_id))
+            if (
+                corpus is None
+                or corpus.state != "processing"
+                or not corpus.payload
+                or corpus.expires_at <= datetime.now(UTC)
+                or not source_available(db, corpus, user_id)
+            ):
+                raise asyncio.CancelledError
 
 
 async def _bounded_call(coroutine, engine, task_id: UUID, user_id: UUID):
@@ -588,6 +653,7 @@ def _limit_pending(db: Session, user_id: UUID) -> None:
 
 @router.post("/tasks", status_code=201)
 def start_task(data: StartDistillation, request: Request, user: StyleUser, db: DB):
+    from lisa.group_records import source_available
     from lisa.queue import enqueue_style
 
     user = lock_account(db, user.id)
@@ -601,6 +667,10 @@ def start_task(data: StartDistillation, request: Request, user: StyleUser, db: D
         raise HTTPException(409, "材料已过期并清理，请重新上传。")
     if corpus.state != "ready" or not corpus.payload:
         raise HTTPException(409, "材料已使用或已清理，请重新上传。")
+    if not source_available(db, corpus, user.id):
+        clear_corpus(db, corpus)
+        db.commit()
+        raise HTTPException(409, "群消息来源已清理或访问权限已撤销，请重新选择。")
     plan = build_plan(
         corpus.payload,
         corpus.kind,
@@ -702,6 +772,8 @@ def cleanup_trials(db: Session) -> int:
 
 
 async def execute_style(settings: Settings, engine, task_id: str, *, generate=None) -> None:
+    from lisa.group_records import source_available
+
     task_id = UUID(str(task_id))
     corpus_id, payload, result, failure = None, None, None, None
     with Session(engine) as db, db.begin():
@@ -735,6 +807,7 @@ async def execute_style(settings: Settings, engine, task_id: str, *, generate=No
                 or corpus.state != "processing"
                 or not corpus.payload
                 or corpus.expires_at <= datetime.now(UTC)
+                or not source_available(db, corpus, user_id)
             ):
                 failure = "corpus_unavailable"
             else:
@@ -819,6 +892,8 @@ async def execute_style(settings: Settings, engine, task_id: str, *, generate=No
             if corpus_id:
                 corpus = db.get(StyleCorpus, corpus_id)
                 if corpus is not None:
+                    if not source_available(db, corpus, user_id):
+                        failure = "group_source_unavailable"
                     clear_corpus(db, corpus)
             if task is not None:
                 if kind == "style_trial":

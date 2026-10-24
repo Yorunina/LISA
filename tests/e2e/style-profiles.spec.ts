@@ -317,5 +317,42 @@ test('real isolated API parses QQ bytes, cancels and cleans, then persists expli
   await expect(page.getByLabel('单作品写作风格')).toContainText('跟随 LISA 默认');
   const following = await (await page.request.get(`/api/projects/${projectId}/writing-style`)).json();
   expect(following.override_version_id).toBeNull(); expect(following.effective_version_id).toBe(appliedV1);
+  await page.getByRole('button', { name: '我的作品', exact: true }).click();
+  await page.getByRole('button', { name: '创作资料', exact: true }).click();
+  await page.getByRole('button', { name: '作品写作风格', exact: true }).click();
+  await expect(page.getByRole('button', { name: '写作风格', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByLabel('选择作品', { exact: true })).toHaveValue(projectId);
+  await page.getByRole('button', { name: '返回我的作品', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '隔离风格测试作品', exact: true })).toBeVisible();
   expect(failures).toEqual([]);
+});
+
+
+test('persistent style navigation and the persona editor shortcut both protect unsaved changes', async ({ page }, info) => {
+  await study(page);
+  await page.getByRole('button', { name: '返回账号设置', exact: true }).click();
+  await page.getByRole('button', { name: '我的作品', exact: true }).click();
+  const entry = page.getByRole('navigation', { name: '书房导航' }).getByRole('button', { name: '性格与风格', exact: true });
+  await entry.click();
+  await expect(entry).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('button', { name: '交流性格', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.getByRole('button', { name: '返回我的作品', exact: true }).click();
+  await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click();
+  await page.getByRole('button', { name: '调整 LISA 性格', exact: true }).click();
+  await page.getByLabel('LISA 性格 prompt', { exact: true }).fill('尚未保存的交流性格。');
+  await page.getByRole('button', { name: '从 QQ 记录提炼性格', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '继续编辑', exact: true }).click();
+  await expect(page.getByLabel('LISA 性格 prompt', { exact: true })).toHaveValue('尚未保存的交流性格。');
+  await entry.click();
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改', exact: true }).click();
+  await expect(page.getByLabel('选择 QQ TXT文件（可多选）')).toBeVisible();
+  await page.getByRole('button', { name: '返回账号设置', exact: true }).click();
+  await page.getByRole('button', { name: '从 QQ 记录提炼性格', exact: true }).click();
+  await expect(page.getByRole('button', { name: '交流性格', exact: true })).toHaveAttribute('aria-pressed', 'true');
+  await page.screenshot({ path: info.outputPath('desktop-style-navigation.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390);
+  await expect(entry).toBeVisible();
+  await page.screenshot({ path: info.outputPath('mobile-style-navigation.png'), fullPage: true });
 });

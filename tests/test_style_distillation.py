@@ -26,6 +26,74 @@ from lisa.style_distillation import (
     execute_style,
 )
 
+
+def group_source(db, owner, corpus_id):
+    from lisa.models import CollectedGroup, GroupGrant
+
+    group = CollectedGroup(bot_id="900001", qq_group_id="900002", name="合成来源群")
+    db.add(group)
+    db.flush()
+    db.add(GroupGrant(group_id=group.id, user_id=owner))
+    corpus = db.get(StyleCorpus, corpus_id)
+    corpus.source_group_id, corpus.source_revision = group.id, group.revision
+    db.commit()
+    return group.id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalidation", ["revoke", "clear", "expire"])
+async def test_group_source_change_stops_next_call_and_discards_inflight_result(
+    settings, engine, db, style_owner, invalidation
+):
+    from lisa.models import CollectedGroup, GroupGrant
+
+    task_id, corpus_id = task_with_corpus(db, style_owner)
+    group_id = group_source(db, style_owner, corpus_id)
+    calls = []
+
+    async def changed(*args, **kwargs):
+        calls.append(True)
+        with Session(engine) as session, session.begin():
+            if invalidation == "revoke":
+                session.execute(delete(GroupGrant).where(GroupGrant.group_id == group_id))
+            elif invalidation == "clear":
+                session.get(CollectedGroup, group_id).revision += 1
+            else:
+                session.get(StyleCorpus, corpus_id).expires_at = datetime.now(UTC) - timedelta(
+                    seconds=1
+                )
+        return BatchAnalysis()
+
+    await execute_style(settings, engine, task_id, generate=changed)
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert len(calls) == 1
+    assert task.status == "failed" and task.result is None
+    assert db.get(StyleCorpus, corpus_id).payload == {}
+
+
+@pytest.mark.asyncio
+async def test_final_group_authorization_check_rejects_late_synthesis(
+    settings, engine, db, style_owner, monkeypatch
+):
+    from lisa.models import GroupGrant
+
+    task_id, corpus_id = task_with_corpus(db, style_owner)
+    group_id = group_source(db, style_owner, corpus_id)
+
+    async def late_result(*args, **kwargs):
+        with Session(engine) as session, session.begin():
+            session.execute(delete(GroupGrant).where(GroupGrant.group_id == group_id))
+        return {"prompt": "这份迟到结果不应保存。", "summary": "", "report": {}}
+
+    monkeypatch.setattr("lisa.style_distillation.distill", late_result)
+    await execute_style(settings, engine, task_id)
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert task.status == "failed" and task.error == "group_source_unavailable"
+    assert task.result is None and db.get(StyleCorpus, corpus_id).payload == {}
+
+
 HEADERS = {"X-LISA-Request": "1"}
 SOURCE = "临时作品中的秘密只应存在上传语料中。" * 4
 

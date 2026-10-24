@@ -14,20 +14,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB, current_user
+from lisa.chat_corpus import parse_chat
 from lisa.models import Account, StyleCorpus, Task
 from lisa.works import lock_account
 
 router = APIRouter(tags=["style"])
 StyleKind = Literal["personality", "writing"]
 StyleUser = Annotated[Account, Depends(current_user)]
-HEADER = re.compile(
-    r"^(?:\[)?(?P<date>\d{4}[-/]\d{1,2}[-/]\d{1,2})\s+"
-    r"\d{1,2}:\d{2}(?::\d{2})?(?:\])?\s+(?P<speaker>.+?)\s*$"
-)
-HEADER_REVERSE = re.compile(
-    r"^(?P<speaker>.+?)\s+(?:\[)?\d{4}[-/]\d{1,2}[-/]\d{1,2}\s+"
-    r"\d{1,2}:\d{2}(?::\d{2})?(?:\])?\s*$"
-)
 CHAPTER = re.compile(r"^(?:#{1,6}\s+.+|第[\d一二三四五六七八九十百千万零〇两]+[章节卷回部].*)$")
 
 
@@ -56,35 +49,6 @@ def decode_source(data: bytes) -> tuple[str, str]:
             continue
         return value.replace("\r\n", "\n").replace("\r", "\n"), encoding
     raise HTTPException(422, "无法识别文本编码，请转换为 UTF-8 TXT/Markdown 后重新上传。")
-
-
-def parse_chat(text: str, file_index: int) -> tuple[list[dict], list[dict], int]:
-    segments, speakers = [], {}
-    speaker_ids = {}
-    current = None
-    offset, unknown = 0, 0
-    for line in text.splitlines(keepends=True):
-        stripped = line.strip()
-        match = HEADER.match(stripped) or HEADER_REVERSE.match(stripped)
-        if match:
-            if current is not None:
-                current["end"] = offset
-                current["text"] = text[current["start"] : offset]
-                segments.append(current)
-            label = match["speaker"]
-            # Deliberately scope IDs to the file, including exact nickname/account spelling.
-            speaker = speaker_ids.setdefault(label, f"{file_index}:p{len(speaker_ids)}")
-            speakers.setdefault(speaker, {"id": speaker, "label": label, "messages": 0})
-            speakers[speaker]["messages"] += 1
-            current = {"id": f"{file_index}:{len(segments)}", "start": offset, "speaker": speaker}
-        elif current is None and stripped:
-            unknown += 1
-        offset += len(line)
-    if current is not None:
-        current["end"] = len(text)
-        current["text"] = text[current["start"] :]
-        segments.append(current)
-    return segments, list(speakers.values()), unknown
 
 
 def parse_writing(text: str, file_index: int) -> list[dict]:
@@ -139,6 +103,9 @@ def clear_expired_corpora(db: Session) -> int:
         )
         if owner is None:
             continue
+        # Task creation may have completed while this sweep waited for the owner.
+        # Read its current linkage only after acquiring the shared account lock.
+        task_id = db.scalar(select(StyleCorpus.task_id).where(StyleCorpus.id == corpus_id))
         task = (
             db.scalar(select(Task).where(Task.id == task_id).with_for_update()) if task_id else None
         )

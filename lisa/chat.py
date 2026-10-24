@@ -47,6 +47,14 @@ from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
 from lisa.scheduling import discard_pending_plans, plan_after_chat
 from lisa.settings import Settings
+from lisa.sharing import chapter_link, sharing_context
+from lisa.vision import (
+    MAX_IMAGES,
+    clear_image_inputs,
+    image_url_allowed,
+    message_text,
+    prepare_chat_images,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +68,7 @@ def ingest_message(
     sent_at: datetime,
     content: str,
     kind: str = "text",
+    image_urls: list[str] | None = None,
 ) -> UUID | None:
     """Persist one initialized user's event and its queue job in a single transaction."""
     binding = db.scalar(select(QQBinding).where(QQBinding.qq_id == qq_id))
@@ -108,6 +117,9 @@ def ingest_message(
             role="user",
             content=content,
             kind=kind,
+            image_urls=[
+                url for url in (image_urls or [])[: MAX_IMAGES + 1] if image_url_allowed(url)
+            ],
             sent_at=sent_at,
         )
     )
@@ -148,6 +160,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         if user is None or not user.active or binding is None or persona is None:
             task.status, task.error = "failed", "account_unavailable"
             task.finished_at = datetime.now(UTC)
+            clear_image_inputs(db, task_id)
             return
         prior = db.scalar(
             select(Task.id).where(
@@ -171,6 +184,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         if not batch:
             task.status, task.error = "failed", "empty_input"
             task.finished_at = datetime.now(UTC)
+            clear_image_inputs(db, task_id)
             return
         history = db.scalars(
             select(ChatMessage)
@@ -194,6 +208,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             task.project_id = project.id if project else None
         project_id = task.project_id
         source_ids = [message.id for message in batch]
+        batch_times = [message.sent_at for message in batch]
+        has_images = any(message.kind == "image" or message.image_urls for message in batch)
         memory_revision = user.memory_revision
         current_texts = [message.content for message in batch]
         snapshot = dict(task.input_snapshot or {})
@@ -222,6 +238,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         if project:
             instructions += creative_context(project, autonomy_enabled=settings.autonomy_enabled)
         instructions_without_optional = instructions
+        share_ids, share_context = sharing_context(db, user.id)
+        instructions += share_context
         instructions += interaction_context(db, user.id)
         instructions_without_memories = instructions
         memory_ids = []
@@ -233,7 +251,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             {
                 "role": message.role,
                 "content": (
-                    f"[消息时间 {message.sent_at.isoformat()}]\n" + message.content
+                    f"[消息时间 {message.sent_at.isoformat()}]\n" + message_text(message)
                     if message.role == "user"
                     else message.content
                 ),
@@ -249,8 +267,20 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
     context_limited = False
     recalled = Context()
     try:
+        query_texts = current_texts
+        if has_images:
+            visual_texts = await prepare_chat_images(
+                settings, engine, task_id, user_id, memory_revision
+            )
+            query_texts = [visual_texts.get(source_id, text) for source_id, text in zip(
+                source_ids, current_texts, strict=True
+            )]
+            for position, (sent_at, text) in enumerate(zip(batch_times, query_texts, strict=True)):
+                messages[len(history) + position]["content"] = (
+                    f"[消息时间 {sent_at.isoformat()}]\n" + text
+                )
         recalled = await retrieve_context(
-            settings, engine, task_id, user_id, project_id, "chat", "\n".join(current_texts)
+            settings, engine, task_id, user_id, project_id, "chat", "\n".join(query_texts)
         )
         with Session(engine) as db:
             check_memory_revision(db, user_id, memory_revision)
@@ -270,6 +300,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             memory_ids = []
             recalled = Context()
             instructions = instructions_without_optional
+            share_ids = set()
             try:
                 messages = trim_history(
                     settings,
@@ -321,6 +352,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             else:
                 task.status, task.error = "failed", "model_busy"
                 task.finished_at = datetime.now(UTC)
+                clear_image_inputs(db, task_id)
                 _outbound(db, task, qq_id, "对话服务暂时繁忙，请稍后再发消息。")
                 retry = False
         if retry:
@@ -338,6 +370,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
     with Session(engine) as db, db.begin():
         user = db.scalar(select(Account).where(Account.id == user_id).with_for_update())
         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        clear_image_inputs(db, task_id)
         if user is None or not user.active or task is None or task.status != "running":
             if task and task.status == "running":
                 task.status, task.error = "failed", "account_unavailable"
@@ -362,6 +395,10 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     decision.scene_plan if decision.commission is None else None,
                 )
             if decision:
+                if decision.share_chapter_id in share_ids:
+                    link = chapter_link(db, settings, user_id, decision.share_chapter_id)
+                    if link:
+                        reply += "\n\n" + link
                 record_chat_references(db, task_id, memory_ids, used_history_ids)
                 adopt_candidates(db, user_id, project_id, decision.memories, source_ids)
             assistant_message = ChatMessage(

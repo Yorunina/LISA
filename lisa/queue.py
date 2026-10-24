@@ -69,11 +69,16 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
     @app.task(name="lisa.style_cleanup", queue="lisa_style", lock="style-cleanup")
     def style_cleanup(timestamp: int):
         from lisa.db import make_engine
+        from lisa.group_records import purge_expired_messages
         from lisa.style_corpus import clear_expired_corpora
         from lisa.style_distillation import cleanup_trials
 
         engine = make_engine(settings)
         try:
+            # Group management serializes per group before locking affected accounts;
+            # do not carry ordinary corpus-cleanup account locks into that operation.
+            with Session(engine) as db, db.begin():
+                purge_expired_messages(db)
             with Session(engine) as db, db.begin():
                 clear_expired_corpora(db)
                 cleanup_trials(db)

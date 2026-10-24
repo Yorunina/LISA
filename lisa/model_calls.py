@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 from datetime import UTC, datetime
 from decimal import ROUND_UP, Decimal
 from uuid import UUID
@@ -207,7 +208,7 @@ def _reply_request(
             }
         },
     }
-    if settings.model_name == "gpt-6-astra":
+    if settings.model_name in {"gpt-6-astra", "gpt-6.1-sol"}:
         request["reasoning"] = {"effort": "low"}
     return request
 
@@ -237,19 +238,33 @@ def trim_history(
 async def _provider_request(
     settings: Settings, engine, call_id: UUID, request: dict, *, endpoint: str
 ):
+    base_url, api_key = (
+        settings.embedding_connection
+        if endpoint == "embeddings"
+        else (settings.model_base_url, settings.model_api_key.get_secret_value())
+    )
     try:
         async with (
             DefaultAsyncHttpxClient(follow_redirects=False) as http_client,
             AsyncOpenAI(
-                base_url=settings.model_base_url,
-                api_key=settings.model_api_key.get_secret_value(),
+                base_url=base_url,
+                api_key=api_key,
                 max_retries=0,
                 timeout=settings.model_timeout_seconds,
                 http_client=http_client,
             ) as client,
         ):
-            return await getattr(client, endpoint).create(**request)
+            resource = client
+            for name in endpoint.split("."):
+                resource = getattr(resource, name)
+            return await resource.create(**request)
     except APIStatusError as exc:
+        request_id = exc.response.headers.get("x-request-id", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
+            request_id = "unavailable"
+        logger.warning(
+            "call=%s http=%s request_id=%s", call_id, exc.status_code, request_id
+        )
         # Rejections are definitive; a timeout or server failure may follow execution.
         rejected = 400 <= exc.status_code < 500 and exc.status_code not in {408, 499}
         _finish(
@@ -376,14 +391,18 @@ async def generate_embeddings(
     texts: list[str],
 ) -> list[list[float]]:
     """One bounded embedding attempt, charged to the same ledger as dialogue and writing."""
+    base_url, api_key = settings.embedding_connection
     if (
         not settings.embedding_model
-        or not settings.model_api_key.get_secret_value()
+        or not base_url
+        or not api_key
         or settings.embedding_input_per_million <= 0
     ):
         raise ModelCallFailed("Embedding model and input price must be configured")
-    if not texts or len(texts) > MAX_EMBEDDING_TEXTS:
-        raise ModelInputTooLarge("Embedding batch must contain 1 to 32 texts")
+    if not texts or len(texts) > settings.embedding_batch_size:
+        raise ModelInputTooLarge(
+            f"Embedding batch must contain 1 to {settings.embedding_batch_size} texts"
+        )
     if any(not isinstance(value, str) or not value.strip() for value in texts):
         raise ModelCallFailed("Embedding texts must be nonempty strings")
     input_bytes = sum(len(value.encode("utf-8")) for value in texts)
@@ -406,7 +425,7 @@ async def generate_embeddings(
         configuration={
             "api": "embeddings",
             "model": settings.embedding_model,
-            "base_url": settings.model_base_url,
+            "base_url": base_url,
             "dimensions": settings.embedding_dimensions,
             "input_per_million": str(settings.embedding_input_per_million),
             "output_per_million": "0",

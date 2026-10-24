@@ -38,6 +38,7 @@ from lisa.models import (
 )
 from lisa.progress import ProgressMention, progress_context, progress_is_current, resolve_progress
 from lisa.settings import Settings
+from lisa.sharing import chapter_link
 from lisa.topics import DefaultDesign, adopt_default_design, topic_context
 
 
@@ -226,12 +227,17 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
         )
         task.status = "completed"
         binding = db.get(QQBinding, user_id)
+        reply = result.reply
+        if progress:
+            link = chapter_link(db, settings, user_id, UUID(progress["chapter_id"]))
+            if link:
+                reply += "\n\n" + link
         db.add(
             OutboundMessage(
                 user_id=user_id,
                 task_id=task_id,
                 qq_id=binding.qq_id,
-                content=result.reply,
+                content=reply,
                 status="pending",
             )
         )

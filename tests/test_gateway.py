@@ -3,15 +3,26 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
 
-from lisa.gateway import OneBotConnection, parse_private_message, run_gateway, serve_connection
+from lisa.gateway import (
+    GroupMessageEvent,
+    OneBotConnection,
+    parse_group_message,
+    parse_private_message,
+    run_gateway,
+    serve_connection,
+)
 from lisa.models import (
     Account,
     ChatMessage,
+    CollectedGroup,
+    GroupMessage,
+    Memory,
+    ModelCall,
     OutboundMessage,
     Persona,
     QQBinding,
@@ -21,6 +32,7 @@ from lisa.models import (
 
 BOT = "10001"
 USER = "20002"
+GROUP = "30003"
 
 
 def private_event(**changes):
@@ -34,6 +46,145 @@ def private_event(**changes):
         "message": [{"type": "text", "data": {"text": "绑定"}}],
         **changes,
     }
+
+
+def group_event(**changes):
+    return private_event(
+        **{
+            "message_type": "group",
+            "sub_type": "normal",
+            "group_id": int(GROUP),
+            "sender": {"user_id": int(USER), "nickname": "合成昵称", "card": "合成群名片"},
+            **changes,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"post_type": "notice"},
+        {"post_type": "message_sent"},
+        {"message_type": "private"},
+        {"sub_type": "anonymous"},
+        {"sub_type": "notice"},
+        {"sub_type": "unknown"},
+        {"sub_type": None},
+        {"anonymous": {"id": 1, "name": "匿名消息"}},
+        {"self_id": 10002},
+        {"self_id": True},
+        {"group_id": None},
+        {"group_id": 0},
+        {"group_id": -1},
+        {"group_id": True},
+        {"group_id": "group"},
+        {"group_id": "９９"},
+        {"user_id": int(BOT)},
+        {"user_id": 0},
+        {"user_id": False},
+        {"message_id": -(2**31) - 1},
+        {"message_id": 2**31},
+        {"message_id": 123.0},
+        {"message_id": True},
+        {"message_id": "not-an-id"},
+        {"time": True},
+        {"time": 0},
+        {"time": float("nan")},
+        {"time": float("inf")},
+        {"time": "now"},
+        {"time": (datetime.now(UTC) + timedelta(minutes=2)).timestamp()},
+        {"sender": []},
+        {"sender": {"user_id": 99999, "nickname": "wrong identity"}},
+        {"message": None},
+        {"message": {}},
+        {"message": []},
+        {"message": [None]},
+        {"message": [{"type": "text", "data": {"text": 123}}]},
+        {"message": [{"type": "image", "data": "invalid"}]},
+        {"message": "unclosed [CQ:image,url=https://example.invalid/file"},
+        {"message": "\x00"},
+        {"message": "\ud800"},
+        {"message": "long" * 20_000},
+        {"message": [{"type": "face", "data": {}}] * 129},
+    ],
+)
+def test_group_parser_rejects_invalid_identity_time_or_body(changes):
+    assert parse_group_message(group_event(**changes), bot_id=BOT) is None
+
+
+def test_group_parser_keeps_trusted_time_and_event_identity():
+    now = datetime.now(UTC)
+    timestamp = int((now - timedelta(seconds=299)).timestamp())
+    event = parse_group_message(group_event(time=timestamp), bot_id=BOT, now=now)
+    assert isinstance(event, GroupMessageEvent)
+    assert (event.bot_id, event.group_id, event.message_id, event.qq_id) == (
+        BOT,
+        GROUP,
+        "123",
+        USER,
+    )
+    assert event.name == "合成群名片" and event.text == "绑定" and event.kind == "text"
+    assert event.sent_at == datetime.fromtimestamp(timestamp, UTC)
+    assert parse_group_message(group_event(time=timestamp - 2), bot_id=BOT, now=now) is None
+    assert parse_group_message(group_event(group_id="9" * 100), bot_id=BOT) is None
+
+
+@pytest.mark.parametrize("message_id", [-1, "-1", -(2**31), str(-(2**31)), 0, 2**31 - 1])
+def test_group_signed_message_ids_are_supported(message_id):
+    event = parse_group_message(group_event(message_id=message_id), bot_id=BOT)
+    assert event is not None and event.message_id == str(int(message_id))
+
+
+def test_group_media_has_only_placeholders_and_never_uses_private_vision(monkeypatch):
+    from lisa import gateway
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Group collection must not use private image processing")
+
+    monkeypatch.setattr(gateway, "image_url_allowed", forbidden)
+    event = parse_group_message(
+        group_event(
+            message=[
+                {"type": "text", "data": {"text": "看看这个"}},
+                {"type": "image", "data": {"url": "https://private.invalid/secret-image"}},
+                {"type": "record", "data": {"file": "do-not-download"}},
+                {"type": "file", "data": {"file": "do-not-open"}},
+                {"type": "text", "data": {"text": "稍后再聊"}},
+            ]
+        ),
+        bot_id=BOT,
+    )
+    assert event.text == "看看这个[图片][语音][文件]稍后再聊"
+    assert event.kind == "nontext" and not hasattr(event, "image_urls")
+    assert "secret-image" not in event.text and "do-not-download" not in event.text
+    cq = parse_group_message(
+        group_event(
+            message="前文[CQ:image,file=private,url=https://private.invalid/img]后文[CQ:at,qq=99999]"
+        ),
+        bot_id=BOT,
+    )
+    assert cq.text == "前文[图片]后文[提及群成员]" and cq.kind == "nontext"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("allow_qq", [None, USER])
+async def test_receive_collects_groups_only_in_normal_mode_and_never_replays_old_groups(allow_qq):
+    class Socket:
+        def __aiter__(self):
+            async def messages():
+                for event in [group_event(), group_event(message_id=124, time=0)]:
+                    yield json.dumps(event)
+
+            return messages()
+
+    connection = OneBotConnection(Socket(), allow_qq=allow_qq, allow_old_messages=True)
+    connection.bot_id = BOT
+    await connection.receive()
+    if allow_qq is None:
+        event = await connection.events.get()
+        assert isinstance(event, GroupMessageEvent) and event.message_id == "123"
+    assert await connection.events.get() is None
+    assert connection.events.empty()
 
 
 @pytest.mark.parametrize(
@@ -262,6 +413,135 @@ async def identify_client(socket, ready):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chat_enabled", [False, True])
+async def test_normal_group_collection_is_committed_without_any_private_side_effect(
+    engine,
+    monkeypatch,
+    chat_enabled,
+):
+    from lisa import gateway, group_records
+
+    ready, drained = signal_identified(monkeypatch), asyncio.Event()
+    ingested, actions = [], []
+    ingest = group_records.ingest_group_message
+    with Session(engine) as db, db.begin():
+        db.add(CollectedGroup(bot_id=BOT, qq_group_id=GROUP, name="合成群", enabled=True))
+        db.add(CollectedGroup(bot_id=BOT, qq_group_id="40004", name="未启用群", enabled=False))
+
+    def ingest_and_signal(db, event):
+        result = ingest(db, event)
+        ingested.append((event.group_id, result))
+        if len(ingested) == 5:
+            drained.set()
+        return result
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Passive groups must never enter a private/vision/service pipeline")
+
+    monkeypatch.setattr(group_records, "ingest_group_message", ingest_and_signal)
+    monkeypatch.setattr(gateway, "ingest_message", forbidden)
+    monkeypatch.setattr(gateway, "handle_service_message", forbidden)
+    monkeypatch.setattr(gateway, "image_url_allowed", forbidden)
+
+    async def server(socket):
+        await identify_client(socket, ready)
+        for event in [
+            group_event(message_id=-901, message="绑定"),
+            group_event(message_id="-901", message="绑定"),  # Same signed ID, duplicate delivery.
+            group_event(
+                message_id=902,
+                message=[
+                    {"type": "image", "data": {"url": "https://private.invalid/image"}},
+                ],
+            ),
+            group_event(message_id=903, group_id=40004, message="此群已停用"),
+            group_event(message_id=904, group_id=50005, message="此群没有采集配置"),
+        ]:
+            await socket.send(json.dumps(event))
+        await asyncio.wait_for(drained.wait(), 3)
+        await socket.close()
+        actions.extend([message async for message in socket])
+
+    async with serve(server, "127.0.0.1", 0) as listener:
+        port = listener.sockets[0].getsockname()[1]
+        async with connect(f"ws://127.0.0.1:{port}") as socket:
+            await asyncio.wait_for(
+                serve_connection(
+                    socket,
+                    engine=engine,
+                    allow_qq=None,
+                    web_url="http://testserver",
+                    chat_enabled=chat_enabled,
+                ),
+                4,
+            )
+    assert actions == []  # Only identity actions occurred, no group or private response.
+    assert ingested == [
+        (GROUP, True),
+        (GROUP, False),
+        (GROUP, True),
+        ("40004", False),
+        ("50005", False),
+    ]
+    with Session(engine) as db:
+        messages = list(db.scalars(select(GroupMessage).order_by(GroupMessage.message_id)))
+        assert [item.message_id for item in messages] == ["-901", "902"]
+        assert [(item.content, item.kind) for item in messages] == [
+            ("绑定", "text"),
+            ("[图片]", "nontext"),
+        ]
+        for model in (
+            QQBinding,
+            ChatMessage,
+            Memory,
+            ModelCall,
+            Task,
+            ServiceEvent,
+            OutboundMessage,
+        ):
+            assert db.scalar(select(func.count()).select_from(model)) == 0
+
+
+@pytest.mark.asyncio
+async def test_group_ingest_failure_never_falls_through_to_private_commands(engine, monkeypatch):
+    from lisa import gateway, group_records
+
+    ready = signal_identified(monkeypatch)
+    private_calls = []
+
+    def fail(db, event):
+        raise RuntimeError("synthetic group storage failure")
+
+    def private(*args, **kwargs):
+        private_calls.append(kwargs)
+        return None
+
+    monkeypatch.setattr(group_records, "ingest_group_message", fail)
+    monkeypatch.setattr(gateway, "ingest_message", private)
+    monkeypatch.setattr(gateway, "handle_service_message", private)
+
+    async def server(socket):
+        await identify_client(socket, ready)
+        await socket.send(json.dumps(group_event(message="绑定")))
+        await socket.wait_closed()
+
+    async with serve(server, "127.0.0.1", 0) as listener:
+        port = listener.sockets[0].getsockname()[1]
+        async with connect(f"ws://127.0.0.1:{port}") as socket:
+            with pytest.raises(RuntimeError, match="group storage failure"):
+                await asyncio.wait_for(
+                    serve_connection(
+                        socket,
+                        engine=engine,
+                        allow_qq=None,
+                        web_url="http://testserver",
+                    ),
+                    3,
+                )
+    assert private_calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_chat_prefix_requires_enabled_mode_and_allowlisted_sender(
     engine, monkeypatch, enabled
@@ -364,6 +644,19 @@ async def test_normal_private_chat_routes_bound_users_and_keeps_commands_separat
                         {"type": "text", "data": {"text": "绑定"}},
                     ]
                 },
+                {
+                    "message": [
+                        {"type": "image", "data": {"url": "https://gchat.qpic.cn/image"}},
+                        {"type": "text", "data": {"text": "绑定"}},
+                    ]
+                },
+                {
+                    "user_id": 30004,
+                    "message": [
+                        {"type": "image", "data": {"url": "https://gchat.qpic.cn/image"}},
+                        {"type": "text", "data": {"text": "绑定"}},
+                    ],
+                },
                 {"message": "绑定"},
                 {"message": "找回"},
             ]
@@ -385,15 +678,17 @@ async def test_normal_private_chat_routes_bound_users_and_keeps_commands_separat
                 ),
                 3,
             )
-    assert commands == ["绑定", "找回"]
+    assert commands == ["", "绑定", "找回"]
     with Session(engine) as db:
         rows = list(db.scalars(select(ChatMessage).order_by(ChatMessage.event_key)))
         assert [(db.get(QQBinding, row.user_id).qq_id, row.content, row.kind) for row in rows] == [
             (USER, "普通私聊", "text"),
             ("30003", "测试对话 保留这段原文", "text"),
             (USER, "[用户发送了非文本消息，当前无法读取其内容。]", "nontext"),
+            (USER, "绑定", "image"),
         ]
         assert rows[0].task_id == rows[2].task_id != rows[1].task_id
+        assert rows[3].image_urls == ["https://gchat.qpic.cn/image"]
 
 
 def seed_outbound(engine, *, qq_id=USER, status="pending"):

@@ -202,6 +202,7 @@ async def test_current_material_chapter_and_diary_exclusions(db, engine, vector_
 async def test_large_source_batches_and_metadata_only_references(
     db, engine, vector_settings, library
 ):
+    vector_settings = vector_settings.model_copy(update={"embedding_batch_size": 10})
     owner, _, project_id, _, _ = library
     project = db.get(Project, project_id)
     project.worldbook = "世界" * 15000
@@ -212,7 +213,7 @@ async def test_large_source_batches_and_metadata_only_references(
     async def embed(*args):
         texts = args[-1]
         batches.append(texts)
-        assert len(texts) <= 32
+        assert len(texts) <= 10
         assert sum(len(text.encode()) for text in texts) <= 32000
         return await vectors(*args)
 

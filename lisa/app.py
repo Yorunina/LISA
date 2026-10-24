@@ -15,10 +15,12 @@ from lisa import (
     auth,
     characters,
     contact_policy,
+    group_records,
     memory,
     onboarding,
     retrieval_config,
     scheduling,
+    sharing,
     style_corpus,
     style_distillation,
     style_profiles,
@@ -88,6 +90,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(account_deletion.router)
     app.include_router(onboarding.router)
     app.include_router(works.router)
+    app.include_router(sharing.router)
     app.include_router(memory.router)
     app.include_router(scheduling.router)
     app.include_router(contact_policy.router)
@@ -96,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(style_corpus.router)
     app.include_router(style_profiles.router)
     app.include_router(style_distillation.router)
+    app.include_router(group_records.router)
 
     @app.get("/api/service-status")
     def service_status(user=Depends(auth.current_user)):

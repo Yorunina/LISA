@@ -181,6 +181,9 @@ async def test_generation_and_confirmed_delivery_preserve_progress_reference(
     db.expire_all()
     assert str(author.id) in generate.call_args.args[4]
     reference = db.get(Task, contact.id).input_snapshot["progress"]
+    outbound = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == contact.id))
+    assert f"?chapter={reference['chapter_id']}" in outbound.content
+    assert "/read/" in outbound.content
     assert reference["task_id"] == str(author.id)
     assert set(reference) == {"task_id", "project_id", "chapter_id", "version"}
     assert not db.scalar(select(ChatMessage).where(ChatMessage.task_id == contact.id))

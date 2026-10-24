@@ -27,7 +27,8 @@ def test_registration_persists_only_hashes(client, db, invites):
     response = register(client, invites[0], "Reader_One")
     assert response.status_code == 201, response.text
     assert response.json()["username"] == "reader_one"
-    assert set(response.json()) == {"id", "username"}
+    assert set(response.json()) == {"id", "username", "is_admin"}
+    assert response.json()["is_admin"] is False
     cookie = response.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=strict" in cookie
     assert "path=/" in cookie

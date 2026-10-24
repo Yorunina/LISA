@@ -38,6 +38,7 @@ class UserView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     username: str
+    is_admin: bool
 
 
 def issue_invites(db: Session, count: int) -> list[str]:

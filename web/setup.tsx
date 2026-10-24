@@ -1,7 +1,7 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { request } from './api';
-import type { User } from './api';
+import type { StyleKind, User } from './api';
 import { ErrorNotice } from './ui';
 import { AccountDeletion } from './account-deletion';
 import type { WorksHandle } from './works';
@@ -60,7 +60,7 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
   const memory = useRef<MemoryHandle>(null);
   const contact = useRef<ContactSettingsHandle>(null);
   const styles = useRef<StyleProfilesHandle>(null);
-  const [styleProjectId, setStyleProjectId] = useState<string | null>(null);
+  const [styleEntry, setStyleEntry] = useState<{ kind: StyleKind; projectId: string | null; back: 'works' | 'account' }>({ kind: 'personality', projectId: null, back: 'account' });
   const [setup, setSetup] = useState<Setup | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -152,6 +152,11 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
     else void leavePage(action);
   }
 
+  function openStyles(kind: StyleKind, back: 'works' | 'account' = 'account') {
+    setStyleEntry({ kind, projectId: null, back });
+    requestLeave('styles');
+  }
+
   async function previewBinding(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
@@ -200,8 +205,13 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
   if (loading) return <main id="main" className="study-page" role="status">正在打开书房…</main>;
 
   return <>
-    <header className="topbar"><nav className="study-nav" aria-label="书房导航"><button className="text-button" aria-current={section === 'works' ? 'page' : undefined} onClick={() => { if (section !== 'works') requestLeave('works'); }} disabled={busy}>我的作品</button><button className="text-button" aria-current={section === 'memory' ? 'page' : undefined} onClick={() => { if (section !== 'memory') requestLeave('memory'); }} disabled={busy}>记忆</button><button className="text-button" aria-current={section === 'account' || section === 'contact' || section === 'styles' ? 'page' : undefined} onClick={() => { if (section !== 'account') requestLeave('account'); }} disabled={busy}>账号与 LISA 性格</button></nav><button className="text-button" onClick={() => requestLeave('logout')} disabled={busy}>退出登录</button></header>
-    {section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} onStyles={projectId => { setStyleProjectId(projectId); void leavePage('styles'); }} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : section === 'styles' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取风格方案…</main>}><StyleProfiles ref={styles} initialized={!!setup?.initialized} initialProjectId={styleProjectId} onBack={() => requestLeave('account')} onApplied={() => { void request<Setup>('/setup').then(state => { setSetup(state); setName(state.persona?.name ?? ''); setPrompt(state.persona?.prompt ?? ''); setEditing(!state.persona); }).catch(showFailure); }} /></Suspense> : <main id="main" tabIndex={-1}>
+    <header className="topbar"><nav className="study-nav" aria-label="书房导航">
+      <button className="text-button" aria-current={section === 'works' ? 'page' : undefined} onClick={() => { if (section !== 'works') requestLeave('works'); }} disabled={busy}>我的作品</button>
+      <button className="text-button" aria-current={section === 'styles' ? 'page' : undefined} onClick={() => { if (section !== 'styles') openStyles('personality', section === 'works' ? 'works' : 'account'); }} disabled={busy || !setup?.qq_id}>性格与风格</button>
+      <button className="text-button" aria-current={section === 'memory' ? 'page' : undefined} onClick={() => { if (section !== 'memory') requestLeave('memory'); }} disabled={busy}>记忆</button>
+      <button className="text-button" aria-current={section === 'account' || section === 'contact' ? 'page' : undefined} onClick={() => { if (section !== 'account') requestLeave('account'); }} disabled={busy}>账号与 LISA 性格</button>
+    </nav><button className="text-button" onClick={() => requestLeave('logout')} disabled={busy}>退出登录</button></header>
+    {section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} initialProjectId={styleEntry.projectId} onStyles={projectId => { setStyleEntry({ kind: 'writing', projectId, back: 'works' }); void leavePage('styles'); }} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : section === 'styles' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取风格方案…</main>}><StyleProfiles ref={styles} initialized={!!setup?.initialized} initialKind={styleEntry.kind} initialProjectId={styleEntry.projectId} backLabel={styleEntry.back === 'works' ? '返回我的作品' : '返回账号设置'} onBack={() => requestLeave(styleEntry.back)} onApplied={() => { void request<Setup>('/setup').then(state => { setSetup(state); setName(state.persona?.name ?? ''); setPrompt(state.persona?.prompt ?? ''); setEditing(!state.persona); }).catch(showFailure); }} /></Suspense> : <main id="main" tabIndex={-1}>
       <div className="study-page">
         <p className="eyebrow">我的书房</p><h1 ref={heading} tabIndex={-1}>欢迎，{user.username}。</h1>
         <p className="page-subtitle">{setup?.initialized ? '绑定与性格设置已保存。' : '完成 QQ 绑定与性格设置，准备与你的 LISA 相识。'}</p>
@@ -222,13 +232,13 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
               {setup.initialized && <ServiceNotice />}
               {editing ? <section className="setup-panel" aria-labelledby="persona-title">
                 <div className="panel-toolbar"><div><p className="eyebrow">{setup.persona ? '性格设计' : '第二步'}</p><h2 id="persona-title">LISA 性格</h2></div>{setup.persona && <button className="text-button" onClick={() => requestLeave('overview')} disabled={busy}>返回书房</button>}</div>
-                <p className="form-copy">使用自定义 prompt 描述 LISA 的性格、背景与相处方式。正式性格预设尚在设计中。这是陪伴你的 LISA，与作品中的角色设置不同。</p>
+                <div className="persona-style-entry"><p>也可以从聊天记录中提炼相处方式，试聊后再决定是否应用。</p><button className="secondary" disabled={busy} onClick={() => openStyles('personality')}>从 QQ 记录提炼性格</button></div><p className="form-copy">使用自定义 prompt 描述 LISA 的性格、背景与相处方式。正式性格预设尚在设计中。这是陪伴你的 LISA，与作品中的角色设置不同。</p>
                 <form ref={personaForm} onSubmit={event => { event.preventDefault(); void savePersona(); }} aria-busy={busy}>
                   <fieldset disabled={busy}><div className="field"><label htmlFor="persona-name">性格名称</label><input id="persona-name" value={name} onChange={event => { setName(event.target.value); setSaved(false); }} required maxLength={80} /></div><div className="field"><label htmlFor="persona-prompt">LISA 性格 prompt</label><textarea id="persona-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setSaved(false); }} required maxLength={12000} rows={10} aria-describedby="persona-hint" /><p id="persona-hint" className="field-hint">最多 12,000 个字符。修改保存后只影响后续交流与创作，已有记忆、关系经历和作品保留。</p></div></fieldset>
                   <div className="save-bar"><button className="primary" disabled={busy}>{busy ? '正在保存…' : '保存性格'}</button><p role="status">{busy ? '请稍候' : dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : setup.persona ? `当前版本 ${setup.persona.version}` : '保存后完成性格初始化'}</p></div>
                 </form>
-              </section> : <section className="welcome-paper"><span className="paper-flower" aria-hidden="true">✳</span><h2>{setup.persona?.name}</h2><p>性格设置已保存。你们的经历，会从这里慢慢积累。</p><button className="secondary" onClick={() => { setEditing(true); setSaved(false); }}>调整 LISA 性格</button></section>}
-              <section className="account-contact-entry" aria-labelledby="styles-entry-title"><div><h2 id="styles-entry-title">性格与写作风格</h2><p>从 QQ 记录或作品提炼方案，保存、试用，再明确应用。保留多个版本。</p></div><button className="secondary" onClick={() => { setStyleProjectId(null); requestLeave('styles'); }} disabled={busy}>管理风格方案</button></section>
+              </section> : <section className="welcome-paper"><span className="paper-flower" aria-hidden="true">✳</span><h2>{setup.persona?.name}</h2><p>性格设置已保存。你们的经历，会从这里慢慢积累。</p><button className="secondary" onClick={() => { setEditing(true); setSaved(false); }}>调整 LISA 性格</button><button className="text-button" disabled={busy} onClick={() => openStyles('personality')}>从 QQ 记录提炼性格</button></section>}
+              <section className="account-contact-entry" aria-labelledby="styles-entry-title"><div><h2 id="styles-entry-title">性格与写作风格</h2><p>从 QQ 记录或作品提炼方案，保存、试用，再明确应用。保留多个版本。</p></div><button className="secondary" onClick={() => { openStyles('personality'); }} disabled={busy}>管理风格方案</button></section>
               {setup.initialized && <section className="account-contact-entry" aria-labelledby="contact-entry-title"><div><h2 id="contact-entry-title">联系偏好</h2><p>主动联系默认关闭。设置是否允许联系、免打扰时段与联系频率。</p></div><button className="secondary" onClick={() => requestLeave('contact')} disabled={busy}>设置联系偏好</button></section>}
             </>}
           </>}

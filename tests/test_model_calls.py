@@ -156,9 +156,11 @@ def records(engine):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["gpt-6-astra", "gpt-6.1-sol"])
 async def test_reservation_precedes_request_and_usage_settles_cost(
-    model_settings, engine, task_account, sdk
+    model_settings, engine, task_account, sdk, model_name
 ):
+    model_settings = model_settings.model_copy(update={"model_name": model_name})
     async def provider(**kwargs):
         calls, days = records(engine)
         assert calls[0].state == "reserved"
@@ -176,7 +178,7 @@ async def test_reservation_precedes_request_and_usage_settles_cost(
     assert calls[0].input_tokens == 100 and calls[0].output_tokens == 20
     assert calls[0].charged_usd == Decimal("0.002000")
     assert calls[0].configuration == {
-        "model": "gpt-6-astra",
+        "model": model_name,
         "base_url": "https://model.invalid/v1",
         "max_output_tokens": 600,
         "input_per_million": "10",
@@ -332,16 +334,19 @@ async def test_unresolved_previous_day_call_still_occupies_global_slot(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "status, expected_state", [(400, "failed"), (429, "failed"), (408, "unknown"), (500, "unknown")]
+    "status, expected_state",
+    [(400, "failed"), (429, "failed"), (408, "unknown"), (500, "unknown"), (502, "unknown")],
 )
 async def test_http_failures_record_cost_without_retry(
-    status, expected_state, model_settings, engine, task_account, sdk
+    status, expected_state, model_settings, engine, task_account, sdk, caplog
 ):
     request = httpx2.Request("POST", "https://model.invalid/v1/responses")
     sdk.create.side_effect = APIStatusError(
-        "synthetic rejection",
-        response=httpx2.Response(status, request=request),
-        body=None,
+        "private-token-and-user-prompt",
+        response=httpx2.Response(
+            status, request=request, headers={"x-request-id": "synthetic-request-id"}
+        ),
+        body={"private": "private-token-and-user-prompt"},
     )
     error = ModelCallFailed if expected_state == "failed" else ModelCallUnknown
     with pytest.raises(error):
@@ -357,6 +362,8 @@ async def test_http_failures_record_cost_without_retry(
         with pytest.raises(ModelCallUnknown):
             await generate(model_settings, engine, task_account)
     assert sdk.create.await_count == 1
+    assert "request_id=synthetic-request-id" in caplog.text
+    assert "private-token-and-user-prompt" not in caplog.text
 
 
 @pytest.mark.asyncio

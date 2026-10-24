@@ -5,6 +5,6 @@ export default defineConfig(({ mode }) => ({
   plugins: [react()],
   optimizeDeps: { include: ['@tiptap/react', '@tiptap/starter-kit'] },
   server: {
-    proxy: { '/api': loadEnv(mode, '.', 'LISA_API_PROXY').LISA_API_PROXY || 'http://127.0.0.1:8000' },
+    proxy: Object.fromEntries(['/api', '/read'].map(path => [path, loadEnv(mode, '.', 'LISA_API_PROXY').LISA_API_PROXY || 'http://127.0.0.1:8000'])),
   },
 }));

@@ -63,7 +63,7 @@ class Source:
 
 def embedding_space(settings: Settings) -> str:
     identity = [
-        settings.model_base_url.rstrip("/"),
+        settings.embedding_connection[0],
         settings.embedding_model,
         settings.embedding_dimensions,
     ]
@@ -74,7 +74,7 @@ def indexing_enabled(settings: Settings) -> bool:
     return bool(
         settings.embedding_model
         and settings.embedding_input_per_million > 0
-        and settings.model_api_key.get_secret_value()
+        and all(settings.embedding_connection)
     )
 
 
@@ -209,7 +209,9 @@ def _source(
     return None
 
 
-def _batch(source: Source, indexed_until: int) -> list[tuple[int, int, int, str]]:
+def _batch(
+    source: Source, indexed_until: int, max_texts: int = MAX_EMBEDDING_TEXTS
+) -> list[tuple[int, int, int, str]]:
     """No overlap or plaintext persistence; sections retain their fact/tentative labels."""
     result = []
     size = 0
@@ -223,7 +225,7 @@ def _batch(source: Source, indexed_until: int) -> list[tuple[int, int, int, str]
             if start < indexed_until or not value.strip():
                 continue
             byte_length = len(value.encode("utf-8"))
-            if len(result) >= MAX_EMBEDDING_TEXTS or size + byte_length > MAX_EMBEDDING_INPUT_BYTES:
+            if len(result) >= max_texts or size + byte_length > MAX_EMBEDDING_INPUT_BYTES:
                 return result
             result.append((index, start, end, value))
             size += byte_length
@@ -293,7 +295,7 @@ def ensure_index_tasks(db: Session, settings: Settings, limit: int = 20) -> list
                 continue
         if state.complete:
             continue
-        batch = _batch(source, state.indexed_until)
+        batch = _batch(source, state.indexed_until, settings.embedding_batch_size)
         if not batch:
             state.complete = True
             continue
@@ -369,7 +371,7 @@ async def execute_index(settings: Settings, engine, task_id, *, embed=None) -> N
             _finish(task, "cancelled", "index_source_changed")
             return
         source, state = live
-        batch = _batch(source, state.indexed_until)
+        batch = _batch(source, state.indexed_until, settings.embedding_batch_size)
         if not batch:
             state.complete = True
             _finish(task, "completed")
@@ -439,7 +441,7 @@ async def execute_index(settings: Settings, engine, task_id, *, embed=None) -> N
                     )
                 )
             state.indexed_until = batch[-1][2]
-            state.complete = not _batch(source, state.indexed_until)
+            state.complete = not _batch(source, state.indexed_until, settings.embedding_batch_size)
             _finish(task, "completed")
 
 

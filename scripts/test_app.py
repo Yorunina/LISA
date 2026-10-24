@@ -35,11 +35,24 @@ def run(*args: str, env: dict[str, str]) -> None:
 def seed_browser_invites(env: dict[str, str]) -> None:
     # Import only after the isolated database is selected.
     sys.path.insert(0, str(ROOT))
+    from datetime import UTC, datetime, timedelta
+
     from sqlalchemy import create_engine, delete
     from sqlalchemy.orm import Session
 
     from lisa.auth import issue_invites
-    from lisa.models import Account, Base, Invite, Persona, PersonaVersion, QQBinding
+    from lisa.models import (
+        Account,
+        Base,
+        Chapter,
+        CollectedGroup,
+        GroupMessage,
+        Invite,
+        Persona,
+        PersonaVersion,
+        Project,
+        QQBinding,
+    )
     from lisa.onboarding import issue_code
     from lisa.security import hash_password, hash_token
     from lisa.settings import Settings
@@ -74,10 +87,36 @@ def seed_browser_invites(env: dict[str, str]) -> None:
             styles_user = Account(
                 username="styles_reader",
                 password_hash=hash_password("synthetic-password-2026"),
+                is_admin=True,
             )
             session.add(styles_user)
             session.flush()
             session.get(Invite, hash_token(codes[5])).used_by = styles_user.id
+            public_user = Account(username="public_fixture", password_hash="unused-synthetic")
+            session.add(public_user)
+            session.flush()
+            public_work = Project(
+                user_id=public_user.id, title="雨夜来信", share_token="r" * 43,
+                worldbook="不公开的设定资料",
+            )
+            session.add(public_work)
+            session.flush()
+            from lisa.works import paragraph_document
+
+            session.add_all([
+                Chapter(
+                    project_id=public_work.id, title="第一章 · 车站", position=1,
+                    content=paragraph_document([
+                        "雨停在黄昏之前。她沿着石板路走向旧车站，口袋里的信被反复折过。",
+                        "候车室里还亮着一盏灯。窗边的人抬起头，像是已经等了很久。",
+                        "“你终于来了。”他轻声说。",
+                    ]),
+                ),
+                Chapter(
+                    project_id=public_work.id, title="第二章 · 信", position=2,
+                    content=paragraph_document(["她展开了那封信。<script>只是正文，不执行。</script>"]),
+                ),
+            ])
             session.add(QQBinding(user_id=styles_user.id, qq_id="700000097"))
             styles_persona = Persona(
                 user_id=styles_user.id, name="测试小莎", prompt="合成风格验收人格。", version=1
@@ -91,6 +130,29 @@ def seed_browser_invites(env: dict[str, str]) -> None:
                     name=styles_persona.name,
                     prompt=styles_persona.prompt,
                 )
+            )
+            group = CollectedGroup(
+                bot_id="700000010",
+                qq_group_id="700000021",
+                name="接口验收群",
+                enabled=False,
+                last_ordinal=10,
+            )
+            session.add(group)
+            session.flush()
+            recorded_at = datetime.now(UTC) - timedelta(hours=1)
+            session.add_all(
+                GroupMessage(
+                    group_id=group.id,
+                    message_id=str(8000 + index),
+                    qq_id="700000031" if index % 2 == 0 else "700000032",
+                    name="接口目标" if index % 2 == 0 else "接口上下文",
+                    content=f"合成接口验收消息 {index}，只用于群记录流程验证。",
+                    kind="text",
+                    ordinal=index + 1,
+                    sent_at=recorded_at + timedelta(seconds=index),
+                )
+                for index in range(10)
             )
             env["LISA_TEST_BINDING_CODE"] = issue_code(session, "binding", "700000001")
             env["LISA_TEST_STATUS_BINDING_CODE"] = issue_code(session, "binding", "700000004")
@@ -131,7 +193,12 @@ def main() -> None:
     env["LISA_PROACTIVE_ENABLED"] = "false"
     env["LISA_MODEL_API_KEY"] = ""
     env["LISA_EMBEDDING_MODEL"] = ""
+    env["LISA_EMBEDDING_BASE_URL"] = ""
+    env["LISA_EMBEDDING_API_KEY"] = ""
+    env["LISA_EMBEDDING_BATCH_SIZE"] = "32"
     env["LISA_EMBEDDING_INPUT_PER_MILLION"] = "0"
+    env["LISA_VISION_MODEL"] = ""
+    env["LISA_VISION_API_KEY"] = ""
     env["LISA_ONEBOT_TOKEN"] = ""
     env["PYTHONUTF8"] = "1"
     os.environ.update(env)

@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -20,6 +21,7 @@ from lisa.db import make_engine
 from lisa.models import OutboundMessage
 from lisa.onboarding import handle_service_message, record_delivery
 from lisa.settings import Settings
+from lisa.vision import MAX_IMAGES, image_url_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,39 @@ class PrivateMessage:
     sent_at: datetime
     text: str
     kind: str = "text"
+    image_urls: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class GroupMessageEvent:
+    bot_id: str
+    group_id: str
+    message_id: str
+    qq_id: str
+    name: str
+    text: str
+    sent_at: datetime
+    kind: str = "text"
+
+
+MAX_GROUP_SEGMENTS = 128
+MAX_GROUP_TEXT_CHARS = 65_536
+MAX_GROUP_BODY_BYTES = 262_144
+GROUP_PLACEHOLDERS = {
+    "image": "[图片]",
+    "record": "[语音]",
+    "video": "[视频]",
+    "file": "[文件]",
+    "face": "[表情]",
+    "mface": "[表情]",
+    "at": "[提及群成员]",
+    "reply": "[回复引用]",
+    "forward": "[合并转发]",
+    "node": "[合并转发]",
+    "json": "[卡片消息]",
+    "xml": "[卡片消息]",
+}
+CQ_SEGMENT = re.compile(r"\[CQ:([A-Za-z0-9_]+)(?:,[^\]\r\n]*)?\]")
 
 
 def qq_identity(value) -> str | None:
@@ -85,21 +120,161 @@ def parse_private_message(
         return None
     message = event.get("message")
     text = ""
+    images = []
     if isinstance(message, str) and "[CQ:" not in message:
         text = message
     elif isinstance(message, list):
         parts = []
         for segment in message:
-            if not isinstance(segment, dict) or segment.get("type") != "text":
+            if not isinstance(segment, dict):
                 break
             data = segment.get("data")
-            if not isinstance(data, dict) or not isinstance(data.get("text"), str):
+            if not isinstance(data, dict):
                 break
-            parts.append(data["text"])
+            if segment.get("type") == "text" and isinstance(data.get("text"), str):
+                parts.append(data["text"])
+            elif segment.get("type") == "image" and image_url_allowed(data.get("url")):
+                if len(images) <= MAX_IMAGES:
+                    images.append(data["url"])
+            else:
+                break
         else:
             text = "".join(parts)
+            return PrivateMessage(
+                bot_id,
+                str(message_id),
+                qq_id,
+                sent_at,
+                text,
+                "image" if images else "text" if text else "nontext",
+                tuple(images),
+            )
     return PrivateMessage(
         bot_id, str(message_id), qq_id, sent_at, text, "text" if text else "nontext"
+    )
+
+
+def _group_identity(value) -> str | None:
+    # Bound numeric parsing as these values become database keys and export fields.
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    try:
+        value = str(value)
+    except ValueError:
+        return None
+    if not 1 <= len(value) <= 20:
+        return None
+    return qq_identity(value)
+
+
+def _group_message_id(value) -> str | None:
+    # OneBot message_id is signed int32, unlike positive QQ/group identities.
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return None
+    if isinstance(value, str):
+        if not re.fullmatch(r"-?(?:0|[1-9][0-9]{0,9})", value):
+            return None
+        value = int(value)
+    return str(value) if -(2**31) <= value < 2**31 else None
+
+
+def parse_group_message(
+    payload: dict,
+    *,
+    bot_id: str,
+    max_age_seconds: float = 300,
+    now: datetime | None = None,
+) -> GroupMessageEvent | None:
+    """A passive group record, with media placeholders and no image/AI processing."""
+    if (
+        not isinstance(payload, dict)
+        or payload.get("post_type") != "message"
+        or payload.get("message_type") != "group"
+        or payload.get("sub_type") != "normal"
+        or payload.get("anonymous") is not None
+        or _group_identity(bot_id) != bot_id
+        or _group_identity(payload.get("self_id")) != bot_id
+    ):
+        return None
+    group_id = _group_identity(payload.get("group_id"))
+    message_id = _group_message_id(payload.get("message_id"))
+    qq_id = _group_identity(payload.get("user_id"))
+    if group_id is None or message_id is None or qq_id is None or qq_id == bot_id:
+        return None
+    timestamp = payload.get("time")
+    if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+        return None
+    try:
+        sent_at = datetime.fromtimestamp(timestamp, UTC)
+    except (ValueError, OverflowError, OSError):
+        return None
+    # The normal private entry can accept old messages, but group collection must not
+    # silently import an offline history or manufacture fresh collection timestamps.
+    age = ((now or datetime.now(UTC)) - sent_at).total_seconds()
+    if age < -60 or age > max_age_seconds:
+        return None
+    sender = payload.get("sender", {})
+    if not isinstance(sender, dict):
+        return None
+    if "user_id" in sender and _group_identity(sender["user_id"]) != qq_id:
+        return None
+    name = sender.get("card") or sender.get("nickname") or qq_id
+    if not isinstance(name, str):
+        return None
+    # A display name is metadata; QQ identity is always the validated event field.
+    name = " ".join(name.split())[:120] or qq_id
+    message = payload.get("message")
+    try:
+        if len(json.dumps(message, ensure_ascii=False).encode("utf-8")) > MAX_GROUP_BODY_BYTES:
+            return None
+    except (ValueError, TypeError, UnicodeError):
+        return None
+    nontext = False
+    if isinstance(message, str):
+
+        def placeholder(match):
+            nonlocal nontext
+            nontext = True
+            return GROUP_PLACEHOLDERS.get(match[1].lower(), "[非文本消息]")
+
+        text = CQ_SEGMENT.sub(placeholder, message)
+        if "[CQ:" in text:
+            return None  # Malformed media codes cannot be mistaken for plain text.
+    elif isinstance(message, list) and 0 < len(message) <= MAX_GROUP_SEGMENTS:
+        parts = []
+        for segment in message:
+            if not isinstance(segment, dict) or not isinstance(segment.get("data"), dict):
+                return None
+            kind = segment.get("type")
+            if not isinstance(kind, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", kind):
+                return None
+            if kind == "text":
+                value = segment["data"].get("text")
+                if not isinstance(value, str):
+                    return None
+                parts.append(value)
+            else:
+                nontext = True
+                parts.append(GROUP_PLACEHOLDERS.get(kind, "[非文本消息]"))
+        text = "".join(parts)
+    else:
+        return None
+    if not text.strip() or len(text) > MAX_GROUP_TEXT_CHARS or "\x00" in text or "\x00" in name:
+        return None
+    try:
+        name.encode("utf-8")
+        text.encode("utf-8")
+    except UnicodeError:
+        return None
+    return GroupMessageEvent(
+        bot_id,
+        group_id,
+        message_id,
+        qq_id,
+        name,
+        text,
+        sent_at,
+        "nontext" if nontext else "text",
     )
 
 
@@ -118,7 +293,7 @@ class OneBotConnection:
         self.allow_old_messages = allow_old_messages
         self.bot_id: str | None = None
         self.pending: dict[str, asyncio.Future] = {}
-        self.events: asyncio.Queue[PrivateMessage | None] = asyncio.Queue()
+        self.events: asyncio.Queue[PrivateMessage | GroupMessageEvent | None] = asyncio.Queue()
 
     async def receive(self) -> None:
         try:
@@ -141,6 +316,8 @@ class OneBotConnection:
                         allow_qq=self.allow_qq,
                         max_age_seconds=None if self.allow_old_messages else 300,
                     )
+                    if event is None and self.allow_qq is None:
+                        event = parse_group_message(payload, bot_id=self.bot_id)
                     if event:
                         self.events.put_nowait(event)
         except WebSocketException:
@@ -263,9 +440,18 @@ async def serve_connection(
             sender.add_done_callback(sender_stopped)
         logger.info("QQ gateway connected; mode=%s", "test" if allow_qq else "normal")
         while (message := await connection.events.get()) is not None:
+            if isinstance(message, GroupMessageEvent):
+                if allow_qq is None:
+                    from lisa.group_records import ingest_group_message
+
+                    with Session(engine) as db, db.begin():
+                        ingest_group_message(db, message)
+                # Group collection is a separate ingress: no binding, private-chat
+                # storage, model invocation or response follows even for command text.
+                continue
             command = message.text.strip()
             normal = allow_qq is None
-            service_command = command in {"绑定", "找回"}
+            service_command = message.kind == "text" and command in {"绑定", "找回"}
             chat_requested = (
                 chat_enabled and not service_command and (normal or command.startswith("测试对话 "))
             )
@@ -273,6 +459,8 @@ async def serve_connection(
                 content = command if normal else command[len("测试对话 ") :].strip()
                 if normal and message.kind == "nontext":
                     content = "[用户发送了非文本消息，当前无法读取其内容。]"
+                elif message.kind == "image" and not content:
+                    content = "[用户发送了图片]"
                 if content:
                     with Session(engine) as db, db.begin():
                         accepted = ingest_message(
@@ -283,6 +471,7 @@ async def serve_connection(
                             sent_at=message.sent_at,
                             content=content,
                             kind=message.kind,
+                            image_urls=list(message.image_urls),
                         )
                     if accepted is not None:
                         continue
@@ -297,7 +486,7 @@ async def serve_connection(
                     message_id=message.message_id,
                     qq_id=message.qq_id,
                     sent_at=message.sent_at,
-                    text=message.text,
+                    text=message.text if message.kind == "text" else "",
                     web_url=web_url,
                 )
             if reply is not None:

@@ -23,6 +23,7 @@ from lisa.model_calls import (
     generate_reply,
 )
 from lisa.models import Account, BudgetDay, ModelCall, Task
+from lisa.retrieval import embedding_space, indexing_enabled
 
 
 @pytest.fixture
@@ -137,6 +138,35 @@ async def test_ordered_vectors_and_shared_cost_metadata(
     }
     assert sdk.configurations[0]["max_retries"] == 0
     assert sdk.configurations[0]["http_client"].follow_redirects is False
+
+
+@pytest.mark.asyncio
+async def test_separate_embedding_provider_preserves_chat_credentials(
+    embedding_settings, engine, task_account, sdk
+):
+    separate = embedding_settings.model_copy(
+        update={
+            "embedding_base_url": "https://separate.invalid/v1",
+            "embedding_api_key": SecretStr("separate-synthetic-key"),
+            "embedding_batch_size": 10,
+        }
+    )
+    assert indexing_enabled(separate)
+    assert embedding_space(separate) != embedding_space(embedding_settings)
+    assert embedding_space(separate) == embedding_space(
+        separate.model_copy(update={"model_base_url": "https://changed-chat.invalid/v1"})
+    )
+    await generate_embeddings(separate, engine, *task_account, ["text"])
+    await generate_reply(separate, engine, *task_account, "Reply briefly", [])
+    assert [(c["base_url"], c["api_key"]) for c in sdk.configurations] == [
+        ("https://separate.invalid/v1", "separate-synthetic-key"),
+        ("https://embedding.invalid/v1", "synthetic-key"),
+    ]
+    calls, _ = records(engine)
+    assert calls[0].configuration["base_url"] == "https://separate.invalid/v1"
+    with pytest.raises(ModelInputTooLarge):
+        await generate_embeddings(separate, engine, *task_account, ["text"] * 11)
+    assert len(records(engine)[0]) == 2
 
 
 @pytest.mark.asyncio
@@ -308,12 +338,19 @@ async def test_embedding_input_bounded_before_reservation(
 
 
 @pytest.mark.parametrize(
-    "update", [{"embedding_model": ""}, {"embedding_input_per_million": Decimal(0)}]
+    "update",
+    [
+        {"embedding_model": ""},
+        {"embedding_input_per_million": Decimal(0)},
+        {"embedding_base_url": "https://no-key.invalid/v1"},
+        {"embedding_api_key": SecretStr("no-endpoint-synthetic-key")},
+    ],
 )
 @pytest.mark.asyncio
 async def test_embedding_placeholder_config_does_not_call_provider(
     embedding_settings, engine, task_account, sdk, update
 ):
+    assert not indexing_enabled(embedding_settings.model_copy(update=update))
     with pytest.raises(ModelCallFailed):
         await generate_embeddings(
             embedding_settings.model_copy(update=update), engine, *task_account, ["text"]
