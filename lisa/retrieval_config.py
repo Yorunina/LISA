@@ -90,6 +90,17 @@ def task_references(task_id: UUID, user: User, db: DB):
             if source.revision != ref["revision"]
             else "available"
         )
+        title = source.metadata.get("title", "长期记忆") if state == "available" else None
+        if state == "available" and source.kind == "project":
+            section = next(
+                (name for name, start, end in source.sections if start <= ref["start"] < end), ""
+            )
+            if section.startswith("worldbook_entry:"):
+                title = next(
+                    item["title"]
+                    for item in source.metadata["worldbook_entries"]
+                    if item["id"] == section.split(":", 1)[1]
+                )
         items.append(
             {
                 "position": position,
@@ -98,7 +109,7 @@ def task_references(task_id: UUID, user: User, db: DB):
                 "start": ref["start"],
                 "end": ref["end"],
                 "state": state,
-                "title": source.metadata.get("title", "长期记忆") if state == "available" else None,
+                "title": title,
                 "text": source.text[ref["start"] : ref["end"]] if state == "available" else None,
             }
         )

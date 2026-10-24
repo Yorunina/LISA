@@ -1,10 +1,12 @@
 import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import type { Character } from '../../web/characters'
+import type { WorldbookEntry } from '../../web/worldbook'
+import type { StyleLibrary, WritingStyle } from '../../web/api'
 import { readFile } from 'node:fs/promises'
 
 const doc = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] })
-const work = () => ({ id: 'work-1', title: '雨夜来信', kind: 'novel', is_current: true, completed: false, worldbook: '', constraints: '', characters: '', author_prompt: '', summary: '', plot_state: '', agreement: '', preferences: '', tentative: '' })
+const work = () => ({ id: 'work-1', title: '雨夜来信', kind: 'novel', is_current: true, completed: false, worldbook: '', worldbook_entries: [] as WorldbookEntry[], constraints: '', characters: '', author_prompt: '', summary: '', plot_state: '', agreement: '', preferences: '', tentative: '' })
 const chapter = () => ({ id: 'chapter-1', title: '第一章 重逢', position: 1, content: doc('她站在雨里的车站。'), text: '她站在雨里的车站。', version: 1 })
 const task = () => ({ id: 'task-1', kind: 'scene', goal: '描写雨夜重逢的一个场景。', status: 'pending', error: null as string | null, can_cancel: true, can_retry: false, input_tokens: 0, output_tokens: 0, charged_usd: '0', reserved_usd: '0.02', adopted_at: null as string | null })
 const schedule = () => ({ enabled: true, status: 'no_plan', pause_reason: null as string | null, due_at: null as string | null, goal: null as string | null, project_id: null as string | null, remaining_scenes: 0 })
@@ -33,6 +35,10 @@ async function stubStudy(page: Page, seeded = false) {
     chapters: seeded ? [chapter()] : [] as ReturnType<typeof chapter>[],
     tasks: [] as ReturnType<typeof task>[],
     saveFails: false,
+    styleSaveFails: false,
+    styleLoadFails: false,
+    styleLibrary: { profiles: [], applications: { personality: null, writing: null } } as StyleLibrary,
+    writingStyles: {} as Record<string, WritingStyle>,
     schedule: schedule(),
     scheduleFails: false,
     chapterSaves: [] as { title: string; content: object }[],
@@ -49,6 +55,19 @@ async function stubStudy(page: Page, seeded = false) {
     if (path === '/schedule') return route.fulfill(state.scheduleFails ? { status: 503, json: { detail: '合成计划状态读取失败。' } } : { json: state.schedule })
     if (path === '/setup/persona') return route.fulfill({ json: { qq_id: '700000099', initialized: true, persona: { ...body, version: 2 }, presets: [] } })
     if (path === '/projects/handoff') return route.fulfill({ json: { finishing_tasks: state.handoff } })
+    if (path === '/style/profiles') return route.fulfill(state.styleLoadFails ? { status: 503, json: { detail: '合成风格读取失败。' } } : { json: state.styleLibrary })
+    const writingStyle = path.match(/^\/projects\/(work-\d+)\/writing-style$/)
+    if (writingStyle) {
+      if (state.styleLoadFails || (req.method() === 'PUT' && state.styleSaveFails)) return route.fulfill({ status: 503, json: { detail: '合成风格方案未应用。' } })
+      const current = state.writingStyles[writingStyle[1]] ?? { override_version_id: null, effective_version_id: null, effective_profile_name: null, source: 'none', prompt: '' }
+      const override = req.method() === 'PUT' ? body.version_id : current.override_version_id
+      const effective = override ?? state.styleLibrary.applications.writing
+      const profile = state.styleLibrary.profiles.find(item => item.versions.some(version => version.id === effective))
+      const version = profile?.versions.find(item => item.id === effective)
+      const view: WritingStyle = { override_version_id: override, effective_version_id: effective, effective_profile_name: profile?.name ?? null, source: override ? 'override' : effective ? 'default' : 'none', prompt: version?.prompt ?? '' }
+      state.writingStyles[writingStyle[1]] = view
+      return route.fulfill({ json: view })
+    }
     const retrieval = path.match(/^\/projects\/(work-\d+)\/retrieval$/)
     if (retrieval) {
       if (state.retrievalFails || (req.method() === 'PUT' && state.saveFails)) return route.fulfill({ status: 503, json: { detail: '合成检索配置失败，请重试。' } })
@@ -153,6 +172,164 @@ async function stubStudy(page: Page, seeded = false) {
   await page.getByRole('button', { name: '我的作品', exact: true }).click()
   return state
 }
+
+test('guided requirements and discussion preserve legacy fields, examples and only changed inputs', async ({ page }, testInfo) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  Object.assign(state.project!, { constraints: '不可出现魔法。', preferences: '更偏好克制对白。', tentative: '寄信人身份未定。', author_prompt: '保留原有作者指引。' })
+  await page.clock.fastForward(5_100)
+  await page.getByRole('button', { name: '创作资料', exact: true }).click()
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('现代都市小说，叙述克制。')
+  await expect(page.getByLabel('必须遵守（可选）')).toHaveValue('不可出现魔法。')
+  await expect(page.getByRole('button', { name: '作者 prompt', exact: true })).toHaveCount(0)
+  const direction = page.locator('.guided-field').filter({ has: page.getByLabel('作品方向（已确认）') })
+  await direction.getByText('看一个填写示例', { exact: true }).click()
+  await expect(direction.getByRole('button', { name: '填入此示例' })).toBeDisabled()
+  await page.getByLabel('作品方向（已确认）').fill('')
+  await direction.getByRole('button', { name: '填入此示例' }).click()
+  expect(state.project!.agreement).toBe('现代都市小说，叙述克制。')
+  state.saveFails = true
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('合成保存失败')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue(/现实悬疑小说/)
+  state.saveFails = false
+  await page.getByLabel('作品方向（已确认）').press('Control+s')
+  await expect.poll(() => state.project!.agreement).toContain('现实悬疑小说')
+  expect(state.project!.constraints).toBe('不可出现魔法。')
+  await page.getByLabel('必须遵守（可选）').fill('不得靠偶然破解谜题。')
+  state.project!.agreement = 'QQ 中新确认的作品方向。'
+  await page.clock.fastForward(5_100)
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => state.project!.constraints).toBe('不得靠偶然破解谜题。')
+  expect(state.project!.agreement).toBe('QQ 中新确认的作品方向。')
+  expect(state.requests.filter(item => item.path === '/projects/work-1' && 'constraints' in item.body).at(-1)!.body).toEqual({ constraints: '不得靠偶然破解谜题。' })
+  await page.screenshot({ path: testInfo.outputPath('desktop-guided-requirements.png'), fullPage: true })
+  await page.getByRole('button', { name: '讨论记录', exact: true }).click()
+  await expect(page.getByLabel('偏好倾向内容')).not.toBeVisible()
+  await page.getByText('偏好倾向', { exact: true }).click()
+  await page.getByText('待确认想法', { exact: true }).click()
+  await expect(page.getByLabel('偏好倾向内容')).toHaveValue('更偏好克制对白。')
+  await expect(page.getByLabel('待确认想法内容')).toHaveValue('寄信人身份未定。')
+  await page.getByLabel('偏好倾向内容').fill('目前偏好短句，可按场景调整。')
+  await page.getByRole('button', { name: '创作要求', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
+  await page.getByLabel('偏好倾向内容').press('Control+s')
+  await expect.poll(() => state.project!.preferences).toBe('目前偏好短句，可按场景调整。')
+  expect(state.project!.tentative).toBe('寄信人身份未定。')
+  expect(state.project!.author_prompt).toBe('保留原有作者指引。')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-guided-discussion.png'), fullPage: true })
+})
+
+test('work writing settings apply explicit versions with supplements and retain pending selection on partial failure', async ({ page }, testInfo) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  state.project!.author_prompt = '原有作者指引，不自动拆分。'
+  state.styleLibrary = { profiles: [{ id: 'profile-a', kind: 'writing', name: '克制笔法', latest_version: 2, versions: [1, 2].map(version => ({ id: `version-${version}`, version, prompt: `方案指引${version}`, summary: '少解释，多动作。', report: {}, created_at: '2026-10-24T00:00:00Z' })) }], applications: { personality: null, writing: 'version-1' } }
+  await page.clock.fastForward(5_100)
+  await page.getByRole('button', { name: '创作资料', exact: true }).click()
+  await page.getByRole('button', { name: '写作风格', exact: true }).click()
+  await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('克制笔法 · 版本 1')
+  await expect(page.getByLabel('本作品补充写法（可选）')).toHaveValue('原有作者指引，不自动拆分。')
+  await page.getByLabel('风格方案', { exact: true }).selectOption('version-2')
+  expect(state.writingStyles['work-1'].override_version_id).toBeNull()
+  await page.getByLabel('本作品补充写法（可选）').fill('采用第三人称限知视角。')
+  state.styleSaveFails = true
+  await page.getByRole('button', { name: '保存写作设置' }).click()
+  await expect(page.getByRole('alert')).toContainText('补充写法已保存，风格方案尚未应用')
+  expect(state.project!.author_prompt).toBe('采用第三人称限知视角。')
+  await expect(page.getByLabel('风格方案', { exact: true })).toHaveValue('version-2')
+  await page.clock.fastForward(5_100)
+  await expect(page.getByLabel('风格方案', { exact: true })).toHaveValue('version-2')
+  state.styleSaveFails = false
+  await page.getByLabel('本作品补充写法（可选）').press('Control+s')
+  await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('本作品单独使用 · 克制笔法 · 版本 2')
+  expect(state.styleLibrary.profiles[0].versions[1].prompt).toBe('方案指引2')
+  expect(state.writingStyles['work-2']).toBeUndefined()
+  await page.getByText('查看所选方案的写作指引', { exact: true }).click()
+  await expect(page.getByText('方案指引2', { exact: true })).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('desktop-work-writing-style.png'), fullPage: true })
+  await page.getByLabel('风格方案', { exact: true }).selectOption('')
+  await page.getByRole('button', { name: '讨论记录', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
+  await page.getByRole('button', { name: '写作风格', exact: true }).click()
+  await expect(page.getByLabel('风格方案', { exact: true })).toHaveValue('version-2')
+  await page.getByLabel('风格方案', { exact: true }).selectOption('')
+  await page.getByRole('button', { name: '保存写作设置' }).click()
+  await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('跟随 LISA 默认 · 克制笔法 · 版本 1')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-work-writing-style.png'), fullPage: true })
+  await page.getByRole('button', { name: '讨论记录', exact: true }).click()
+  state.styleLoadFails = true
+  await page.getByRole('button', { name: '写作风格', exact: true }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByLabel('本作品补充写法（可选）').fill('风格读取失败时仍可保存补充写法。')
+  await page.getByRole('button', { name: '保存写作设置' }).click()
+  await expect.poll(() => state.project!.author_prompt).toBe('风格读取失败时仍可保存补充写法。')
+  state.styleLoadFails = false
+  await page.getByRole('button', { name: '重新读取风格方案' }).click()
+  await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('跟随 LISA 默认')
+})
+
+test('worldbook entries preserve edits, search, links and plot state on desktop and mobile', async ({ page }, testInfo) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  state.project!.worldbook = '时间不可逆转。'
+  await page.clock.fastForward(5_100)
+  await page.getByRole('button', { name: '创作资料', exact: true }).click()
+  await page.getByRole('button', { name: '世界书', exact: true }).click()
+  await expect(page.getByLabel('世界书内容')).toHaveValue('时间不可逆转。')
+  await page.getByRole('button', { name: '设定条目 · 0' }).click()
+  await page.getByRole('button', { name: '新增设定', exact: true }).click()
+  await page.getByLabel('设定标题', { exact: true }).fill('火术规则')
+  await page.getByLabel('设定分类', { exact: true }).selectOption('rule')
+  await page.getByLabel('设定正文', { exact: true }).fill('施术消耗体温。')
+  await page.getByRole('button', { name: '新增设定', exact: true }).click()
+  await page.getByLabel('设定标题', { exact: true }).fill('北境禁令')
+  await page.getByLabel('设定正文', { exact: true }).fill('持证医师可以施术。')
+  await page.getByLabel('适用条件（可选）').fill('旧历320年以后，仅限北境。')
+  await page.getByText('关联设定 · 0', { exact: true }).click()
+  await page.getByRole('checkbox', { name: '火术规则' }).check()
+  // Polling must preserve all unsaved entry edits, not only the core textarea.
+  await page.clock.fastForward(5_100)
+  await expect(page.getByLabel('设定标题', { exact: true })).toHaveValue('北境禁令')
+  state.saveFails = true
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('合成保存失败')
+  await expect(page.getByLabel('设定正文', { exact: true })).toHaveValue('持证医师可以施术。')
+  state.saveFails = false
+  await page.getByLabel('设定正文', { exact: true }).press('Control+s')
+  await expect.poll(() => state.project!.worldbook_entries.length).toBe(2)
+  expect(state.project!.worldbook).toBe('时间不可逆转。')
+  expect(state.project!.worldbook_entries[1].related_ids).toEqual([state.project!.worldbook_entries[0].id])
+  await page.getByLabel('搜索设定', { exact: true }).fill('医师')
+  await expect(page.getByRole('navigation', { name: '设定条目列表' }).getByRole('button')).toHaveCount(1)
+  await page.getByLabel('搜索设定', { exact: true }).fill('')
+  await page.screenshot({ path: testInfo.outputPath('desktop-worldbook.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-worldbook.png'), fullPage: true })
+  await page.getByLabel('设定正文', { exact: true }).fill('未保存的规则。')
+  await page.getByRole('button', { name: '剧情状态', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
+  await expect(page.getByRole('complementary', { name: '当前剧情填写提示' })).toBeVisible()
+  await page.getByLabel('剧情状态内容').fill('时间：旧历319年。地点：北境。禁令尚未生效。')
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => state.project!.plot_state).toContain('旧历319年')
+  await page.screenshot({ path: testInfo.outputPath('mobile-plot-state.png'), fullPage: true })
+  await page.getByRole('button', { name: '世界书', exact: true }).click()
+  await page.getByRole('button', { name: '设定条目 · 2' }).click()
+  await page.getByRole('navigation', { name: '设定条目列表' }).getByRole('button', { name: '火术规则' }).click()
+  await page.getByRole('button', { name: '删除此设定' }).click()
+  await page.getByRole('button', { name: '确认删除设定' }).click()
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => state.project!.worldbook_entries.length).toBe(1)
+  expect(state.project!.worldbook_entries[0].related_ids).toEqual([])
+})
 
 test('character configuration preserves edits, validates knowledge and isolates works', async ({ page }, testInfo) => {
   await page.clock.install()
@@ -310,7 +487,7 @@ test('retrieval settings protect edits, save explicitly, restore defaults and re
   await expect(page.getByRole('alert')).toContainText('合成检索配置失败')
   state.retrievalFails = false
   await page.getByRole('button', { name: '重新读取检索配置' }).click()
-  await expect(page.getByText('服务尚未启用向量检索。配置可以保存，启用后用于后续创作。')).toBeVisible()
+  await expect(page.getByText('服务尚未启用向量检索。设定条目仍可按完整标题匹配；语义召回启用后生效。')).toBeVisible()
   await page.getByLabel('召回数量（条）').fill('7')
   await page.getByLabel('文本预算（字符）').fill('2400')
   await page.getByLabel('可用于创作的记忆', { exact: true }).uncheck()
@@ -414,18 +591,18 @@ test('first novel, explicit material confirmation, scene adoption and structured
   await page.getByRole('button', { name: '创作任务', exact: true }).click()
   await expect(page.getByRole('button', { name: '开始写作' })).toBeDisabled()
   await page.getByRole('button', { name: '创作资料', exact: true }).click()
-  await page.getByLabel('已确认共识内容').fill('现代都市小说，叙述克制。')
+  await page.getByLabel('作品方向（已确认）').fill('现代都市小说，叙述克制。')
   await page.getByRole('button', { name: '世界书', exact: true }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('现代都市小说，叙述克制。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('现代都市小说，叙述克制。')
   state.saveFails = true
   await page.getByRole('button', { name: '世界书', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('合成保存失败')
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('现代都市小说，叙述克制。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('现代都市小说，叙述克制。')
   state.saveFails = false
-  await page.getByLabel('已确认共识内容').press('Control+s')
+  await page.getByLabel('作品方向（已确认）').press('Control+s')
   await expect.poll(() => state.project?.agreement).toBe('现代都市小说，叙述克制。')
   await page.screenshot({ path: testInfo.outputPath('desktop-materials.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
@@ -476,7 +653,7 @@ test('polling preserves edits, chapter and persona navigation protect input, rew
   state.saveFails = false
   await page.getByRole('button', { name: '创作资料', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
-  await page.getByLabel('已确认共识内容').fill('尚未保存的共识。')
+  await page.getByLabel('作品方向（已确认）').fill('尚未保存的共识。')
   await page.getByRole('button', { name: '人物设定', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByLabel('人物设定内容')).toBeVisible()
@@ -529,12 +706,12 @@ test('project polling receives QQ agreement and author materials while preservin
   await page.clock.fastForward(5_100)
   await expect(page.getByRole('button', { name: '开始写作' })).toBeEnabled()
   await page.getByRole('button', { name: '创作资料', exact: true }).click()
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('QQ 新确认的共识。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('QQ 新确认的共识。')
 
-  await page.getByLabel('已确认共识内容').fill('尚未保存的本地修改。')
+  await page.getByLabel('作品方向（已确认）').fill('尚未保存的本地修改。')
   state.project!.agreement = '尚未保存的本地修改。'
   await page.clock.fastForward(5_100)
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('尚未保存的本地修改。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('尚未保存的本地修改。')
   await page.getByRole('button', { name: '作品摘要', exact: true }).click()
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
@@ -542,7 +719,7 @@ test('project polling receives QQ agreement and author materials while preservin
   state.project!.agreement = 'QQ 后续确认的共识。'
   state.project!.summary = '作者刚保存的故事摘要。'
   await page.clock.fastForward(5_100)
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('尚未保存的本地修改。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('尚未保存的本地修改。')
   await page.getByRole('button', { name: '作品摘要', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
   await expect(page.getByLabel('作品摘要内容')).toHaveValue('作者刚保存的故事摘要。')
@@ -550,9 +727,9 @@ test('project polling receives QQ agreement and author materials while preservin
   state.project!.summary = '作者再次更新的故事摘要。'
   await page.clock.fastForward(5_100)
   await expect(page.getByLabel('作品摘要内容')).toHaveValue('作者再次更新的故事摘要。')
-  await page.getByRole('button', { name: '已确认共识', exact: true }).click()
+  await page.getByRole('button', { name: '创作要求', exact: true }).click()
   await expect(page.getByRole('dialog')).not.toBeVisible()
-  await expect(page.getByLabel('已确认共识内容')).toHaveValue('QQ 后续确认的共识。')
+  await expect(page.getByLabel('作品方向（已确认）')).toHaveValue('QQ 后续确认的共识。')
 })
 
 test('first diary keeps LISA viewpoint, requires agreement, and writes a bounded segment with ordinary manual editing', async ({ page }, testInfo) => {
@@ -572,7 +749,7 @@ test('first diary keeps LISA viewpoint, requires agreement, and writes a bounded
   await expect(page.getByRole('heading', { name: '第一段日记，等待落笔。', exact: true })).toBeVisible()
   await expect(page.getByText('这是 LISA 视角的虚拟生活日记。', { exact: false })).toContainText('手动修改正文不会自动更新生活记忆')
   await page.getByRole('button', { name: '创作资料', exact: true }).click()
-  await page.getByLabel('已确认共识内容', { exact: true }).fill('记录 LISA 的虚拟日常，叙述克制，每次只写一个生活片段。')
+  await page.getByLabel('作品方向（已确认）', { exact: true }).fill('记录 LISA 的虚拟日常，叙述克制，每次只写一个生活片段。')
   await page.getByRole('button', { name: '保存资料', exact: true }).click()
   await page.getByRole('button', { name: '创作任务', exact: true }).click()
   await expect(page.getByLabel('创作方式', { exact: true })).toHaveValue('scene')

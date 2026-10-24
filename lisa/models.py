@@ -265,6 +265,7 @@ class Project(Base):
     is_current: Mapped[bool] = mapped_column(default=True, server_default="true")
     completed: Mapped[bool] = mapped_column(default=False, server_default="false")
     worldbook: Mapped[str] = mapped_column(Text, default="", server_default="")
+    worldbook_entries: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
     constraints: Mapped[str] = mapped_column(Text, default="", server_default="")
     characters: Mapped[str] = mapped_column(Text, default="", server_default="")
     author_prompt: Mapped[str] = mapped_column(Text, default="", server_default="")

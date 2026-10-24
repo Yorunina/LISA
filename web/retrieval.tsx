@@ -10,11 +10,11 @@ export function RetrievalEditor({ view, busy, dirty, saved, onChange, onSave }: 
   const config = view.config;
   return <section className="material-paper retrieval-paper" aria-label="作者检索配置">
     <p className="eyebrow">写作时的额外参考</p><h2>检索配置</h2>
-    <p className="form-copy">只影响这部作品作者的额外资料召回，不改变聊天检索、资料权限或已有索引。基础设定、约束、摘要、当前写作片段及近期记忆仍按原规则提供。</p>
-    {!view.enabled && <p className="contact-availability">服务尚未启用向量检索。配置可以保存，启用后用于后续创作。</p>}
+    <p className="form-copy">只影响这部作品作者的额外资料召回，不改变聊天检索、资料权限或已有索引。核心设定、约束、摘要、剧情状态、当前写作片段及近期记忆仍按原规则提供。世界书的详细条目归入「作品资料」。</p>
+    {!view.enabled && <p className="contact-availability">服务尚未启用向量检索。设定条目仍可按完整标题匹配；语义召回启用后生效。</p>}
     <form onSubmit={event => { event.preventDefault(); onSave(); }}>
       <fieldset className="memory-uses retrieval-sources" disabled={busy}><legend>资料范围</legend>{sources.map(([value, label]) => <label key={value}><input type="checkbox" checked={config.sources.includes(value)} onChange={event => onChange({ ...config, sources: sources.map(item => item[0]).filter(item => item === value ? event.target.checked : config.sources.includes(item)) })} />{label}</label>)}</fieldset>
-      <p className="field-hint">全部取消后，不额外召回这些资料；基础创作上下文仍保留。</p>
+      <p className="field-hint">全部取消后，不额外召回这些资料；基础创作上下文仍保留。设定条目与直接关联共同占用条数及文本预算；放不下时整组略过，避免截断规则或例外。</p>
       <div className="contact-fields"><div className="field"><label htmlFor="retrieval-limit">召回数量（条）</label><input id="retrieval-limit" type="number" min={1} max={12} step={1} required value={config.limit} disabled={busy} onChange={event => onChange({ ...config, limit: Number(event.target.value) })} /><p className="field-hint">最多 1–12 条相关片段。</p></div><div className="field"><label htmlFor="retrieval-budget">文本预算（字符）</label><input id="retrieval-budget" type="number" min={300} max={6000} step={1} required value={config.max_chars} disabled={busy} onChange={event => onChange({ ...config, max_chars: Number(event.target.value) })} /><p className="field-hint">额外召回最多 300–6000 字符，包含来源标注；不是 token 数。</p></div></div>
       <div className="save-bar"><button className="primary" disabled={busy}>保存检索配置</button><button className="secondary" type="button" disabled={busy} onClick={() => onChange(view.defaults)}>恢复默认</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : '已保存的配置用于后续创作'}</p></div>
       <p className="field-hint">恢复默认只填入表单，保存后才会生效。</p>

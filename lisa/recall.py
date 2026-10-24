@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from lisa.characters import CharacterRetrievalConfig
 from lisa.model_calls import generate_embeddings
 from lisa.models import Account, Character, Project
-from lisa.retrieval import Context, has_ready_context, recall
+from lisa.retrieval import Context, has_ready_context, recall, recall_titles
 from lisa.retrieval_config import author_retrieval_config
 
 
@@ -68,7 +68,7 @@ async def retrieve_context(
             sources=options.get("sources"),
             character_id=character_id,
         ):
-            return Context()
+            return recall_titles(db, user_id, project_id, purpose, query, **options)
     vectors = await (embed or generate_embeddings)(
         settings, engine, task_id, user_id, [query[-1500:]]
     )
@@ -77,4 +77,6 @@ async def retrieve_context(
         options = _options(db, user_id, project_id, purpose, character_id)
         if options is None:
             return Context()
-        return recall(db, settings, user_id, project_id, purpose, vectors[0], **options)
+        return recall(
+            db, settings, user_id, project_id, purpose, vectors[0], query=query, **options
+        )

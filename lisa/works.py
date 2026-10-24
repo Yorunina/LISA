@@ -24,6 +24,7 @@ from lisa.models import (
     QQBinding,
     Task,
 )
+from lisa.worldbook import WorldbookEntry, validate_entries
 
 router = APIRouter(tags=["works"])
 
@@ -295,7 +296,7 @@ def adopt_result(db: Session, task: Task, result: dict) -> Chapter | None:
         raise HTTPException(409, "此任务不是正文生成任务。")
     if project.summary != result["summary"] or project.plot_state != result["plot_state"]:
         project.summary, project.plot_state = result["summary"], result["plot_state"]
-        invalidate_index(project)
+        # These are fixed author context, not part of the project's derived search text.
     if project.kind == "diary":
         new_text = "\n".join(paragraphs)
         candidates = [LifeCandidate.model_validate(item) for item in result.get("life_events", [])]
@@ -326,6 +327,7 @@ class ProjectInput(BaseModel):
 class ProjectUpdate(BaseModel):
     title: str = Field(default="", min_length=1, max_length=160)
     worldbook: str = Field(default="", max_length=30000)
+    worldbook_entries: list[WorldbookEntry] = Field(default_factory=list, max_length=200)
     constraints: str = Field(default="", max_length=12000)
     characters: str = Field(default="", max_length=30000)
     author_prompt: str = Field(default="", max_length=12000)
@@ -334,6 +336,11 @@ class ProjectUpdate(BaseModel):
     agreement: str = Field(default="", max_length=12000)
     preferences: str = Field(default="", max_length=12000)
     tentative: str = Field(default="", max_length=12000)
+
+    @field_validator("worldbook_entries")
+    @classmethod
+    def valid_entries(cls, value):
+        return validate_entries(value)
 
 
 class ProjectView(ProjectUpdate):
@@ -577,7 +584,15 @@ def update_project(project_id: UUID, body: ProjectUpdate, user: User, db: DB):
     if changes:
         for key, value in changes.items():
             setattr(project, key, value)
-        invalidate_index(project)
+        if changes.keys() & {
+            "title",
+            "worldbook",
+            "worldbook_entries",
+            "characters",
+            "preferences",
+            "tentative",
+        }:
+            invalidate_index(project)
         db.commit()
     return project
 

@@ -29,7 +29,8 @@ D17 指定群采集、账号授权、30天滚动保留、网页检索与一键�
 | 作品与章节公开分享、Agent 分享链接 | [作品网页分享](PROJECT_PLAN.md#作品网页分享) | 决策记录 D18；部署基址与验证查开发环境，页面查前端规范 |
 | 聊天、虚拟生活、偏好 | [生活事实](PROJECT_PLAN.md#虚拟生活与日记的事实同步)、[用户权威](PROJECT_PLAN.md#用户意见与创作权威)、[联系](PROJECT_PLAN.md#作息学习与主动联系) | 决策记录 D02、D03、D06 |
 | 自主创作、暂停、任务 | [暂停](PROJECT_PLAN.md#自主推进与暂停规则)、[主动取消](PROJECT_PLAN.md#主动取消生成任务)、[Agent](PROJECT_PLAN.md#agent-职责与上下文)、[预算](PROJECT_PLAN.md#公众试用与预算)、[架构](PROJECT_PLAN.md#技术架构与工具栈) | 决策记录 D01—D04、D09、D12、D14 |
-| 记忆、检索、编辑、删除 | [记忆与检索](PROJECT_PLAN.md#长期记忆与检索)、[导出与删除](PROJECT_PLAN.md#正文导出账号删除与备份边界)、[工作台与版本](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D04、D05、D10 |
+| 创作资料填写、作者写法、偏好与讨论 | [填写方式](PROJECT_PLAN.md#创作资料的填写方式)、[风格应用](PROJECT_PLAN.md#两类结果与作用范围) | 决策 D11/D15；涉及页面时读前端规范 |
+| 世界书、剧情状态、记忆、检索、编辑、删除 | [世界书与当前剧情](PROJECT_PLAN.md#世界书与当前剧情)、[记忆与检索](PROJECT_PLAN.md#长期记忆与检索)、[导出与删除](PROJECT_PLAN.md#正文导出账号删除与备份边界)、[工作台与版本](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D04、D05、D10 |
 | QQ、账号、部署 | [接入](PROJECT_PLAN.md#接入与部署边界)、[流程](PROJECT_PLAN.md#核心使用流程)、[架构](PROJECT_PLAN.md#技术架构与工具栈) | 待决清单 D08；[开发环境](DEVELOPMENT.md) |
 | 前端设计、实现、视觉验收 | [工作台](PROJECT_PLAN.md#网页工作台与版本) | 必读 [前端规范](FRONTEND_DESIGN.md)，对照 [原型及限制](prototype/README.md) |
 | 开发、提交、交付验收 | [模块与任务](DEVELOPMENT_TASKS.md#模块总览与数据归属)、[开发批次](DEVELOPMENT_TASKS.md#交付批次与依赖顺序)，以及主方案的 [架构](PROJECT_PLAN.md#技术架构与工具栈)、[交付顺序](PROJECT_PLAN.md#首版边界与交付顺序)、[验收场景](PROJECT_PLAN.md#验收场景) | 开发和提交前必读 [Git 协作](CONTRIBUTING.md)；环境操作查 [开发环境](DEVELOPMENT.md)；完成后更新 [实施记录](DEVELOPMENT_TASKS.md#完成条件与实施记录) |

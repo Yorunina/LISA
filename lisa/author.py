@@ -252,6 +252,9 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
             "先检查连贯性、人物知识和用户要求再给最终结果；不要输出草稿、分析或说明。"
             "paragraphs是本次正式采用的正文段落。summary与plot_state更新整个作品的简短摘要和剧情状态，"
             "不将计划、未发生的备选或角色猜测写成既成事实。"
+            "worldbook是固定提供的核心设定，检索到的设定条目是补充资料。"
+            "设定的年代、地点和例外条件必须结合当前剧情判断；叙述倒叙不改变事件发生顺序。"
+            "未检索到的设定不代表不存在，不凭空补齐关键规则或让角色预知未来事实。"
             "只有后续确有必要独立参与的具名角色，才在character_names中提出建立配置；"
             "最多两名，名称必须逐字出现在本次paragraphs。不要为每个具名人物创建角色。"
             "此处只建立名字和默认提示，不自动复制任何知识、秘密或人物经历。"
@@ -431,6 +434,7 @@ async def execute_author(
         user_id = task.user_id
         project_id = project.id
         query = task.request["goal"] + "\n" + (task.request.get("target_text") or "")
+        query += "\n" + json.loads(messages[0]["content"]).get("context", "")[-600:]
     failure = None
     try:
         recalled = await _cancelable(
