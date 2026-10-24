@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from lisa.chat_style import expression_guide
 from lisa.contact_policy import contact_block_reason, contact_snapshot
 from lisa.interaction import interaction_context
 from lisa.life import (
@@ -45,6 +46,7 @@ from lisa.topics import DefaultDesign, adopt_default_design, topic_context
 class ContactReply(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     reply: str = Field(min_length=1, max_length=800)
+    meme_id: UUID | None = None
     life_events: list[LifeCandidate] = Field(default_factory=list, max_length=3)
     life_mentions: list[LifeMention] = Field(default_factory=list, max_length=3)
     default_design: DefaultDesign | None = None
@@ -136,7 +138,7 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             "只有提供可选已保存成果时才可提及创作进展，否则progress_mention必须null。"
             f"当前 UTC 时间：{datetime.now(UTC).isoformat()}。\n"
             f"用户选定的性格名称：{persona.name}\n性格设定：\n{persona.prompt}"
-            + LIFE_INSTRUCTIONS
+            + "\n" + expression_guide() + LIFE_INSTRUCTIONS
             + "\nlife_mentions只列本次reply明确提及的已提供生活记忆id，evidence逐字来自reply。"
         )
         memory_ids = []
@@ -150,12 +152,19 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
         memories = memory_context(
             db, user_id, purpose="chat", max_chars=1200, references=memory_ids
         )
+        from lisa.shared_retrieval import sent_meme_context
         messages = [
-            {"role": item.role, "content": f"[时间 {item.sent_at.isoformat()}]\n{item.content}"}
+            {"role": item.role, "content": f"[时间 {item.sent_at.isoformat()}]\n{item.content}"
+             + sent_meme_context(db, item)}
             for item in history
         ] + [{"role": "user", "content": "请分享一条自然的生活话题，不要求我立即回应。"}]
         history_ids = [item.id for item in history]
         task.status, task.started_at = "running", datetime.now(UTC)
+        from lisa.shared_retrieval import recall_shared
+        public_context = recall_shared(
+            db, settings, user_id, "chat", "\n".join(item.content for item in history[-3:])
+        )
+        optional_context += public_context.text
     error = None
     result = None
     try:
@@ -169,6 +178,8 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             )
             instructions += optional_context + memories
         except ModelInputTooLarge:
+            from lisa.retrieval import Context
+            public_context = Context()
             memory_ids = []
             provided_tentative = ""
             provided_progress = None
@@ -207,6 +218,13 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
         if not progress_is_current(db, user_id, progress):
             task.status, task.error = "cancelled", "progress_changed"
             return
+        from lisa.retrieval import record_references
+        from lisa.shared_retrieval import select_meme, shared_references_current
+        if not shared_references_current(db, public_context, user_id):
+            task.status, task.error = "cancelled", "shared_source_changed"
+            return
+        record_references(db, task_id, public_context)
+        meme = select_meme(db, user_id, result.meme_id, public_context)
         record_chat_references(db, task_id, memory_ids, used_history_ids)
         adopt_default_design(
             db, user_id, project_id, result.default_design, provided_tentative=provided_tentative
@@ -238,6 +256,8 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
                 task_id=task_id,
                 qq_id=binding.qq_id,
                 content=reply,
+                meme_id=meme.id if meme else None,
+                meme_revision=meme.revision if meme else None,
                 status="pending",
             )
         )

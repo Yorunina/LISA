@@ -42,11 +42,11 @@
 
 协作规范统一维护在 [.docs/README.md](README.md)，根 `AGENTS.md` 仅作本地加载入口。开发助手使用的 `AGENTS.md`、`AGENTS.override.md`、根目录 `.codex/`、`.agents/` 及个人编辑器配置仅在本地保留，不纳入版本管理。它们与应用使用的通用角色 prompt 分开；仓库文档不依赖这些本地文件才能阅读或使用。
 
-[.gitignore](../.gitignore) 排除本地环境配置、凭据、运行数据、依赖、缓存、构建产物和测试报告。项目根目录的 `data/`、`runtime/`、`storage/`、`pgdata/`、`volumes/`、`backups/`、`exports/`、`indexes/`、`logs/` 预留给本地运行数据；预留 `backups/` 不代表首版要求备份机制。`runtime/` 还包含本地工具、数据库与网关会话，不能当作纯缓存删除。项目缓存 `.cache/`、`.npm/`、`.uv-cache/` 和 `.hypothesis/` 同样忽略；部署时也可存放在仓库外。这些约定不要求现在创建目录或决定正式源码结构。
+[.gitignore](../.gitignore) 排除本地环境配置、凭据、运行数据、依赖、缓存、构建产物和测试报告。本地文件集中放入 `runtime/`：`runtime/.env` 为配置，`venv/` 为 Python 环境，`cache/` 为工具缓存，`tmp/` 为临时文件，`dist/` 为网页构建，`reports/` 为测试与诊断结果；原生工具、数据库、网关配置与日志继续位于其既有子目录。`runtime/` 不能当作纯缓存删除。`node_modules/` 按 npm 与 Node 的模块解析要求保留根目录；清单、锁文件、版本声明及工具配置留在标准位置。历史本地数据与缓存目录仍由忽略规则兜底，部署时也可存放在仓库外。
 
 用户聊天、作品、个人演化 prompt、记忆、QQ 会话凭据、模型请求记录和数据库备份不进入 Git。通用模板、演示作品和合成测试数据放在明确的源码或示例位置，避免混入运行数据目录。新增数据输出位置时同步检查忽略规则；不以忽略所有 JSON、SQL、Markdown 或锁文件的方式隐藏源码。
 
-前端构建与报告按根目录精确忽略：`/build/`、`/dist/`、`/coverage/`、`/playwright-report/`、`/test-results/`、`/test-results-*/`、`/blob-report/`，不隐藏源码子目录内同名文件夹。清理本地环境时先检查实际进程：闲置依赖、缓存、下载归档与测试报告可重建；正在使用的 `.venv/`、已挂载网页 `dist/`、`.env`、数据库和 QQ 会话保留，不以整理仓库为由中断服务。
+新构建、缓存与报告通过 Vite、pytest、Ruff、Playwright 配置输出到 `runtime/`；uv 使用 `scripts/uv.ps1` 固定环境与缓存位置，npm 安装缓存通过 `--cache runtime/cache/npm` 指定。历史根目录产物继续精确忽略，不隐藏源码子目录内同名文件夹。清理本地环境时先检查实际进程：闲置依赖、缓存、下载归档与测试报告可重建；运行中的环境、已挂载网页、配置、数据库和 QQ 会话保留，不以整理仓库为由中断服务。
 
 允许提交 `.env.example`、`.env.sample` 及对应分环境模板，但内容只能是说明和占位值，不得带真实密钥、账号或私人数据。个人编辑器配置默认忽略；团队确需共享时，单独审查具体文件并调整白名单。
 

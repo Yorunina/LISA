@@ -20,6 +20,7 @@ from lisa import (
     onboarding,
     retrieval_config,
     scheduling,
+    shared,
     sharing,
     style_corpus,
     style_distillation,
@@ -92,6 +93,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(works.router)
     app.include_router(sharing.router)
     app.include_router(memory.router)
+    app.include_router(shared.router)
     app.include_router(scheduling.router)
     app.include_router(contact_policy.router)
     app.include_router(retrieval_config.router)
@@ -129,6 +131,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ),
         }
 
-    if (ROOT / "dist").is_dir():
-        app.mount("/", StaticFiles(directory=ROOT / "dist", html=True), name="web")
+    web_dist = ROOT / "runtime" / "dist"
+    if web_dist.is_dir():
+        app.mount("/", StaticFiles(directory=web_dist, html=True), name="web")
     return app

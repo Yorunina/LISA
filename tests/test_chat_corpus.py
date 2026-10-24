@@ -6,8 +6,60 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from lisa.chat_corpus import json_bytes, parse_chat, target_windows
+import pytest
+
+from lisa.chat_corpus import decode_text, json_bytes, parse_chat, target_windows
 from lisa.style_distillation import build_plan
+
+V5_SAMPLE = Path(__file__).parent / "fixtures" / "qq_exporter_v5.txt"
+
+
+def test_v5_messages_keep_multiline_content_without_metadata_or_footer_as_speakers():
+    text, encoding = decode_text(V5_SAMPLE.read_bytes())
+    rows, people, unknown = parse_chat(text, 2)
+    assert encoding == "utf-8-sig" and unknown == 0
+    assert len(rows) == 3
+    assert [(person["label"], person["messages"]) for person in people] == [
+        ("小雨(700000095)", 2), ("小林:🍃(700000096)", 1)
+    ]
+    assert people[0]["id"].startswith("2:")
+    assert rows[0]["timestamp"] == "2026-10-23T10:00:00"
+    assert "继续分条" in rows[0]["text"]
+    assert "正文中的时间和昵称不是新消息" in rows[1]["text"]
+    assert "回复:" in rows[1]["text"] and "synthetic.png" in rows[1]["text"]
+    assert all(row["text"] == text[row["start"] : row["end"]] for row in rows)
+    assert "导出完成" not in rows[-1]["text"]
+    windows, coverage = target_windows(rows, [people[0]["id"]])
+    assert len(windows) == 1 and coverage["analyzed_target_messages"] == 2
+
+
+@pytest.mark.parametrize("encoding", ["utf-8-sig", "utf-16", "gb18030"])
+def test_v5_decode_marks_nuls_and_preserves_message_offsets(encoding):
+    source = V5_SAMPLE.read_text(encoding="utf-8").replace("结尾的停顿", "结尾\x00的停顿")
+    text, _ = decode_text(source.replace("\n", "\r\n").encode(encoding))
+    assert "结尾\ufffd的停顿" in text and "\x00" not in text and "\r" not in text
+    rows, _, _ = parse_chat(text, 0)
+    assert len(rows) == 3
+    assert rows[-1]["text"] == text[rows[-1]["start"] : rows[-1]["end"]]
+
+
+def test_v5_malformed_message_is_excluded_without_joining_its_neighbors():
+    text = V5_SAMPLE.read_text(encoding="utf-8").replace(
+        "时间: 2026-10-23 10:01:00", "时间: 无效时间"
+    )
+    rows, people, unknown = parse_chat(text, 0)
+    assert len(rows) == 2 and len(people) == 1 and unknown > 0
+    assert "哪一段" not in rows[0]["text"]
+    windows, _ = target_windows(rows, [people[0]["id"]], before=0, after=0)
+    assert len(windows) == 2  # The malformed source leaves an ordinal gap.
+
+
+def test_non_v5_nuls_and_other_control_characters_are_reported_as_content_errors():
+    for source in ("合成文本\x00", V5_SAMPLE.read_text(encoding="utf-8") + "\x01"):
+        with pytest.raises(ValueError, match="控制字符"):
+            decode_text(source.encode("utf-8"))
+    with pytest.raises(ValueError, match="无法识别文本编码"):
+        decode_text(b"\xff")
 
 
 def messages(count=1000):

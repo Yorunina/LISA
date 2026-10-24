@@ -55,6 +55,7 @@ def test_queue_factory_executes_persisted_task(settings, engine):
 @pytest.mark.asyncio
 async def test_worker_registers_separate_index_consumer(monkeypatch):
     consumers = []
+    startup = []
 
     class FakeQueue:
         @asynccontextmanager
@@ -62,9 +63,11 @@ async def test_worker_registers_separate_index_consumer(monkeypatch):
             yield
 
         async def run_worker_async(self, **kwargs):
+            assert startup == ["recovered"]
             consumers.append(kwargs)
 
-    monkeypatch.setattr(worker, "create_queue", FakeQueue)
+    monkeypatch.setattr("lisa.recovery.recover_tasks", lambda engine: startup.append("recovered"))
+    monkeypatch.setattr(worker, "create_queue", lambda settings: FakeQueue())
     await worker.run_worker(once=True)
     assert {(tuple(item["queues"]), item["concurrency"]) for item in consumers} == {
         (("lisa",), 2),

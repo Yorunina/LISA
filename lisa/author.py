@@ -454,6 +454,9 @@ async def execute_author(
             return
         with Session(engine) as db:
             check_memory_revision(db, user_id, memory_revision)
+            from lisa.shared_retrieval import shared_references_current
+            if not shared_references_current(db, recalled, user_id):
+                raise ContextChanged
         if recalled.text:
             instructions = snapshot["instructions"] + recalled.text
         try:
@@ -546,7 +549,10 @@ async def execute_author(
             return
         if user is None or not user.active:
             failure = "account_unavailable"
-        elif not failure and user.memory_revision != memory_revision:
+        elif not failure and (
+            user.memory_revision != memory_revision
+            or not shared_references_current(db, recalled, user_id)
+        ):
             failure = "context_changed"
         if not failure:
             try:

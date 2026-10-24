@@ -25,7 +25,8 @@
 /.python_history
 /.node_repl_history
 
-# Private runtime data. Keep fixtures and public templates outside these roots.
+# Local environment, caches, builds, reports and persistent runtime data live here.
+# Never delete runtime/ wholesale: it also holds the database and QQ configuration.
 /data/
 /runtime/
 /storage/

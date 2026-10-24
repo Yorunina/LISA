@@ -16,6 +16,74 @@ CONVERSATION = re.compile(r"^会话[:：]\s*(.+?)\s*$")
 EXPORT_METADATA = re.compile(
     r"(?: self)?(?: new_after_import_snapshot)? seq=(?:-?\d+|None) id=(?:-?\d+|None) type=\S+$"
 )
+EXPORTER_V5 = re.compile(r"^\[QQChatExporter V5(?:\s*/[^\n]*)?\]\s*(?:\n|$)")
+V5_MESSAGE = re.compile(r"^(?P<speaker>[^\n]+):\n时间: (?P<stamp>[^\n]*)\n", re.MULTILINE)
+V5_FOOTER = re.compile(
+    r"^={10,}\n[ \t]*导出完成[ \t]*\n={10,}\n总计导出 \d+ 条消息\n导出时间: [^\n]+\s*\Z",
+    re.MULTILINE,
+)
+V5_COUNT = re.compile(r"^消息总数: (\d+)[ \t]*$", re.MULTILINE)
+
+
+def is_exporter_v5(text: str) -> bool:
+    return EXPORTER_V5.match(text) is not None
+
+
+def decode_text(data: bytes) -> tuple[str, str]:
+    """Decode strictly; mark NULs in known V5 exports without changing source offsets."""
+    encodings = (
+        ["utf-16"] if data.startswith((b"\xff\xfe", b"\xfe\xff")) else ["utf-8-sig", "gb18030"]
+    )
+    for encoding in encodings:
+        try:
+            value = data.decode(encoding)
+        except UnicodeError:
+            continue
+        value = value.replace("\r\n", "\n").replace("\r", "\n")
+        if is_exporter_v5(value):
+            value = value.replace("\x00", "\ufffd")
+        invalid = next((c for c in value if ord(c) < 32 and c not in "\n\r\t"), None)
+        if invalid is not None:
+            raise ValueError(
+                f"文本含不支持的控制字符 U+{ord(invalid):04X}，请检查文件内容后重新上传。"
+            )
+        return value, encoding
+    raise ValueError("无法识别文本编码，请转换为 UTF-8 TXT/Markdown 后重新上传。")
+
+
+def _parse_exporter_v5(text: str, file_index: int) -> tuple[list[dict], list[dict], int]:
+    # Select this parser by the export signature; never interpret 时间: as a nickname.
+    footer = V5_FOOTER.search(text)
+    end = footer.start() if footer else len(text)
+    matches = list(V5_MESSAGE.finditer(text, 0, end))
+    segments, people, identities, unknown = [], {}, {}, 0
+    for index, match in enumerate(matches):
+        stop = matches[index + 1].start() if index + 1 < len(matches) else end
+        body = text[match.end() : stop]
+        try:
+            timestamp = datetime.strptime(match["stamp"], "%Y-%m-%d %H:%M:%S").isoformat()
+        except ValueError:
+            timestamp = None
+        if timestamp is None or not body.startswith("内容:") or not match["speaker"].strip():
+            unknown += sum(bool(line.strip()) for line in text[match.start() : stop].splitlines())
+            continue
+        label = match["speaker"].strip()
+        speaker = identities.setdefault(label, f"{file_index}:p{len(identities)}")
+        people.setdefault(speaker, {"id": speaker, "label": label, "messages": 0})
+        people[speaker]["messages"] += 1
+        segments.append(
+            {
+                "id": f"{file_index}:{index}",
+                "start": match.start(),
+                "end": stop,
+                "text": text[match.start() : stop],
+                "speaker": speaker,
+                "conversation": f"{file_index}:c0",
+                "timestamp": timestamp,
+                "ordinal": index,
+            }
+        )
+    return segments, list(people.values()), unknown
 
 
 def json_bytes(value) -> int:
@@ -23,6 +91,8 @@ def json_bytes(value) -> int:
 
 
 def parse_chat(text: str, file_index: int) -> tuple[list[dict], list[dict], int]:
+    if is_exporter_v5(text):
+        return _parse_exporter_v5(text, file_index)
     segments, people, identities, conversations = [], {}, {}, {}
     current, conversation, offset, unknown = None, f"{file_index}:c0", 0, 0
 
@@ -241,25 +311,16 @@ def main():
     args = parser.parse_args()
     if args.out.exists():
         parser.error("Output directory already exists; choose a new private directory")
-    files, participants, unknown = [], [], 0
+    files, participants, unknown, replaced_nulls = [], [], 0, 0
     for index, path in enumerate(args.inputs):
         if path.suffix.lower() != ".txt":
             parser.error("Only readable TXT is supported; encrypted .bak needs a verified decoder")
         raw = path.read_bytes()
-        text = None
-        for encoding in (
-            ["utf-16"] if raw.startswith((b"\xff\xfe", b"\xfe\xff")) else ["utf-8-sig", "gb18030"]
-        ):
-            try:
-                candidate = raw.decode(encoding)
-                if any(ord(c) < 32 and c not in "\n\r\t" for c in candidate):
-                    continue
-                text = candidate.replace("\r\n", "\n").replace("\r", "\n")
-                break
-            except UnicodeError:
-                continue
-        if text is None:
-            parser.error("Unrecognized text encoding")
+        try:
+            text, encoding = decode_text(raw)
+        except ValueError as error:
+            parser.error(str(error))
+        replaced_nulls += raw.decode(encoding).count("\x00")
         messages, people, missing = parse_chat(text, index)
         files.extend({**row, "file": path.name, "file_index": index} for row in messages)
         participants.extend(people)
@@ -279,6 +340,7 @@ def main():
         "participants": participants,
         "messages": len(files),
         "unrecognized_lines": unknown,
+        "replaced_nulls": replaced_nulls,
         "coverage": coverage,
         "validation": "not_executed",
         "raw_messages_in_index": False,

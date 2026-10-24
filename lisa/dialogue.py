@@ -34,6 +34,9 @@ class Commission(BaseModel):
 
 
 class Conversation(Reply):
+    meme_id: UUID | None = None
+    meme_preference: Literal["normal", "reduced", "off"] | None = None
+    meme_preference_evidence: str = Field(default="", max_length=300)
     share_chapter_id: UUID | None = None
     memories: list[MemoryCandidate] = Field(default_factory=list, max_length=4)
     life_events: list[LifeCandidate] = Field(default_factory=list, max_length=3)

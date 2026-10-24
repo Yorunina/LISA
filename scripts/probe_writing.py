@@ -109,15 +109,19 @@ async def probe(username: str) -> bool:
                 )
     finally:
         engine.dispose()
-        report = ROOT / "runtime" / "writing-probe.jsonl"
-        report.parent.mkdir(exist_ok=True)
+        report = ROOT / "runtime" / "reports" / "probes" / "writing-probe.jsonl"
+        report.parent.mkdir(parents=True, exist_ok=True)
         with report.open("a", encoding="utf-8") as output:
             for record in records:
                 output.write(json.dumps(record, ensure_ascii=False) + "\n")
     success = len(records) == 2 and all(record["error"] is None for record in records)
     print(
         json.dumps(
-            {"success": success, "calls": len(records), "report": "runtime/writing-probe.jsonl"}
+            {
+                "success": success,
+                "calls": len(records),
+                "report": "runtime/reports/probes/writing-probe.jsonl",
+            }
         )
     )
     return success

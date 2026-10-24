@@ -1,9 +1,10 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 
 type Version = { id: string; version: number; prompt: string; summary: string; report: Record<string, unknown>; created_at: string; source_task_id?: string | null };
 type Profile = { id: string; name: string; kind: string; latest_version: number; versions: Version[] };
-type Task = { id: string; kind: string; status: string; error: string | null; result: Record<string, unknown> | null; cleanup_state: string; corpus_id: string | null };
+type Task = { id: string; kind: string; mode?: string; status: string; error: string | null; model_http_status?: number | null; result: Record<string, unknown> | null; cleanup_state: string; corpus_id: string | null };
 const timestamp = '2026-10-23T04:00:00Z';
 
 async function study(page: Page, initialized = true) {
@@ -68,14 +69,14 @@ async function study(page: Page, initialized = true) {
       state.tasks.unshift(task); return route.fulfill({ json: task });
     }
     if (path === '/style/trials') {
-      state.trials.push(data()); const task = { id: `trial-${state.tasks.length + 1}`, kind: 'style_trial', status: 'pending', error: null, result: null, cleanup_state: 'not_applicable', corpus_id: null };
+      state.trials.push(data()); const task = { id: `trial-${state.tasks.length + 1}`, kind: 'style_trial', mode: data().mode ?? 'reply', status: 'pending', error: null, result: null, cleanup_state: 'not_applicable', corpus_id: null };
       state.tasks.unshift(task); return route.fulfill({ json: task });
     }
     const taskMatch = path.match(/^\/style\/tasks\/([^/]+)(\/cancel)?$/);
     if (taskMatch) {
       const task = state.tasks.find(item => item.id === taskMatch[1])!;
       if (taskMatch[2]) { task.status = 'cancelled'; task.cleanup_state = 'cleaned'; }
-      else if (!state.holdTask && task.status === 'pending') { task.status = 'succeeded'; task.cleanup_state = task.kind === 'style_distill' ? 'cleaned' : 'not_applicable'; task.result = task.kind === 'style_distill' ? result() : { text: '这是一段隔离合成试用文字。', isolated: true }; }
+      else if (!state.holdTask && task.status === 'pending') { task.status = 'succeeded'; task.cleanup_state = task.kind === 'style_distill' ? 'cleaned' : 'not_applicable'; task.result = task.kind === 'style_distill' ? result() : task.mode === 'refine' ? { ...result(), prompt: '修订候选：按当前话头回应，说完就停；求助时再展开。' } : { text: '这是一段隔离合成试用文字。', isolated: true }; }
       return route.fulfill({ json: task });
     }
     if (/^\/projects\/[^/]+\/writing-style$/.test(path)) {
@@ -85,9 +86,11 @@ async function study(page: Page, initialized = true) {
     return route.fulfill({ status: 404, json: { detail: `Unexpected synthetic route: ${path}` } });
   });
   await page.goto('/');
-  if (initialized) { await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible(); await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click(); }
+  if (initialized) { await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible(); await page.getByRole('button', { name: '个人设置', exact: true }).click(); }
   await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
   await expect(page.getByRole('heading', { name: '性格与写作风格', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '群消息', exact: true })).toHaveCount(0);
+  await expect(page.getByLabel('聊天语料来源')).toHaveCount(0);
   return state;
 }
 
@@ -96,6 +99,38 @@ async function uploadQQ(page: Page) {
   await page.getByRole('button', { name: '上传并预览解析', exact: true }).click();
   await expect(page.getByRole('heading', { name: '解析与分析范围' })).toBeVisible();
 }
+
+test('feedback revises a candidate without applying and preserves version provenance', async ({ page }, info) => {
+  const state = await study(page);
+  await page.getByLabel('方案名称', { exact: true }).fill('自然接话');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('平时简洁，有自己的判断。');
+  await page.getByLabel('试聊情境与消息').fill('我先去吃饭。');
+  await page.getByRole('button', { name: '开始试聊', exact: true }).click();
+  await expect(page.getByLabel('隔离试用结果')).toContainText('这是一段隔离合成试用文字');
+  await page.getByLabel('哪里不像，或者希望怎样回应').fill('收尾时不要继续追问。');
+  await page.getByRole('button', { name: '生成修订候选', exact: true }).click();
+  const revision = page.getByRole('region', { name: '调整交流表达' });
+  await expect(revision).toContainText('修订候选：按当前话头回应');
+  expect(state.trials[1].mode).toBe('refine');
+  expect(state.trials[1].wrong).toBe('这是一段隔离合成试用文字。');
+  expect(state.profiles).toHaveLength(0);
+  expect(state.applications.personality).toBeNull();
+  await page.screenshot({ path: info.outputPath('desktop-chat-refinement-candidate.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('mobile-chat-refinement-candidate.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.getByRole('button', { name: '载入修订候选', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/修订候选/);
+  await page.getByRole('button', { name: '保存方案', exact: true }).click();
+  await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 1');
+  expect(state.profiles[0].versions[0].source_task_id).toBe('trial-2');
+  expect(state.applications.personality).toBeNull();
+  await page.screenshot({ path: info.outputPath('desktop-chat-refinement.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('mobile-chat-refinement.png'), fullPage: true });
+});
 
 test('QQ selection, isolated trial, save and apply are separate and preserve explicit version choice', async ({ page }, info) => {
   const state = await study(page);
@@ -116,6 +151,21 @@ test('QQ selection, isolated trial, save and apply are separate and preserve exp
   expect(state.mutations.some(path => /onebot|chat|memory|chapters|autonomy/.test(path))).toBe(false);
   await page.getByLabel('方案名称', { exact: true }).press('Control+s');
   await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 1');
+  expect(state.cleaned).toContain('corpus-1');
+  await expect(page.getByLabel('蒸馏任务状态')).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: '解析与分析范围', exact: true })).toHaveCount(0);
+  const savedBefore = await page.evaluate(() => {
+    const rect = document.querySelector('.style-editor')?.getBoundingClientRect();
+    const upload = document.querySelector('.style-upload')?.getBoundingClientRect();
+    return { documentY: (rect?.top ?? 0) + window.scrollY, uploadHeight: upload?.height, minHeight: getComputedStyle(document.querySelector('.style-upload')!).minHeight, scrollY: window.scrollY };
+  });
+  await page.getByRole('button', { name: /雨声性格/ }).click();
+  const savedAfter = await page.evaluate(() => {
+    const rect = document.querySelector('.style-editor')?.getBoundingClientRect();
+    const upload = document.querySelector('.style-upload')?.getBoundingClientRect();
+    return { documentY: (rect?.top ?? 0) + window.scrollY, uploadHeight: upload?.height, minHeight: getComputedStyle(document.querySelector('.style-upload')!).minHeight, scrollY: window.scrollY };
+  });
+  expect(Math.abs(savedAfter.documentY - savedBefore.documentY)).toBeLessThanOrEqual(1);
   expect(state.applications.personality).toBeNull();
   await page.getByRole('button', { name: '应用为 LISA 性格', exact: true }).click();
   await expect(page.getByText('正在使用 · 版本 1', { exact: true })).toBeVisible();
@@ -128,6 +178,33 @@ test('QQ selection, isolated trial, save and apply are separate and preserve exp
   await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 3');
   expect(state.applications.personality).toBe('profile-1-v1');
   await page.screenshot({ path: info.outputPath('desktop-style-profile.png'), fullPage: true });
+});
+
+test('saved bookmark keeps the upload region stable and releases an unstarted corpus', async ({ page }) => {
+  const state = await study(page);
+  await page.getByLabel('方案名称', { exact: true }).fill('稳定书签');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('保存后可切换的合成性格。');
+  await page.getByRole('button', { name: '保存方案', exact: true }).click();
+  await expect(page.getByLabel('上传语料与解析预览')).toBeVisible();
+
+  await page.getByRole('button', { name: '新建交流性格方案', exact: true }).first().click();
+  await uploadQQ(page);
+  const before = await page.evaluate(() => {
+    const upload = document.querySelector('.style-upload')?.getBoundingClientRect();
+    const editor = document.querySelector('.style-editor')?.getBoundingClientRect();
+    return { uploadTop: upload?.top, uploadHeight: upload?.height, editorTop: editor?.top };
+  });
+  await page.getByRole('button', { name: /稳定书签/ }).click();
+
+  await expect(page.getByLabel('上传语料与解析预览')).toBeVisible();
+  const after = await page.evaluate(() => {
+    const upload = document.querySelector('.style-upload')?.getBoundingClientRect();
+    const editor = document.querySelector('.style-editor')?.getBoundingClientRect();
+    return { uploadTop: upload?.top, uploadHeight: upload?.height, editorTop: editor?.top };
+  });
+  expect(Math.abs((after.uploadTop ?? 0) - (before.uploadTop ?? 0))).toBeLessThanOrEqual(1);
+  expect(Math.abs((after.editorTop ?? 0) - (before.editorTop ?? 0))).toBeLessThanOrEqual(1);
+  expect(state.cleaned).toEqual(['corpus-1']);
 });
 
 test('multi-file writing range, LISA default and a work override remain independent', async ({ page }, info) => {
@@ -199,7 +276,7 @@ test('cancellation never invents a result and refresh recovers in-progress tasks
   await page.getByRole('button', { name: '开始有限蒸馏' }).click();
   await expect(page.getByRole('button', { name: '取消蒸馏任务', exact: true })).toBeVisible();
   await page.reload();
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click();
+  await page.getByRole('button', { name: '个人设置', exact: true }).click();
   await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
   await expect(page.getByRole('button', { name: '取消蒸馏任务', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '取消蒸馏任务', exact: true }).click();
@@ -207,6 +284,21 @@ test('cancellation never invents a result and refresh recovers in-progress tasks
   await expect(page.getByLabel('蒸馏任务状态')).toContainText('原始材料已清理');
   await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('');
   expect(state.profiles).toHaveLength(0); expect(state.applications.personality).toBeNull();
+});
+
+test('upstream 502 explains the model failure while preserving cleanup and no automatic retry', async ({ page }) => {
+  const state = await study(page);
+  state.holdTask = true;
+  await uploadQQ(page);
+  await page.getByLabel('小雨 · 4 条消息 · 文件 1（QQ.txt）').check();
+  await page.getByRole('button', { name: '开始有限蒸馏', exact: true }).click();
+  await expect(page.getByLabel('蒸馏任务状态')).toContainText('等待执行');
+  Object.assign(state.tasks[0], { status: 'failed', error: 'model_unknown', model_http_status: 502, cleanup_state: 'cleaned' });
+  await expect(page.getByLabel('蒸馏任务状态')).toContainText('模型服务返回 HTTP 502');
+  await expect(page.getByLabel('蒸馏任务状态')).toContainText('调用结果及计费尚未确认');
+  await expect(page.getByLabel('蒸馏任务状态')).toContainText('原始材料已清理');
+  expect(state.starts).toHaveLength(1);
+  await expect(page.getByRole('button', { name: '取消蒸馏任务' })).toHaveCount(0);
 });
 
 test('an invalid encoding preserves the selected files for a corrected retry', async ({ page }) => {
@@ -265,11 +357,23 @@ test('real isolated API parses QQ bytes, cancels and cleans, then persists expli
   await expect(page.getByRole('heading', { name: '隔离风格测试作品', exact: true })).toBeVisible();
   const projects = await (await page.request.get('/api/projects')).json();
   const projectId = projects.find((item: { title: string }) => item.title === '隔离风格测试作品').id;
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click();
+  await page.getByRole('button', { name: '个人设置', exact: true }).click();
   await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
-  await page.getByLabel('选择 QQ TXT文件（可多选）').setInputFiles({ name: 'QQ-真实解析合成.txt', mimeType: 'text/plain', buffer: Buffer.from('2026-10-23 10:00:00 小雨(700000095)\n今天看完了一本书。\n2026-10-23 10:01:00 小林(700000096)\n哪一段让你印象深？\n2026-10-23 10:02:00 小雨(700000095)\n结尾的停顿，像窗外刚落下的雨。\n', 'utf8') });
+  const recommendation = page.getByRole('link', { name: 'QQChatExporter V5', exact: true });
+  await expect(recommendation).toHaveAttribute('href', 'https://github.com/shuakami/qq-chat-exporter');
+  await expect(page.getByText('上传预览由程序解析参与者，不调用模型', { exact: false })).toBeVisible();
+  const source = readFileSync(new URL('../fixtures/qq_exporter_v5.txt', import.meta.url), 'utf8').replace('结尾的停顿', '结尾\u0000的停顿');
+  await page.getByLabel('选择 QQ TXT文件（可多选）').setInputFiles({ name: 'QQ-真实解析合成.txt', mimeType: 'text/plain', buffer: Buffer.from(source, 'utf8') });
   await page.getByRole('button', { name: '上传并预览解析', exact: true }).click();
   await expect(page.getByRole('heading', { name: '解析与分析范围' })).toBeVisible();
+  await expect(page.getByText('文件 1 含 1 个空字符，已用 � 标记；原文件未修改。', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('checkbox')).toHaveCount(2);
+  await page.screenshot({ path: info.outputPath('desktop-v5-upload.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(recommendation).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('mobile-v5-upload.png'), fullPage: true });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByLabel(/^小雨\(700000095\) · 2 条消息/).check();
   const startedResponse = page.waitForResponse(response => response.url().endsWith('/api/style/tasks') && response.request().method() === 'POST');
   await page.getByRole('button', { name: '开始有限蒸馏', exact: true }).click();
@@ -351,7 +455,7 @@ test('persistent style navigation and the persona editor shortcut both protect u
   await expect(page.getByRole('button', { name: '交流性格', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.getByRole('button', { name: '返回我的作品', exact: true }).click();
   await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click();
+  await page.getByRole('button', { name: '个人设置', exact: true }).click();
   await page.getByRole('button', { name: '调整 LISA 性格', exact: true }).click();
   await page.getByLabel('LISA 性格 prompt', { exact: true }).fill('尚未保存的交流性格。');
   await page.getByRole('button', { name: '从 QQ 记录提炼性格', exact: true }).click();

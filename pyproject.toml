@@ -31,8 +31,14 @@ dev = [
 package = false
 
 [tool.ruff]
+cache-dir = "runtime/cache/ruff"
 target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+cache_dir = "runtime/cache/pytest"
+# pytest recreates this dedicated directory; keep its parent runtime/ stable.
+addopts = "--basetemp=runtime/tmp"

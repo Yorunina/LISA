@@ -13,10 +13,20 @@ from sqlalchemy.orm import Session
 
 from lisa import model_calls
 from lisa.model_calls import BudgetExceeded, ModelCallUnknown, ModelInputTooLarge
-from lisa.models import Account, ChatMessage, Memory, ModelCall, OutboundMessage, StyleCorpus, Task
+from lisa.models import (
+    Account,
+    BudgetDay,
+    ChatMessage,
+    Memory,
+    ModelCall,
+    OutboundMessage,
+    StyleCorpus,
+    Task,
+)
 from lisa.style_corpus import parse_chat, parse_writing
 from lisa.style_distillation import (
     BatchAnalysis,
+    Comparison,
     Finding,
     Review,
     StyleCandidate,
@@ -159,7 +169,11 @@ def fake_generator(calls):
         calls.append((schema, content, kwargs))
         if schema is BatchAnalysis:
             ids = (
-                [source["id"] for source in content["source"]]
+                [
+                    source["id"]
+                    for source in content["source"]
+                    if source.get("context_role", "target") == "target"
+                ]
                 if "source" in content
                 else [
                     source_id
@@ -179,7 +193,7 @@ def fake_generator(calls):
                 ]
             )
         if schema is StyleCandidate:
-            findings = content["observations"][0]["findings"]
+            findings = content.get("observations", [{"findings": []}])[0]["findings"]
             return StyleCandidate(
                 prompt="叙述以具体动作推进，重要转折放慢节奏。",
                 summary="动作驱动的叙述。",
@@ -187,6 +201,8 @@ def fake_generator(calls):
             )
         if schema is TrialOutput:
             return TrialOutput(text="他在窗边放下一封新信。")
+        if schema is Comparison:
+            return Comparison(preferred="tie", observations=["仍需人工判断自然度。"])
         return Review(observations=["节奏接近所观察的范围，其他语境尚不确定。"])
 
     return generate
@@ -346,11 +362,90 @@ async def test_chat_holdout_checks_two_turns_without_actual_target_replies(
     db.expire_all()
     task = db.get(Task, task_id)
     assert task.status == "completed"
-    probes = [content for schema, content, _ in calls if schema is TrialOutput]
-    assert len(probes) == 2
+    probes = [
+        content
+        for schema, content, _ in calls
+        if schema is TrialOutput and content.get("evaluation_stage") == "最终留出"
+    ]
+    assert len(probes) == 4
     assert "保密回复" not in json.dumps(probes, ensure_ascii=False)
     assert probes[1]["previous_generated_turns"] == ["他在窗边放下一封新信。"]
     assert task.result["report"]["validation"]["holdout"]["generated_turns"] == 2
+
+
+@pytest.mark.asyncio
+async def test_personality_compares_revises_and_checks_frozen_candidate(
+    settings,
+    engine,
+    db,
+    style_owner,
+):
+    source = "2026-10-23 10:00:00 甲\nquestion\n2026-10-23 10:00:01 乙\nreply\n"
+    task_id, corpus_id = task_with_corpus(db, style_owner, [source], "personality")
+    task = db.get(Task, task_id)
+    task.request = {**task.request, "target_speakers": ["0:p1"]}
+    db.commit()
+    calls = []
+    await execute_style(settings, engine, task_id, generate=fake_generator(calls))
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert task.status == "completed", task.error
+    assert (
+        len(calls)
+        == build_plan(payload([source], "personality"), "personality", ["0:p1"], [], settings).calls
+    )
+    validation = task.result["report"]["validation"]
+    assert validation["development"]["source"] == "synthetic_development"
+    assert validation["development"]["revision"] == "one_pass_before_holdout"
+    assert validation["holdout"]["status"] == "not_executed"
+    assert validation["synthetic_regression"]["status"] == "generated_and_model_reviewed"
+    assert len([schema for schema, _, _ in calls if schema is StyleCandidate]) == 2
+    assert task.result["report"]["evidence"][0]["support_messages"] == 1
+    assert db.get(StyleCorpus, corpus_id).payload == {}
+
+
+@pytest.mark.asyncio
+async def test_correction_is_isolated_saveable_and_does_not_apply(
+    settings,
+    engine,
+    client,
+    db,
+    style_owner,
+):
+    correction = {
+        "kind": "personality",
+        "mode": "refine",
+        "prompt": "平时简洁，有自己的判断。",
+        "input": "synthetic scene",
+        "wrong": "synthetic unwanted reply",
+        "correction": "减少无必要的解释，保留正常展开的能力。",
+    }
+    response = client.post("/api/style/trials", json=correction, headers=HEADERS)
+    assert response.status_code == 201 and response.json()["planned_calls"] == 6
+    calls = []
+    task_id = UUID(response.json()["id"])
+    await execute_style(settings, engine, task_id, generate=fake_generator(calls))
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert task.status == "completed", task.error
+    assert len(calls) == 6 and task.request == {"kind": "personality", "mode": "refine"}
+    assert "synthetic scene" not in json.dumps(task.result)
+    result = task.result
+    response = client.post(
+        "/api/style/profiles",
+        json={
+            "kind": "personality",
+            "name": "修订性格",
+            "prompt": result["prompt"],
+            "summary": result["summary"],
+            "source_task_id": str(task_id),
+        },
+        headers=HEADERS,
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["versions"][0]["report"]["evidence_kind"] == "user_requested_role_change"
+    for model in [ChatMessage, Memory, OutboundMessage]:
+        assert db.scalar(select(func.count()).select_from(model)) == 0
 
 
 @pytest.mark.asyncio
@@ -385,6 +480,39 @@ async def test_terminal_failure_cleans_without_replaying(
     assert task.status == "failed" and task.error == code and task.result is None
     assert count == 1
     assert db.get(StyleCorpus, corpus_id).payload == {}
+
+
+@pytest.mark.parametrize(
+    "call_error,http_status",
+    [("http_502", 502), ("http_504", 504), ("http_408", 408), ("worker_interrupted", None)],
+)
+def test_failed_task_exposes_only_safe_provider_http_status(
+    client, db, style_owner, call_error, http_status
+):
+    task_id, _ = task_with_corpus(db, style_owner)
+    task = db.get(Task, task_id)
+    task.status, task.error = "failed", "model_unknown"
+    today = datetime.now(UTC).date()
+    db.add(BudgetDay(day=today))
+    db.flush()
+    db.add(
+        ModelCall(
+            user_id=style_owner,
+            task_id=task_id,
+            budget_day=today,
+            state="unknown",
+            reserved_usd=Decimal("0.01"),
+            charged_usd=Decimal("0.01"),
+            error=call_error,
+            configuration={"base_url": "https://private-provider.invalid", "private": "secret"},
+        )
+    )
+    db.commit()
+    response = client.get(f"/api/style/tasks/{task_id}")
+    assert response.status_code == 200
+    assert response.json()["model_http_status"] == http_status
+    assert response.json()["error"] == "model_unknown"
+    assert "secret" not in response.text and "private-provider" not in response.text
 
 
 @pytest.mark.asyncio

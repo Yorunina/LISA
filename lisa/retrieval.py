@@ -55,7 +55,7 @@ class Context:
 class Source:
     kind: str
     id: UUID
-    user_id: UUID
+    user_id: UUID | None
     revision: int
     text: str
     metadata: dict
@@ -104,6 +104,11 @@ def _source(
         return None
     if purpose == "role" and (kind != "character" or source_id != character_id):
         return None
+    if kind == "shared":
+        if user_id is not None or project_id is not None or purpose is not None:
+            return None
+        from lisa.shared_retrieval import shared_source
+        return shared_source(db, source_id)
     if kind == "character":
         if purpose is not None and purpose != "role":
             return None
@@ -252,7 +257,12 @@ def ensure_index_tasks(db: Session, settings: Settings, limit: int = 20) -> list
     if not indexing_enabled(settings):
         return []
     space = embedding_space(settings)
+    from lisa.models import SharedEntry
     candidates = union_all(
+        select(literal("shared"), SharedEntry.id, literal(None)).where(
+            SharedEntry.kind == "meme",
+            SharedEntry.status == "active", or_(SharedEntry.allow_chat, SharedEntry.allow_writing)
+        ),
         select(literal("memory"), Memory.id, Memory.user_id).where(
             Memory.active.is_(True), or_(Memory.allow_chat, Memory.allow_writing)
         ),
@@ -268,8 +278,8 @@ def ensure_index_tasks(db: Session, settings: Settings, limit: int = 20) -> list
         select(candidates).order_by(candidates.c[2], candidates.c[0], candidates.c[1])
     ):
         # The scheduler and API mutations use this same account lock.
-        account = lock_account(db, user_id)
-        if account is None or not account.active:
+        account = lock_account(db, user_id) if user_id else None
+        if user_id is not None and (account is None or not account.active):
             continue
         source = _source(db, kind, source_id, user_id)
         if source is None:
@@ -316,7 +326,7 @@ def ensure_index_tasks(db: Session, settings: Settings, limit: int = 20) -> list
             continue
         task = Task(
             user_id=user_id,
-            kind="index",
+            kind="shared_index" if user_id is None else "index",
             source="system",
             status="pending",
             request={
@@ -370,9 +380,9 @@ async def execute_index(settings: Settings, engine, task_id, *, embed=None) -> N
     task_id = UUID(str(task_id))
     with Session(engine) as db, db.begin():
         task = db.get(Task, task_id)
-        if task is None or task.kind != "index" or task.status != "pending":
+        if task is None or task.kind not in {"index", "shared_index"} or task.status != "pending":
             return
-        user = lock_account(db, task.user_id)
+        user = lock_account(db, task.user_id) if task.user_id else None
         task = db.scalar(
             select(Task)
             .where(Task.id == task_id)
@@ -382,7 +392,7 @@ async def execute_index(settings: Settings, engine, task_id, *, embed=None) -> N
         if task is None or task.status != "pending":
             return
         live = _live_index_source(db, task, settings)
-        if user is None or not user.active or live is None:
+        if (task.user_id is not None and (user is None or not user.active)) or live is None:
             _finish(task, "cancelled", "index_source_changed")
             return
         source, state = live
@@ -430,12 +440,12 @@ async def execute_index(settings: Settings, engine, task_id, *, embed=None) -> N
     except ModelCallFailed:
         failure = "model_failed"
     with Session(engine) as db, db.begin():
-        user = lock_account(db, user_id)
+        user = lock_account(db, user_id) if user_id else None
         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
         if task is None or task.status != "running":
             return
         live = _live_index_source(db, task, settings)
-        if user is None or not user.active or live is None:
+        if (user_id is not None and (user is None or not user.active)) or live is None:
             _finish(task, "cancelled", "index_source_changed")
         elif failure:
             _finish(task, "outcome_unknown" if failure == "model_unknown" else "failed", failure)

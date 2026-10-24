@@ -28,7 +28,7 @@ test('service status polling preserves edits and stops on logout', async ({ page
   })).status()).toBe(200)
   await page.reload()
   await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click()
+  await page.getByRole('button', { name: '个人设置', exact: true }).click()
   const notice = page.getByRole('status', { name: '交流服务状态' })
   await expect(notice).toHaveText('合成服务状态：ready')
   await page.getByRole('button', { name: '调整 LISA 性格' }).click()

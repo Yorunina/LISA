@@ -35,8 +35,6 @@ def run(*args: str, env: dict[str, str]) -> None:
 def seed_browser_invites(env: dict[str, str]) -> None:
     # Import only after the isolated database is selected.
     sys.path.insert(0, str(ROOT))
-    from datetime import UTC, datetime, timedelta
-
     from sqlalchemy import create_engine, delete
     from sqlalchemy.orm import Session
 
@@ -45,8 +43,6 @@ def seed_browser_invites(env: dict[str, str]) -> None:
         Account,
         Base,
         Chapter,
-        CollectedGroup,
-        GroupMessage,
         Invite,
         Persona,
         PersonaVersion,
@@ -62,7 +58,7 @@ def seed_browser_invites(env: dict[str, str]) -> None:
         with Session(engine) as session:
             for table in reversed(Base.metadata.sorted_tables):
                 session.execute(delete(table))
-            codes = issue_invites(session, 6)
+            codes = issue_invites(session, 7)
             recovery_user = Account(
                 username="recovery_reader",
                 password_hash=hash_password("synthetic-password-2026"),
@@ -87,7 +83,6 @@ def seed_browser_invites(env: dict[str, str]) -> None:
             styles_user = Account(
                 username="styles_reader",
                 password_hash=hash_password("synthetic-password-2026"),
-                is_admin=True,
             )
             session.add(styles_user)
             session.flush()
@@ -131,29 +126,6 @@ def seed_browser_invites(env: dict[str, str]) -> None:
                     prompt=styles_persona.prompt,
                 )
             )
-            group = CollectedGroup(
-                bot_id="700000010",
-                qq_group_id="700000021",
-                name="接口验收群",
-                enabled=False,
-                last_ordinal=10,
-            )
-            session.add(group)
-            session.flush()
-            recorded_at = datetime.now(UTC) - timedelta(hours=1)
-            session.add_all(
-                GroupMessage(
-                    group_id=group.id,
-                    message_id=str(8000 + index),
-                    qq_id="700000031" if index % 2 == 0 else "700000032",
-                    name="接口目标" if index % 2 == 0 else "接口上下文",
-                    content=f"合成接口验收消息 {index}，只用于群记录流程验证。",
-                    kind="text",
-                    ordinal=index + 1,
-                    sent_at=recorded_at + timedelta(seconds=index),
-                )
-                for index in range(10)
-            )
             env["LISA_TEST_BINDING_CODE"] = issue_code(session, "binding", "700000001")
             env["LISA_TEST_STATUS_BINDING_CODE"] = issue_code(session, "binding", "700000004")
             env["LISA_TEST_RECOVERY_CODE"] = issue_code(
@@ -170,9 +142,16 @@ def main() -> None:
     sys.stderr.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", action="store_true", help="Also run Chromium auth checks")
+    parser.add_argument("--pytest-target", action="append", default=[],
+                        help="Optional pytest file; repeat to select related tests")
+    parser.add_argument("--browser-target", action="append", default=[],
+                        help="Optional Playwright file inside tests/e2e")
     args = parser.parse_args()
     # Environment overrides remain useful for a dedicated local test PostgreSQL server.
-    env = {**{k: v for k, v in dotenv_values(ROOT / ".env").items() if v}, **os.environ}
+    env = {
+        **{k: v for k, v in dotenv_values(ROOT / "runtime" / ".env").items() if v},
+        **os.environ,
+    }
     database = "lisa_test_" + uuid.uuid4().hex
     admin_conninfo = make_conninfo(
         host=env["LISA_DB_HOST"],
@@ -191,6 +170,7 @@ def main() -> None:
     env["LISA_CHAT_TEST_ENABLED"] = "false"
     env["LISA_AUTONOMY_ENABLED"] = "false"
     env["LISA_PROACTIVE_ENABLED"] = "false"
+    env["LISA_SHARED_RADAR_ENABLED"] = "false"
     env["LISA_MODEL_API_KEY"] = ""
     env["LISA_EMBEDDING_MODEL"] = ""
     env["LISA_EMBEDDING_BASE_URL"] = ""
@@ -223,10 +203,11 @@ def main() -> None:
             run(sys.executable, "-m", "lisa", "migrate", env=env)
             run(sys.executable, "-m", "lisa", "index", env=env)
             run(sys.executable, "-m", "lisa.worker", "--once", env=env)
-            run(sys.executable, "-m", "pytest", "-q", "tests", env=env)
+            run(sys.executable, "-m", "pytest", "-q", *(args.pytest_target or ["tests"]), env=env)
             if args.browser:
                 seed_browser_invites(env)
-                run("node", "node_modules/@playwright/test/cli.js", "test", env=env)
+                run("node", "node_modules/@playwright/test/cli.js", "test",
+                    *args.browser_target, env=env)
         finally:
             # Drop only the database name generated locally in this invocation.
             admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))

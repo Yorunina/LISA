@@ -146,11 +146,13 @@ def _new_version(
             select(Task).where(
                 Task.id == data.source_task_id,
                 Task.user_id == user_id,
-                Task.kind == "style_distill",
+                Task.kind.in_({"style_distill", "style_trial"}),
             )
         )
         if task is None or task.status != "completed" or not task.result:
             raise HTTPException(422, "来源蒸馏任务不可用。")
+        if task.kind == "style_trial" and task.request.get("mode") != "refine":
+            raise HTTPException(422, "普通试用不能作为性格方案来源。")
         if task.request.get("kind") != profile.kind:
             raise HTTPException(422, "来源任务与方案类型不一致。")
     if not data.prompt.strip():

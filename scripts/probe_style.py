@@ -32,7 +32,7 @@ SAMPLES = {
 }
 
 
-async def probe() -> bool:
+async def probe(selected_kind: str | None = None) -> bool:
     settings = Settings()
     engine = make_engine(settings)
     outcomes = []
@@ -43,6 +43,8 @@ async def probe() -> bool:
         user_id = user.id
     try:
         for kind, source in SAMPLES.items():
+            if selected_kind and kind != selected_kind:
+                continue
             if kind == "personality":
                 segments, participants, _ = parse_chat(source, 0)
                 targets = [participants[1]["id"]]
@@ -56,29 +58,55 @@ async def probe() -> bool:
                 db.flush()
                 task_id = task.id
                 corpus = StyleCorpus(
-                    user_id=user_id, kind=kind, state="processing", task_id=task_id,
-                    payload={"files": [{"name": "synthetic.txt", "text": source,
-                                        "encoding": "utf-8", "segments": segments}]},
+                    user_id=user_id,
+                    kind=kind,
+                    state="processing",
+                    task_id=task_id,
+                    payload={
+                        "files": [
+                            {
+                                "name": "synthetic.txt",
+                                "text": source,
+                                "encoding": "utf-8",
+                                "segments": segments,
+                            }
+                        ]
+                    },
                     preview={"files": [], "participants": participants, "total_chars": len(source)},
                     expires_at=datetime.now(UTC) + timedelta(hours=1),
                 )
                 db.add(corpus)
                 db.flush()
                 corpus_id = corpus.id
-                task.request = {"corpus_id": str(corpus_id), "kind": kind,
-                                "target_speakers": targets, "selection": []}
+                task.request = {
+                    "corpus_id": str(corpus_id),
+                    "kind": kind,
+                    "target_speakers": targets,
+                    "selection": [],
+                }
             await execute_style(settings, engine, task_id)
             with Session(engine) as db:
                 task, corpus = db.get(Task, task_id), db.get(StyleCorpus, corpus_id)
                 calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task_id)).all()
-                outcomes.append({
-                    "kind": kind, "status": task.status, "error": task.error,
-                    "cleaned": not corpus.payload and corpus.state == "cleaned",
-                    "result": task.result,
-                    "calls": [{"state": c.state, "error": c.error, "input": c.input_tokens,
-                               "output": c.output_tokens, "estimated_usd": str(c.charged_usd)}
-                              for c in calls],
-                })
+                outcomes.append(
+                    {
+                        "kind": kind,
+                        "status": task.status,
+                        "error": task.error,
+                        "cleaned": not corpus.payload and corpus.state == "cleaned",
+                        "result": task.result,
+                        "calls": [
+                            {
+                                "state": c.state,
+                                "error": c.error,
+                                "input": c.input_tokens,
+                                "output": c.output_tokens,
+                                "estimated_usd": str(c.charged_usd),
+                            }
+                            for c in calls
+                        ],
+                    }
+                )
     finally:
         with Session(engine) as db, db.begin():
             user = db.get(Account, user_id)
@@ -86,7 +114,9 @@ async def probe() -> bool:
                 db.delete(user)
         engine.dispose()
     report = {"at": datetime.now(UTC).isoformat(), "synthetic": True, "outcomes": outcomes}
-    output = ROOT / "runtime" / "style-probe.json"
+    name = f"style-probe-{selected_kind}.json" if selected_kind else "style-probe.json"
+    output = ROOT / "runtime" / "reports" / "probes" / name
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     success = all(item["status"] == "completed" and item["cleaned"] for item in outcomes)
     summary = [
@@ -101,6 +131,7 @@ async def probe() -> bool:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", required=True, action="store_true")
-    parser.parse_args()
+    parser.add_argument("--kind", choices=["personality", "writing"])
+    args = parser.parse_args()
     with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-        raise SystemExit(0 if runner.run(probe()) else 1)
+        raise SystemExit(0 if runner.run(probe(args.kind)) else 1)

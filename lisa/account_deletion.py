@@ -81,6 +81,8 @@ def delete_account(
     if binding:
         for model in (ServiceCode, ServiceEvent, GuideNotice):
             db.execute(delete(model).where(model.qq_id == binding.qq_id))
+    from lisa.shared import cleanup_account_contributions
+    cleanup_account_contributions(db, user.id)
     db.delete(user)
     db.commit()
     response.delete_cookie(

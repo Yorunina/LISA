@@ -2,6 +2,7 @@
 
 import base64
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -100,6 +101,42 @@ def test_upload_is_temporary_and_does_not_modify_chat_or_activity(client, db, in
     assert corpus.payload == {}
     assert corpus.preview["participants"] == []
     assert "小明" not in str(corpus.preview)
+
+
+def test_v5_upload_reports_replacement_and_count_mismatch_and_cleans_source(client, db, invites):
+    signup(client, invites[0])
+    source = (Path(__file__).parent / "fixtures" / "qq_exporter_v5.txt").read_text(encoding="utf-8")
+    source = source.replace("结尾的停顿", "结尾\x00的停顿")
+    response = upload(client, "personality", source, "v5.txt")
+    assert response.status_code == 201, response.text
+    view = response.json()
+    assert view["preview"]["files"][0]["segments"] == 3
+    assert len(view["preview"]["participants"]) == 2
+    assert view["preview"]["warnings"] == []
+    assert "今天看完" not in response.text
+    stored = db.get(StyleCorpus, UUID(view["id"]))
+    assert "\x00" not in stored.payload["files"][0]["text"]
+    assert "结尾\ufffd的停顿" in stored.payload["files"][0]["text"]
+    stored.preview = {
+        **stored.preview,
+        "warnings": [
+            "文件 1 含 1 个空字符，已用 � 标记；原文件未修改。",
+            "部分消息未识别，请检查导出格式。",
+        ],
+    }
+    db.commit()
+    restored = client.get(f"/api/style/corpora/{view['id']}").json()
+    assert restored["preview"]["warnings"] == ["部分消息未识别，请检查导出格式。"]
+    assert client.delete(f"/api/style/corpora/{view['id']}", headers=HEADERS).status_code == 200
+    db.expire_all()
+    assert stored.payload == {}
+    broken = upload(
+        client, "personality", source.replace("时间: 2026-10-23 10:01:00", "时间: 损坏"), "v5.txt"
+    )
+    assert broken.status_code == 201
+    preview = broken.json()["preview"]
+    assert preview["files"][0]["segments"] == 2
+    assert any("声明 3 条消息，实际识别 2 条" in warning for warning in preview["warnings"])
 
 
 def test_expiration_cancels_task_and_erases_payload(db):

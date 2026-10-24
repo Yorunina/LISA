@@ -646,7 +646,7 @@ test('polling preserves edits, chapter and persona navigation protect input, rew
   await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
   await expect(editor).toContainText('仍未保存的正文修改。')
   state.saveFails = true
-  await page.getByRole('button', { name: '账号与 LISA 性格' }).click()
+  await page.getByRole('button', { name: '个人设置' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('合成保存失败')
   await expect(editor).toContainText('仍未保存的正文修改。')
@@ -681,7 +681,7 @@ test('polling preserves edits, chapter and persona navigation protect input, rew
   await page.getByRole('button', { name: '创作任务', exact: true }).click()
   await page.evaluate(() => window.scrollTo(0, 0))
   await page.screenshot({ path: testInfo.outputPath('desktop-task-states.png'), fullPage: true })
-  await page.getByRole('button', { name: '账号与 LISA 性格' }).click()
+  await page.getByRole('button', { name: '个人设置' }).click()
   await page.getByRole('button', { name: '调整 LISA 性格' }).click()
   await page.getByLabel('LISA 性格 prompt', { exact: true }).fill('未保存的合成人格。')
   await page.getByRole('button', { name: '我的作品', exact: true }).click()

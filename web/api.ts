@@ -27,7 +27,7 @@ export class ApiError extends Error {
   }
 }
 
-async function responseFor(path: string, body?: object, method?: 'POST' | 'PUT' | 'DELETE' | 'PATCH'): Promise<Response> {
+async function responseFor(path: string, body?: object, method?: 'POST' | 'PUT' | 'DELETE'): Promise<Response> {
   let response: Response;
   try {
     response = await fetch(`/api${path}`, {
@@ -58,7 +58,7 @@ async function responseFor(path: string, body?: object, method?: 'POST' | 'PUT' 
   return response;
 }
 
-export async function request<T>(path: string, body?: object, method?: 'POST' | 'PUT' | 'DELETE' | 'PATCH'): Promise<T> {
+export async function request<T>(path: string, body?: object, method?: 'POST' | 'PUT' | 'DELETE'): Promise<T> {
   const response = await responseFor(path, body, method);
   return response.status === 204 ? undefined as T : response.json();
 }

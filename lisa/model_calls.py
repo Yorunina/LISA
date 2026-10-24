@@ -75,7 +75,7 @@ def _reserve(
     settings: Settings,
     engine,
     task_id: UUID,
-    user_id: UUID,
+    user_id: UUID | None,
     amount: Decimal,
     *,
     configuration: dict | None = None,
@@ -84,13 +84,17 @@ def _reserve(
         # Daily rows alone cannot serialize the global in-flight limit across UTC midnight.
         db.execute(text("SELECT pg_advisory_xact_lock(7273101)"))
         task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
-        user = db.get(Account, user_id)
+        user = db.get(Account, user_id) if user_id else None
+        platform = bool(
+            task and task.user_id is None
+            and task.kind in {"shared_analyze", "shared_index"}
+            and user_id is None
+        )
         if (
             task is None
             or task.user_id != user_id
             or task.status != "running"
-            or user is None
-            or not user.active
+            or (not platform and (user is None or not user.active))
         ):
             raise ModelCallFailed("Task or account unavailable")
         now = datetime.now(UTC)
@@ -109,7 +113,7 @@ def _reserve(
         max_calls = (
             settings.style_distillation_max_calls
             if task.kind == "style_distill"
-            else 1
+            else (6 if task.request.get("mode") == "refine" else 1)
             if task.kind == "style_trial"
             else MAX_WRITING_CALLS
             if task.kind in {"scene", "rewrite"}
@@ -121,6 +125,16 @@ def _reserve(
             raise BudgetExceeded("Task model allowance exhausted")
         if day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd:
             raise BudgetExceeded("Daily model allowance exhausted")
+        if platform:
+            maintenance = db.scalars(select(ModelCall).where(
+                ModelCall.user_id.is_(None), ModelCall.budget_day == day.day
+            )).all()
+            used = sum((
+                c.charged_usd if c.charged_usd is not None else c.reserved_usd
+                for c in maintenance
+            ), Decimal(0))
+            if used + amount > settings.shared_daily_usd:
+                raise BudgetExceeded("Daily shared maintenance allowance exhausted")
         inflight = db.scalar(
             select(func.count()).select_from(ModelCall).where(ModelCall.state == "reserved")
         )
@@ -162,8 +176,9 @@ def _finish(
     with Session(engine) as db, db.begin():
         db.execute(text("SELECT pg_advisory_xact_lock(7273101)"))
         call = db.get(ModelCall, call_id)
-        if call is None:
-            return  # The account and its call records were deleted while the request ran.
+        if call is None or call.state != "reserved":
+            # Deleted accounts and interrupted attempts cannot be settled twice.
+            return
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == call.budget_day).with_for_update())
         # No retry releases an unknown provider outcome back into available budget.
         amount = charged if charged is not None else call.reserved_usd

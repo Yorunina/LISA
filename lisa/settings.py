@@ -12,7 +12,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="LISA_", env_file=ROOT / ".env", env_file_encoding="utf-8", extra="ignore"
+        env_prefix="LISA_",
+        env_file=ROOT / "runtime" / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     db_host: str = "127.0.0.1"
@@ -78,6 +81,7 @@ class Settings(BaseSettings):
     style_chat_max_windows: int = Field(default=24, ge=1, le=64)
     autonomy_enabled: bool = True
     proactive_enabled: bool = True
+    shared_daily_usd: Decimal = Field(default=Decimal("1.00"), gt=0)
     autonomous_scene_interval_minutes: int = Field(default=120, ge=1, le=1440)
     autonomous_scene_limit: int = Field(default=2, ge=1, le=10)
 

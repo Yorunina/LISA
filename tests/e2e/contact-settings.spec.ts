@@ -39,7 +39,7 @@ async function stubContact(page: Page) {
   })
   await page.goto('/')
   await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click()
+  await page.getByRole('button', { name: '个人设置', exact: true }).click()
   await expect(page.getByRole('button', { name: '设置联系偏好', exact: true })).toBeVisible()
   return state
 }
@@ -66,7 +66,7 @@ test('contact preferences opt in explicitly, persist overnight quiet hours and i
   await page.screenshot({ path: testInfo.outputPath('desktop-contact-settings.png'), fullPage: true })
   await page.reload()
   await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click()
+  await page.getByRole('button', { name: '个人设置', exact: true }).click()
   await page.getByRole('button', { name: '设置联系偏好', exact: true }).click()
   await expect(page.getByLabel('允许 LISA 主动联系我')).toBeChecked()
   await expect(page.getByLabel('免打扰开始', { exact: true })).toHaveValue('22:30')
@@ -157,7 +157,7 @@ test('interaction observations remain read only and update after sources are rem
   state.settings.observations = { ...state.settings.observations, sample_count: 0, active_days: 0, preferred_hours: null, text_length: { sample_count: 0, median: null, trend: null } }
   await page.reload()
   await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click()
+  await page.getByRole('button', { name: '个人设置', exact: true }).click()
   await page.getByRole('button', { name: '设置联系偏好', exact: true }).click()
   await expect(page.getByLabel('交流记录中的线索')).toContainText('还没有可参考的交流记录')
   await expect(page.getByLabel('交流记录中的线索')).not.toContainText('18:00–24:00')

@@ -384,6 +384,9 @@ async def deliver_outbox(
     while True:
         with Session(engine, expire_on_commit=False) as db, db.begin():
             message = claim_outbound(db, allow_qq, settings=settings)
+            if message is not None:
+                from lisa.shared_retrieval import outbound_segments
+                segments = outbound_segments(db, message)
         if message is None:
             await asyncio.sleep(0.5)
             continue
@@ -393,7 +396,7 @@ async def deliver_outbox(
                 "send_private_msg",
                 {
                     "user_id": int(message.qq_id),
-                    "message": [{"type": "text", "data": {"text": message.content}}],
+                    "message": segments,
                 },
             )
             if result.get("message_id") is not None:

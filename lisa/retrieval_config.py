@@ -74,6 +74,22 @@ def task_references(task_id: UUID, user: User, db: DB):
     task = require_writing_task(db, user, task_id)
     items = []
     for position, ref in enumerate(load_task_references(db, task.id)):
+        if ref["source_kind"] == "shared":
+            from lisa.shared_retrieval import public_rows, shared_source
+            source = shared_source(db, UUID(ref["source_id"]))
+            if source and source.id not in {i.id for i in public_rows(db, user.id, "writing")}:
+                source = None
+            state = (
+                "unavailable" if source is None else "changed"
+                if source.revision != ref["revision"] else "available"
+            )
+            items.append({
+                "position": position, "source_kind": "shared", "revision": ref["revision"],
+                "start": ref["start"], "end": ref["end"], "state": state,
+                "title": source.metadata.get("title") if state == "available" else None,
+                "text": source.text[ref["start"]:ref["end"]] if state == "available" else None,
+            })
+            continue
         source = _source(
             db,
             ref["source_kind"],

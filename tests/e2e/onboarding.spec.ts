@@ -89,7 +89,7 @@ test('QQ recovery resets the password, expires old sessions and retains persona'
     await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
     await page.reload()
     await expect(page.getByRole('heading', { name: '我的作品', exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '账号与 LISA 性格', exact: true }).click()
+    await page.getByRole('button', { name: '个人设置', exact: true }).click()
     await expect(page.getByRole('heading', { name: '欢迎，recovery_reader。' })).toBeVisible()
     await expect(page.getByRole('heading', { name: '留存的小莎' })).toBeVisible()
     const setup = await (await page.request.get('/api/setup')).json()

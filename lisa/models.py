@@ -6,10 +6,12 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     Index,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -351,9 +353,15 @@ class Chapter(Base):
 
 class Task(Base):
     __tablename__ = "tasks"
+    __table_args__ = (CheckConstraint(
+        "user_id IS NOT NULL OR kind IN ('shared_analyze', 'shared_index')",
+        name="ck_task_platform_kind",
+    ),)
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
     kind: Mapped[str] = mapped_column(String(24), default="chat")
     source: Mapped[str] = mapped_column(String(24), default="qq")
     status: Mapped[str] = mapped_column(String(24), default="pending")
@@ -468,10 +476,15 @@ class LifeShare(Base):
 
 class IndexState(Base):
     __tablename__ = "index_states"
-    __table_args__ = (UniqueConstraint("source_kind", "source_id"),)
+    __table_args__ = (
+        UniqueConstraint("source_kind", "source_id"),
+        CheckConstraint("user_id IS NOT NULL OR source_kind = 'shared'", name="ck_index_public"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
     source_kind: Mapped[str] = mapped_column(String(16))
     source_id: Mapped[UUID]
     revision: Mapped[int]
@@ -524,7 +537,9 @@ class ModelCall(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
-    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
     budget_day: Mapped[date] = mapped_column(ForeignKey("budget_days.day"))
     state: Mapped[str] = mapped_column(String(24))
     reserved_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
@@ -545,6 +560,10 @@ class OutboundMessage(Base):
     task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), unique=True)
     qq_id: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text)
+    meme_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("shared_entries.id", ondelete="SET NULL")
+    )
+    meme_revision: Mapped[int | None]
     status: Mapped[str] = mapped_column(String(16), default="pending")
     attempts: Mapped[int] = mapped_column(default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(
@@ -553,3 +572,78 @@ class OutboundMessage(Base):
     message_id: Mapped[str | None] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SharedAsset(Base):
+    __tablename__ = "shared_assets"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    digest: Mapped[str] = mapped_column(String(64), unique=True)
+    mime: Mapped[str] = mapped_column(String(32))
+    data: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    uploader_id: Mapped[UUID | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SharedEntry(Base):
+    __tablename__ = "shared_entries"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    kind: Mapped[str] = mapped_column(String(16))
+    title: Mapped[str] = mapped_column(String(160))
+    content: Mapped[str] = mapped_column(Text)
+    aliases: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    tags: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    source_url: Mapped[str] = mapped_column(Text, default="", server_default="")
+    source_note: Mapped[str] = mapped_column(Text, default="", server_default="")
+    origin: Mapped[str] = mapped_column(String(16), default="contribution")
+    origin_key: Mapped[str | None] = mapped_column(String(160), unique=True)
+    contributor_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="SET NULL"), index=True
+    )
+    editor_id: Mapped[UUID | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("shared_assets.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    revision: Mapped[int] = mapped_column(default=1, server_default="1")
+    human_edited: Mapped[bool] = mapped_column(default=False, server_default="false")
+    allow_chat: Mapped[bool] = mapped_column(default=True, server_default="true")
+    allow_writing: Mapped[bool] = mapped_column(default=False, server_default="false")
+    occurred_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    source_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SharedRevision(Base):
+    __tablename__ = "shared_revisions"
+
+    entry_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shared_entries.id", ondelete="CASCADE"), primary_key=True
+    )
+    revision: Mapped[int] = mapped_column(primary_key=True)
+    editor_id: Mapped[UUID | None] = mapped_column(ForeignKey("accounts.id", ondelete="SET NULL"))
+    data: Mapped[dict] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SharedPreference(Base):
+    __tablename__ = "shared_preferences"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    meme_mode: Mapped[str] = mapped_column(String(16), default="normal", server_default="normal")
+
+
+class SharedMute(Base):
+    __tablename__ = "shared_mutes"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    entry_id: Mapped[UUID] = mapped_column(
+        ForeignKey("shared_entries.id", ondelete="CASCADE"), primary_key=True
+    )

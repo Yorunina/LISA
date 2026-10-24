@@ -386,7 +386,8 @@ def test_slow_author_worker_does_not_occupy_chat_consumer(
                 )
             )
             try:
-                await asyncio.wait_for(started.wait(), 2)
+                # Database/queue startup on Windows is independent of model latency.
+                await asyncio.wait_for(started.wait(), 10)
                 await asyncio.wait_for(
                     queue.run_worker_async(
                         queues=["lisa"],

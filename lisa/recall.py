@@ -8,6 +8,7 @@ from lisa.model_calls import generate_embeddings
 from lisa.models import Account, Character, Project
 from lisa.retrieval import Context, has_ready_context, recall, recall_titles
 from lisa.retrieval_config import author_retrieval_config
+from lisa.shared_retrieval import recall_shared, shared_ready
 
 
 class ContextChanged(Exception):
@@ -59,7 +60,7 @@ async def retrieve_context(
         options = _options(db, user_id, project_id, purpose, character_id)
         if options is None:
             return Context()
-        if not has_ready_context(
+        ready = has_ready_context(
             db,
             settings,
             user_id,
@@ -67,16 +68,23 @@ async def retrieve_context(
             purpose,
             sources=options.get("sources"),
             character_id=character_id,
-        ):
-            return recall_titles(db, user_id, project_id, purpose, query, **options)
+        )
+        public_ready = shared_ready(db, settings, user_id, purpose)
     vectors = await (embed or generate_embeddings)(
         settings, engine, task_id, user_id, [query[-1500:]]
-    )
+    ) if ready or public_ready else None
     # Reapply live source permissions and revisions after the network request.
     with Session(engine) as db:
         options = _options(db, user_id, project_id, purpose, character_id)
         if options is None:
             return Context()
-        return recall(
+        result = recall(
             db, settings, user_id, project_id, purpose, vectors[0], query=query, **options
+        ) if ready and vectors else recall_titles(
+            db, user_id, project_id, purpose, query, **options
         )
+        public = recall_shared(db, settings, user_id, purpose, query,
+                               vectors[0] if vectors else None)
+        result.text += public.text
+        result.references.extend(public.references)
+        return result

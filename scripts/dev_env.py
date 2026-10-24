@@ -20,6 +20,7 @@ from websockets.asyncio.client import connect
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "runtime"
+ENV_FILE = RUNTIME / ".env"
 PG = RUNTIME / "tools" / "postgresql" / "bin"
 DATA = RUNTIME / "postgres" / "data"
 NAPCAT = RUNTIME / "tools" / "napcat"
@@ -27,7 +28,7 @@ NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
 
 def settings() -> dict[str, str]:
-    values = dotenv_values(ROOT / ".env")
+    values = dotenv_values(ENV_FILE)
     required = (
         "LISA_DB_HOST",
         "LISA_DB_PORT",
@@ -58,7 +59,13 @@ def conninfo(*, admin: bool = False, maintenance: bool = False) -> str:
 
 
 def init() -> None:
-    env = ROOT / ".env"
+    RUNTIME.mkdir(parents=True, exist_ok=True)
+    env = ENV_FILE
+    legacy_env = ROOT / ".env"
+    if legacy_env.exists():
+        if env.exists():
+            raise RuntimeError("Both .env and runtime/.env exist; reconcile them before init")
+        legacy_env.rename(env)
     if not env.exists():
         template = (ROOT / ".env.example").read_text(encoding="utf-8")
         lines = [
@@ -413,7 +420,7 @@ if __name__ == "__main__":
         message = str(exc)
         if isinstance(exc, subprocess.CalledProcessError):
             message = exc.stderr or exc.stdout or message
-        for key, value in dotenv_values(ROOT / ".env").items():
+        for key, value in dotenv_values(ENV_FILE).items():
             if value and ("PASSWORD" in key or "TOKEN" in key):
                 message = message.replace(value, "<redacted>")
         print(f"FAIL: {message}", file=sys.stderr)

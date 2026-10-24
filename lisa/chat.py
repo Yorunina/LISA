@@ -7,6 +7,7 @@ from procrastinate.retry import RetryDecision
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from lisa.chat_style import expression_guide
 from lisa.dialogue import (
     MEMORY_INSTRUCTIONS,
     Conversation,
@@ -127,7 +128,7 @@ def ingest_message(
     return task.id
 
 
-def _outbound(db: Session, task: Task, qq_id: str, content: str) -> None:
+def _outbound(db: Session, task: Task, qq_id: str, content: str, meme=None) -> None:
     if not db.scalar(select(OutboundMessage.id).where(OutboundMessage.task_id == task.id)):
         db.add(
             OutboundMessage(
@@ -135,6 +136,8 @@ def _outbound(db: Session, task: Task, qq_id: str, content: str) -> None:
                 task_id=task.id,
                 qq_id=qq_id,
                 content=content,
+                meme_id=meme.id if meme else None,
+                meme_revision=meme.revision if meme else None,
                 status="pending",
             )
         )
@@ -229,10 +232,15 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             f"性格设定：\n{persona_snapshot['prompt']}"
         )
         instructions += (
-            MEMORY_INSTRUCTIONS
+            "\n" + expression_guide() + MEMORY_INSTRUCTIONS
             + LIFE_INSTRUCTIONS
             + "\nlife_events的evidence逐字来自你本次reply。life_mentions只列本次回复明确提到的"
             "已有生活事件：memory_id用已提供的生活记忆id，evidence逐字来自reply；无则[]。"
+        )
+        instructions += (
+            "\nmeme_id只选本轮提供的共有表情素材id或null；没有候选时必须null。"
+            "用户明确要求少发、停用或恢复表情时，meme_preference分别填reduced/off/normal，"
+            "meme_preference_evidence逐字引用本批用户该要求；普通交流均为null和空字符串。"
         )
         base_instructions = instructions
         if project:
@@ -247,13 +255,14 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             db, user.id, project_id, purpose="chat", max_chars=1200, references=memory_ids
         )
         history_ids = [message.id for message in history]
+        from lisa.shared_retrieval import sent_meme_context
         messages = [
             {
                 "role": message.role,
                 "content": (
                     f"[消息时间 {message.sent_at.isoformat()}]\n" + message_text(message)
                     if message.role == "user"
-                    else message.content
+                    else message.content + sent_meme_context(db, message)
                 ),
             }
             for message in [*history, *batch]
@@ -284,6 +293,9 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         )
         with Session(engine) as db:
             check_memory_revision(db, user_id, memory_revision)
+            from lisa.shared_retrieval import shared_references_current
+            if not shared_references_current(db, recalled, user_id):
+                raise ContextChanged
         if recalled.text:
             instructions = instructions_without_memories + recalled.text
             memory_ids = recalled.memory_ids
@@ -376,7 +388,11 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 task.status, task.error = "failed", "account_unavailable"
                 task.finished_at = datetime.now(UTC)
             return
-        if error is None and user.memory_revision != memory_revision:
+        from lisa.shared_retrieval import select_meme, shared_references_current
+        if error is None and (
+            user.memory_revision != memory_revision
+            or not shared_references_current(db, recalled, user_id)
+        ):
             error = "context_changed"
             reply = "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。"
         task.status, task.error = ("failed" if error else "completed"), error
@@ -396,6 +412,19 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     decision.scene_plan if decision.commission is None else None,
                 )
             if decision:
+                from lisa.models import SharedPreference
+                evidence = decision.meme_preference_evidence
+                if decision.meme_preference and evidence and any(
+                    evidence in text for text in current_texts
+                ) and any(word in evidence for word in ("表情", "发图")):
+                    preference = db.get(SharedPreference, user_id)
+                    if preference:
+                        preference.meme_mode = decision.meme_preference
+                    else:
+                        db.add(SharedPreference(
+                            user_id=user_id, meme_mode=decision.meme_preference
+                        ))
+                    db.flush()
                 if decision.share_chapter_id in share_ids:
                     link = chapter_link(db, settings, user_id, decision.share_chapter_id)
                     if link:
@@ -425,7 +454,10 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     if item.memory_id in memory_ids and item.evidence in reply
                 ]
                 queue_life_shares(db, user_id, task_id, life_ids + mentioned_ids)
-        _outbound(db, task, qq_id, reply)
+        meme = (
+            select_meme(db, user_id, decision.meme_id, recalled) if decision and not error else None
+        )
+        _outbound(db, task, qq_id, reply, meme)
     logger.info("task=%s status=%s", task_id, "failed" if error else "completed")
 
 

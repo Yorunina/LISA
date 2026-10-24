@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB, current_user
-from lisa.chat_corpus import parse_chat
+from lisa.chat_corpus import V5_COUNT, decode_text, is_exporter_v5, parse_chat
 from lisa.models import Account, StyleCorpus, Task
 from lisa.works import lock_account
 
@@ -37,18 +37,10 @@ class UploadCorpus(BaseModel):
 
 
 def decode_source(data: bytes) -> tuple[str, str]:
-    encodings = ["utf-8-sig", "gb18030"]
-    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
-        encodings = ["utf-16"]
-    for encoding in encodings:
-        try:
-            value = data.decode(encoding)
-        except UnicodeError:
-            continue
-        if "\x00" in value or any(ord(c) < 32 and c not in "\n\r\t" for c in value):
-            continue
-        return value.replace("\r\n", "\n").replace("\r", "\n"), encoding
-    raise HTTPException(422, "无法识别文本编码，请转换为 UTF-8 TXT/Markdown 后重新上传。")
+    try:
+        return decode_text(data)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
 
 
 def parse_writing(text: str, file_index: int) -> list[dict]:
@@ -136,12 +128,19 @@ def require_corpus(db: Session, user_id: UUID, corpus_id: UUID, lock: bool = Fal
 
 
 def corpus_view(corpus: StyleCorpus) -> dict:
+    preview = dict(corpus.preview)
+    # Older temporary uploads can still carry this retired informational notice.
+    preview["warnings"] = [
+        warning
+        for warning in preview.get("warnings", [])
+        if not re.fullmatch(r"文件 \d+ 含 \d+ 个空字符，已用 � 标记；原文件未修改。", warning)
+    ]
     return {
         "id": corpus.id,
         "kind": corpus.kind,
         "state": corpus.state,
         "cleanup_state": "cleaned" if corpus.cleaned_at else "pending",
-        "preview": corpus.preview,
+        "preview": preview,
         "expires_at": corpus.expires_at,
         "cleaned_at": corpus.cleaned_at,
         "task_id": corpus.task_id,
@@ -179,6 +178,14 @@ def upload_corpus(body: UploadCorpus, request: Request, user: StyleUser, db: DB)
         if body.kind == "personality":
             segments, people, unknown = parse_chat(text, position)
             participants.extend(people)
+            if is_exporter_v5(text):
+                declared = V5_COUNT.search(text, 0, segments[0]["start"] if segments else len(text))
+                if declared and int(declared[1]) != len(segments):
+                    warnings.append(
+                        f"文件 {position + 1} 声明 {declared[1]} 条消息，"
+                        f"实际识别 {len(segments)} 条；"
+                        "请核对导出是否完整，未识别部分不参与分析。"
+                    )
             if not segments:
                 warnings.append(f"文件 {position + 1} 未识别到 QQ 时间和发言者，请修正格式后重传。")
             if unknown:

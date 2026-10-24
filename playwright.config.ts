@@ -7,6 +7,7 @@ if (!python || !process.env.LISA_TEST_INVITES) {
 
 export default defineConfig({
   testDir: './tests/e2e',
+  outputDir: './runtime/reports/playwright',
   fullyParallel: false,
   workers: 1,
   retries: 0,

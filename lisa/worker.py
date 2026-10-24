@@ -4,10 +4,20 @@ import logging
 import os
 
 from lisa.queue import create_queue
+from lisa.settings import Settings
 
 
 async def run_worker(*, once: bool = False) -> None:
-    app = create_queue()
+    from lisa.db import make_engine
+    from lisa.recovery import recover_tasks
+
+    settings = Settings()
+    engine = make_engine(settings)
+    try:
+        await asyncio.to_thread(recover_tasks, engine)
+    finally:
+        engine.dispose()
+    app = create_queue(settings)
     async with app.open_async():
         # Separate consumers ensure a slow author never occupies the chat worker slots.
         async with asyncio.TaskGroup() as group:

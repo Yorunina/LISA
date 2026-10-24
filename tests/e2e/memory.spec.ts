@@ -98,7 +98,7 @@ test('memory correction and use restrictions require save, failed leave preserve
   await page.getByLabel('记忆内容', { exact: true }).fill('喜欢在雨天傍晚读散文，不喜欢晚上熬夜。')
   await page.getByLabel('作品创作', { exact: true }).uncheck()
   expect(state.memories[0].allow_writing).toBe(true)
-  await page.getByRole('button', { name: '账号与 LISA 性格' }).click()
+  await page.getByRole('button', { name: '个人设置' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
   state.saveFails = true
   await page.getByRole('button', { name: '原始聊天', exact: true }).click()
