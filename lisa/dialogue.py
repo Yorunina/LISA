@@ -38,6 +38,10 @@ class Conversation(Reply):
     # remains the complete logical response used by memory/life evidence and by
     # older callers; an empty list keeps synthetic and legacy generators compatible.
     messages: list[str] = Field(default_factory=list, max_length=6)
+    # One value per message part. The first value is ignored because the
+    # first part can be sent immediately; later values are waits after the
+    # previous part is confirmed by QQ.
+    message_intervals: list[float] = Field(default_factory=list, max_length=6)
     meme_id: UUID | None = None
     meme_preference: Literal["normal", "reduced", "off"] | None = None
     meme_preference_evidence: str = Field(default="", max_length=300)

@@ -1,4 +1,5 @@
 import logging
+import math
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
@@ -59,6 +60,13 @@ from lisa.vision import (
 
 logger = logging.getLogger(__name__)
 
+# The model chooses the rhythm, while these bounds keep malformed output from
+# turning one logical turn into a long queue.
+MIN_MESSAGE_INTERVAL_SECONDS = 0.5
+MAX_MESSAGE_INTERVAL_SECONDS = 8.0
+DEFAULT_MESSAGE_INTERVAL_SECONDS = 1.0
+MAX_MESSAGE_TOTAL_WAIT_SECONDS = 30.0
+
 
 def _chat_cutoff(now: datetime) -> datetime:
     return now + timedelta(seconds=CHAT_SILENCE_SECONDS)
@@ -70,6 +78,32 @@ def _message_parts(decision, fallback: str) -> list[str]:
         return [fallback]
     cleaned = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
     return cleaned or [fallback]
+
+
+def _message_intervals(decision, part_count: int) -> list[float]:
+    """Normalize model-selected waits to one bounded value per part."""
+    raw = getattr(decision, "message_intervals", None) if decision is not None else None
+    return _normalize_message_intervals(raw, part_count)
+
+
+def _normalize_message_intervals(raw, part_count: int) -> list[float]:
+    values = raw if isinstance(raw, list) else []
+    normalized = [0.0]
+    total = 0.0
+    for index in range(1, part_count):
+        value = values[index] if index < len(values) else DEFAULT_MESSAGE_INTERVAL_SECONDS
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            value = DEFAULT_MESSAGE_INTERVAL_SECONDS
+        if not math.isfinite(value):
+            value = DEFAULT_MESSAGE_INTERVAL_SECONDS
+        value = min(MAX_MESSAGE_INTERVAL_SECONDS, max(MIN_MESSAGE_INTERVAL_SECONDS, value))
+        remaining = MAX_MESSAGE_TOTAL_WAIT_SECONDS - total
+        value = min(value, max(0.0, remaining))
+        normalized.append(round(value, 3))
+        total += value
+    return normalized
 
 
 def ingest_message(
@@ -172,12 +206,22 @@ def _outbound(
     *,
     parts: list[str] | None = None,
     chat_message_ids: list[UUID] | None = None,
+    intervals: list[float] | None = None,
 ) -> None:
     if db.scalar(select(OutboundMessage.id).where(OutboundMessage.task_id == task.id)):
         return
     values = parts or [content]
+    if intervals is None:
+        intervals = [0.0] + [DEFAULT_MESSAGE_INTERVAL_SECONDS] * (len(values) - 1)
+    else:
+        # Apply the same policy to callers other than the chat model path.
+        intervals = _normalize_message_intervals(intervals, len(values))
     created = datetime.now(UTC)
-    task.result = {**(task.result or {}), "outbound_parts": values}
+    task.result = {
+        **(task.result or {}),
+        "outbound_parts": values,
+        "outbound_intervals": intervals,
+    }
     for sequence, value in enumerate(values):
         db.add(
             OutboundMessage(
@@ -187,10 +231,14 @@ def _outbound(
                 chat_message_id=(chat_message_ids or [None] * len(values))[sequence],
                 qq_id=qq_id,
                 content=value,
+                interval_seconds=intervals[sequence],
                 meme_id=meme.id if meme and sequence == 0 else None,
                 meme_revision=meme.revision if meme and sequence == 0 else None,
                 status="pending",
-                next_attempt_at=created + timedelta(seconds=sequence),
+                # Only the first part is immediately eligible. Each later
+                # part is released by finish_delivery after the prior part is
+                # confirmed sent, so slow transports never catch up in a burst.
+                next_attempt_at=created if sequence == 0 else created + timedelta(days=3650),
             )
         )
 
@@ -278,6 +326,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
             "reply是本轮完整回复；messages是按语义顺序发送的分条列表，通常一到三条，允许一条。"
             "不要机械切碎或新增reply之外的事实，控制本轮总量，先接住用户重点。"
+            "message_intervals与messages等长，首项填0，后续各项填上一条确认发送成功后等待的秒数，"
+            "按自然节奏自行选择；系统会限制每项0.5至8秒及整轮等待30秒。"
             "你及虚拟生活是虚构设定。不声称已完成尚未保存的作品或任务。"
             "用户消息可能延迟送达，以标注的消息时间理解旧消息，不假装刚刚发生。"
             "标注无法读取的非文本消息只代表用户发来了消息，不能推断图片或语音内容；请对方用文字说明。"
@@ -403,6 +453,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             )
             reply = decision.reply
         reply_parts = _message_parts(decision, reply)
+        reply_intervals = _message_intervals(decision, len(reply_parts))
     except ContextChanged:
         reply, error = (
             "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。",
@@ -535,6 +586,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             select_meme(db, user_id, decision.meme_id, recalled) if decision and not error else None
         )
         outbound_parts = reply_parts if error is None else [reply]
+        outbound_intervals = reply_intervals if error is None else [0.0]
         _outbound(
             db,
             task,
@@ -542,6 +594,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             reply,
             meme,
             parts=outbound_parts,
+            intervals=outbound_intervals,
             chat_message_ids=(
                 [message.id for message in part_messages]
                 if error is None and len(reply_parts) > 1
@@ -655,6 +708,19 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
                 .values(status="cancelled", finished_at=message.finished_at)
             )
         if status == "sent":
+            next_message = db.scalar(
+                select(OutboundMessage)
+                .where(
+                    OutboundMessage.task_id == message.task_id,
+                    OutboundMessage.sequence == message.sequence + 1,
+                    OutboundMessage.status == "pending",
+                )
+                .with_for_update()
+            )
+            if next_message is not None:
+                next_message.next_attempt_at = message.finished_at + timedelta(
+                    seconds=float(next_message.interval_seconds or DEFAULT_MESSAGE_INTERVAL_SECONDS)
+                )
             if message.chat_message_id:
                 db.execute(
                     update(ChatMessage)

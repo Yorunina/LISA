@@ -567,6 +567,7 @@ class OutboundMessage(Base):
     )
     qq_id: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text)
+    interval_seconds: Mapped[float] = mapped_column(default=1.0, server_default="1")
     meme_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("shared_entries.id", ondelete="SET NULL")
     )

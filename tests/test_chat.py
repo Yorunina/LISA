@@ -14,7 +14,13 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from lisa.app import create_app
-from lisa.chat import claim_outbound, execute_chat, finish_delivery, ingest_message
+from lisa.chat import (
+    MAX_MESSAGE_INTERVAL_SECONDS,
+    claim_outbound,
+    execute_chat,
+    finish_delivery,
+    ingest_message,
+)
 from lisa.dialogue import Conversation
 from lisa.model_calls import BudgetExceeded, ModelBusy, ModelCallFailed, ModelCallUnknown
 from lisa.models import (
@@ -132,6 +138,42 @@ async def test_chat_reply_parts_are_persisted_in_order_and_new_input_cancels_tai
 
 
 @pytest.mark.asyncio
+async def test_agent_intervals_are_bounded_and_follow_actual_success(settings, engine, db, user_id):
+    task_id = ingest(db, 1031, content="按自然节奏分条")
+
+    async def generate(*args):
+        return Conversation(
+            reply="甲\n乙\n丙",
+            messages=["甲", "乙", "丙"],
+            message_intervals=[0, 99, 0.01],
+        )
+
+    await execute_chat(settings, engine, str(task_id), generate=generate)
+    parts = list(
+        db.scalars(
+            select(OutboundMessage)
+            .where(OutboundMessage.task_id == task_id)
+            .order_by(OutboundMessage.sequence)
+        )
+    )
+    assert [part.interval_seconds for part in parts] == [0.0, MAX_MESSAGE_INTERVAL_SECONDS, 0.5]
+    assert parts[0].next_attempt_at <= datetime.now(UTC)
+    assert parts[1].next_attempt_at > datetime.now(UTC) + timedelta(days=1)
+
+    first = claim_outbound(db, QQ)
+    assert first.id == parts[0].id
+    db.commit()
+    finished_before = datetime.now(UTC)
+    finish_delivery(db, first.id, "sent", gateway_id="delivery-1")
+    db.commit()
+    db.refresh(parts[1])
+    assert parts[1].next_attempt_at >= finished_before + timedelta(
+        seconds=MAX_MESSAGE_INTERVAL_SECONDS - 0.1
+    )
+    assert claim_outbound(db, QQ) is None
+
+
+@pytest.mark.asyncio
 async def test_chat_reply_parts_stop_after_unknown_delivery(settings, engine, db, user_id):
     task_id = ingest(db, 105, content="测试逐条投递")
 
@@ -152,6 +194,39 @@ async def test_chat_reply_parts_stop_after_unknown_delivery(settings, engine, db
     db.commit()
     assert db.get(OutboundMessage, second.id).status == "cancelled"
     assert claim_outbound(db, QQ) is None
+
+
+@pytest.mark.asyncio
+async def test_new_turn_waits_behind_inflight_old_send(settings, engine, db, user_id):
+    old_task_id = ingest(db, 1051, content="旧回复")
+
+    async def generate_old(*args):
+        return Conversation(reply="旧一\n旧二", messages=["旧一", "旧二"])
+
+    await execute_chat(settings, engine, str(old_task_id), generate=generate_old)
+    old_first, old_tail = list(
+        db.scalars(
+            select(OutboundMessage)
+            .where(OutboundMessage.task_id == old_task_id)
+            .order_by(OutboundMessage.sequence)
+        )
+    )
+    assert claim_outbound(db, QQ).id == old_first.id
+    db.commit()
+
+    new_task_id = ingest(db, 1052, content="我补充了新要求")
+    assert new_task_id != old_task_id
+
+    async def generate_new(*args):
+        return Conversation(reply="新回复", messages=["新回复"])
+
+    await execute_chat(settings, engine, str(new_task_id), generate=generate_new)
+    assert db.get(OutboundMessage, old_tail.id).status == "cancelled"
+    assert claim_outbound(db, QQ) is None  # old in-flight result is the barrier
+
+    finish_delivery(db, old_first.id, "sent", gateway_id="old-1")
+    db.commit()
+    assert claim_outbound(db, QQ).task_id == new_task_id
 
 
 def test_ingest_and_queue_job_rollback_together(db, user_id):
