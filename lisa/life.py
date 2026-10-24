@@ -60,6 +60,16 @@ def adopt_life_events(
         return []
     source_task_id = None
     if source_message_id:
+        # A deleted life memory must not be recreated from the same generated
+        # assistant source, even when that source is a hidden multi-part reply.
+        if db.scalar(
+            select(Memory.id).where(
+                Memory.user_id == user_id,
+                Memory.source_message_id == source_message_id,
+                Memory.revision > 1,
+            )
+        ):
+            return []
         source = db.scalar(
             select(ChatMessage)
             .where(
@@ -67,7 +77,6 @@ def adopt_life_events(
                 ChatMessage.user_id == user_id,
                 ChatMessage.role == "assistant",
                 ChatMessage.deleted_at.is_(None),
-                ChatMessage.context_excluded.is_(False),
             )
             .execution_options(populate_existing=True)
         )

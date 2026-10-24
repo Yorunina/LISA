@@ -554,10 +554,17 @@ class ModelCall(Base):
 
 class OutboundMessage(Base):
     __tablename__ = "outbound_messages"
+    __table_args__ = (
+        UniqueConstraint("task_id", "sequence", name="uq_outbound_messages_task_sequence"),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
-    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), unique=True)
+    task_id: Mapped[UUID] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    sequence: Mapped[int] = mapped_column(default=0, server_default="0")
+    chat_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="SET NULL")
+    )
     qq_id: Mapped[str] = mapped_column(String(32))
     content: Mapped[str] = mapped_column(Text)
     meme_id: Mapped[UUID | None] = mapped_column(

@@ -4,8 +4,8 @@ from uuid import UUID
 
 from procrastinate.exceptions import JobRetry
 from procrastinate.retry import RetryDecision
-from sqlalchemy import func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import exists, func, select, update
+from sqlalchemy.orm import Session, aliased
 
 from lisa.chat_style import expression_guide
 from lisa.dialogue import (
@@ -43,7 +43,7 @@ from lisa.models import (
     ServiceEvent,
     Task,
 )
-from lisa.queue import enqueue_chat
+from lisa.queue import CHAT_SILENCE_SECONDS, enqueue_chat, reschedule_chat
 from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
 from lisa.scheduling import discard_pending_plans, plan_after_chat, record_creative_feedback
@@ -58,6 +58,18 @@ from lisa.vision import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _chat_cutoff(now: datetime) -> datetime:
+    return now + timedelta(seconds=CHAT_SILENCE_SECONDS)
+
+
+def _message_parts(decision, fallback: str) -> list[str]:
+    parts = getattr(decision, "messages", None) if decision is not None else None
+    if not parts:
+        return [fallback]
+    cleaned = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
+    return cleaned or [fallback]
 
 
 def ingest_message(
@@ -90,7 +102,22 @@ def ingest_message(
     ):
         return None
     discard_pending_plans(db, user.id)
+    # A new user turn interrupts ordinary chat parts that have not reached QQ.
+    # In-flight transport calls finish with their real gateway result; they are
+    # never blindly replayed or folded into the new turn.
+    db.execute(
+        update(OutboundMessage)
+        .where(
+            OutboundMessage.user_id == user.id,
+            OutboundMessage.status == "pending",
+            OutboundMessage.task_id.in_(
+                select(Task.id).where(Task.user_id == user.id, Task.kind == "chat")
+            ),
+        )
+        .values(status="cancelled", finished_at=now)
+    )
     user.last_active_at = max(user.last_active_at, sent_at) if user.last_active_at else sent_at
+    received_at = datetime.now(UTC)
     task = db.scalar(
         select(Task)
         .where(Task.user_id == user.id, Task.kind == "chat", Task.status == "pending")
@@ -107,9 +134,17 @@ def ingest_message(
         task = None
     if task is None:
         task = Task(user_id=user.id, kind="chat", source="qq", status="pending")
+        task.request = {"chat_silence_until": _chat_cutoff(received_at).isoformat()}
         db.add(task)
         db.flush()
         task.queue_job_id = enqueue_chat(db, task.id, user.id)
+    else:
+        request = dict(task.request or {})
+        cutoff = _chat_cutoff(received_at)
+        request["chat_silence_until"] = cutoff.isoformat()
+        task.request = request
+        if task.queue_job_id is not None:
+            reschedule_chat(db, task.queue_job_id, until=cutoff)
     db.add(
         ChatMessage(
             user_id=user.id,
@@ -128,17 +163,34 @@ def ingest_message(
     return task.id
 
 
-def _outbound(db: Session, task: Task, qq_id: str, content: str, meme=None) -> None:
-    if not db.scalar(select(OutboundMessage.id).where(OutboundMessage.task_id == task.id)):
+def _outbound(
+    db: Session,
+    task: Task,
+    qq_id: str,
+    content: str,
+    meme=None,
+    *,
+    parts: list[str] | None = None,
+    chat_message_ids: list[UUID] | None = None,
+) -> None:
+    if db.scalar(select(OutboundMessage.id).where(OutboundMessage.task_id == task.id)):
+        return
+    values = parts or [content]
+    created = datetime.now(UTC)
+    task.result = {**(task.result or {}), "outbound_parts": values}
+    for sequence, value in enumerate(values):
         db.add(
             OutboundMessage(
                 user_id=task.user_id,
                 task_id=task.id,
+                sequence=sequence,
+                chat_message_id=(chat_message_ids or [None] * len(values))[sequence],
                 qq_id=qq_id,
-                content=content,
-                meme_id=meme.id if meme else None,
-                meme_revision=meme.revision if meme else None,
+                content=value,
+                meme_id=meme.id if meme and sequence == 0 else None,
+                meme_revision=meme.revision if meme and sequence == 0 else None,
                 status="pending",
+                next_attempt_at=created + timedelta(seconds=sequence),
             )
         )
 
@@ -224,6 +276,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         persona_snapshot = snapshot["persona"]
         instructions = (
             "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
+            "reply是本轮完整回复；messages是按语义顺序发送的分条列表，通常一到三条，允许一条。"
+            "不要机械切碎或新增reply之外的事实，控制本轮总量，先接住用户重点。"
             "你及虚拟生活是虚构设定。不声称已完成尚未保存的作品或任务。"
             "用户消息可能延迟送达，以标注的消息时间理解旧消息，不假装刚刚发生。"
             "标注无法读取的非文本消息只代表用户发来了消息，不能推断图片或语音内容；请对方用文字说明。"
@@ -348,6 +402,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 else Conversation.model_validate(result)
             )
             reply = decision.reply
+        reply_parts = _message_parts(decision, reply)
     except ContextChanged:
         reply, error = (
             "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。",
@@ -395,16 +450,21 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         ):
             error = "context_changed"
             reply = "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。"
+            reply_parts = [reply]
         task.status, task.error = ("failed" if error else "completed"), error
         task.finished_at = datetime.now(UTC)
         if error is None:
             if context_limited:
                 reply += "\n\n作品资料超过本轮对话的开发输入上限，创作修改或写作任务请在网页操作。"
+                reply_parts[-1] += (
+                    "\n\n作品资料超过本轮对话的开发输入上限，创作修改或写作任务请在网页操作。"
+                )
             if isinstance(decision, Dialogue):
                 record_creative_feedback(db, task, source_ids, decision.feedback_evidence)
                 notice = apply_decision(db, user, project_id, current_texts, decision)
                 if notice:
                     reply += "\n\n" + notice
+                    reply_parts[-1] += "\n\n" + notice
                 plan_after_chat(
                     db,
                     settings,
@@ -429,6 +489,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     link = chapter_link(db, settings, user_id, decision.share_chapter_id)
                     if link:
                         reply += "\n\n" + link
+                        reply_parts[-1] += "\n\n" + link
                 record_chat_references(db, task_id, memory_ids, used_history_ids)
                 adopt_candidates(db, user_id, project_id, decision.memories, source_ids)
             assistant_message = ChatMessage(
@@ -437,9 +498,25 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 role="assistant",
                 content=reply,
                 sent_at=datetime.now(UTC),
+                context_excluded=len(reply_parts) > 1,
             )
             db.add(assistant_message)
             db.flush()
+            part_messages = []
+            if len(reply_parts) > 1:
+                part_messages = [
+                    ChatMessage(
+                        user_id=user_id,
+                        task_id=task.id,
+                        role="assistant",
+                        content=part,
+                        sent_at=assistant_message.sent_at,
+                        context_excluded=True,
+                    )
+                    for part in reply_parts
+                ]
+                db.add_all(part_messages)
+                db.flush()
             if decision:
                 life_ids = adopt_life_events(
                     db,
@@ -457,7 +534,20 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         meme = (
             select_meme(db, user_id, decision.meme_id, recalled) if decision and not error else None
         )
-        _outbound(db, task, qq_id, reply, meme)
+        outbound_parts = reply_parts if error is None else [reply]
+        _outbound(
+            db,
+            task,
+            qq_id,
+            reply,
+            meme,
+            parts=outbound_parts,
+            chat_message_ids=(
+                [message.id for message in part_messages]
+                if error is None and len(reply_parts) > 1
+                else None
+            ),
+        )
     logger.info("task=%s status=%s", task_id, "failed" if error else "completed")
 
 
@@ -465,12 +555,25 @@ def claim_outbound(
     db: Session, allow_qq: str | None, *, settings: Settings | None = None
 ) -> OutboundMessage | None:
     # Preserve each account's order without letting one delayed retry block other accounts.
+    prior = aliased(OutboundMessage)
     waiting = select(
         OutboundMessage.id,
         func.row_number()
-        .over(partition_by=OutboundMessage.user_id, order_by=OutboundMessage.created_at)
+        .over(
+            partition_by=OutboundMessage.user_id,
+            order_by=(OutboundMessage.created_at, OutboundMessage.sequence),
+        )
         .label("position"),
-    ).where(OutboundMessage.status.in_(["pending", "sending"]))
+    ).where(
+        OutboundMessage.status.in_(["pending", "sending"]),
+        ~exists(
+            select(1).where(
+                prior.task_id == OutboundMessage.task_id,
+                prior.sequence < OutboundMessage.sequence,
+                prior.status.not_in(["sent", "cancelled"]),
+            )
+        ),
+    )
     if allow_qq is not None:
         waiting = waiting.where(OutboundMessage.qq_id == allow_qq)
     waiting = waiting.subquery()
@@ -481,7 +584,7 @@ def claim_outbound(
             OutboundMessage.status == "pending",
             OutboundMessage.next_attempt_at <= datetime.now(UTC),
         )
-        .order_by(OutboundMessage.created_at)
+        .order_by(OutboundMessage.created_at, OutboundMessage.sequence)
     )
     if message is None:
         return None
@@ -534,15 +637,42 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
     db.refresh(message, with_for_update=True)
     if message.status != "sending":
         return
+    task = db.get(Task, message.task_id)
     if status == "failed" and message.attempts < 3:
         message.status = "pending"
         message.next_attempt_at = datetime.now(UTC) + timedelta(seconds=5)
     else:
         message.status, message.message_id = status, gateway_id
         message.finished_at = datetime.now(UTC)
+        if status in {"failed", "unknown", "cancelled"}:
+            db.execute(
+                update(OutboundMessage)
+                .where(
+                    OutboundMessage.task_id == message.task_id,
+                    OutboundMessage.sequence > message.sequence,
+                    OutboundMessage.status == "pending",
+                )
+                .values(status="cancelled", finished_at=message.finished_at)
+            )
         if status == "sent":
-            if db.get(Task, message.task_id).kind == "contact":
+            if message.chat_message_id:
+                db.execute(
+                    update(ChatMessage)
+                    .where(ChatMessage.id == message.chat_message_id)
+                    .values(context_excluded=False)
+                )
+            if task.kind == "contact":
                 from lisa.proactive import adopt_delivered_contact
 
                 adopt_delivered_contact(db, message)
-            mark_life_shared(db, message.task_id, message.finished_at)
+                mark_life_shared(db, message.task_id, message.finished_at)
+            elif not db.scalar(
+                select(OutboundMessage.id).where(
+                    OutboundMessage.task_id == message.task_id,
+                    OutboundMessage.status.in_(["pending", "sending", "unknown"]),
+                )
+            ):
+                # A multi-part chat turn is shared only after every part is
+                # confirmed, so a cancelled or unknown tail cannot be claimed
+                # as already shown to the user.
+                mark_life_shared(db, message.task_id, message.finished_at)

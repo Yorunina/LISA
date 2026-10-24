@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from lisa.app import create_app
 from lisa.chat import claim_outbound, execute_chat, finish_delivery, ingest_message
+from lisa.dialogue import Conversation
 from lisa.model_calls import BudgetExceeded, ModelBusy, ModelCallFailed, ModelCallUnknown
 from lisa.models import (
     Account,
@@ -85,6 +86,72 @@ def test_ingest_merges_persists_queue_and_does_not_refresh_replays(db, user_id):
     assert row.queue_name == "lisa" and row.task_name == "lisa.chat"
     assert row.args == {"task_id": str(task_id)}
     assert row.lock == f"chat:{user_id}"
+
+
+def test_chat_silence_deadline_resets_on_each_new_message(db, user_id):
+    first = ingest(db, 101, content="第一句")
+    task = db.get(Task, first)
+    first_cutoff = task.request["chat_silence_until"]
+    first_job = task.queue_job_id
+    second = ingest(db, 102, content="补充一句")
+    assert second == first
+    db.refresh(task)
+    assert task.request["chat_silence_until"] > first_cutoff
+    scheduled = db.scalar(
+        text("SELECT scheduled_at FROM procrastinate_jobs WHERE id=:id"), {"id": first_job}
+    )
+    assert scheduled.isoformat() >= task.request["chat_silence_until"]
+
+
+@pytest.mark.asyncio
+async def test_chat_reply_parts_are_persisted_in_order_and_new_input_cancels_tail(
+    settings, engine, db, user_id
+):
+    task_id = ingest(db, 103, content="给我一个轻松的回答")
+
+    async def generate(*args):
+        return Conversation(reply="第一句\n第二句", messages=["第一句", "第二句"])
+
+    await execute_chat(settings, engine, str(task_id), generate=generate)
+    parts = list(
+        db.scalars(
+            select(OutboundMessage)
+            .where(OutboundMessage.task_id == task_id)
+            .order_by(OutboundMessage.sequence)
+        )
+    )
+    assert [part.sequence for part in parts] == [0, 1]
+    assert [part.content for part in parts] == ["第一句", "第二句"]
+
+    ingest(db, 104, content="等等，我还要补充")
+    db.expire_all()
+    assert [db.get(OutboundMessage, part.id).status for part in parts] == [
+        "cancelled",
+        "cancelled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_reply_parts_stop_after_unknown_delivery(settings, engine, db, user_id):
+    task_id = ingest(db, 105, content="测试逐条投递")
+
+    async def generate(*args):
+        return Conversation(reply="甲\n乙", messages=["甲", "乙"])
+
+    await execute_chat(settings, engine, str(task_id), generate=generate)
+    first, second = list(
+        db.scalars(
+            select(OutboundMessage)
+            .where(OutboundMessage.task_id == task_id)
+            .order_by(OutboundMessage.sequence)
+        )
+    )
+    assert claim_outbound(db, QQ).id == first.id
+    db.commit()
+    finish_delivery(db, first.id, "unknown")
+    db.commit()
+    assert db.get(OutboundMessage, second.id).status == "cancelled"
+    assert claim_outbound(db, QQ) is None
 
 
 def test_ingest_and_queue_job_rollback_together(db, user_id):

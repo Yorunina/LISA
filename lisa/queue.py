@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from lisa.retrieval import indexing_enabled
 from lisa.settings import Settings
 
+CHAT_SILENCE_SECONDS = 10
+
 
 class ExplicitRetry(BaseRetryStrategy):
     def get_retry_decision(self, *, exception, job):
@@ -161,7 +163,20 @@ def enqueue_index(db: Session, task_id, user_id) -> int:
 
 
 def enqueue_chat(db: Session, task_id, user_id) -> int:
-    return _enqueue(db, task_id, "lisa.chat", "lisa", f"chat:{user_id}", delay=2)
+    return _enqueue(
+        db, task_id, "lisa.chat", "lisa", f"chat:{user_id}", delay=CHAT_SILENCE_SECONDS
+    )
+
+
+def reschedule_chat(db: Session, job_id: int, *, until: datetime) -> None:
+    """Move a still-queued chat job to the latest persisted silence deadline."""
+    db.execute(
+        text(
+            "UPDATE procrastinate_jobs SET scheduled_at=:until "
+            "WHERE id=:id AND status='todo'"
+        ),
+        {"id": job_id, "until": until},
+    )
 
 
 def enqueue_contact(db: Session, task_id, user_id) -> int:

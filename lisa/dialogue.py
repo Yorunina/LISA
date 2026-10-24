@@ -34,6 +34,10 @@ class Commission(BaseModel):
 
 
 class Conversation(Reply):
+    # The model may choose a few semantic message parts for QQ delivery.  `reply`
+    # remains the complete logical response used by memory/life evidence and by
+    # older callers; an empty list keeps synthetic and legacy generators compatible.
+    messages: list[str] = Field(default_factory=list, max_length=6)
     meme_id: UUID | None = None
     meme_preference: Literal["normal", "reduced", "off"] | None = None
     meme_preference_evidence: str = Field(default="", max_length=300)
