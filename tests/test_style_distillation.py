@@ -348,8 +348,12 @@ async def test_chat_holdout_checks_two_turns_without_actual_target_replies(
     style_owner,
 ):
     texts = [
-        "2026-10-23 10:00:00 甲\n问题甲\n2026-10-23 10:00:01 乙\n回复甲\n",
-        "2026-10-23 11:00:00 甲\n问题乙\n2026-10-23 11:00:01 乙\n回复乙\n",
+        # Every independent group has two turns, so stratified selection does not
+        # depend on the obsolete assumption that the final file is the holdout.
+        "2026-10-23 10:00:00 甲\n问题甲\n2026-10-23 10:00:01 乙\n保密回复甲一\n"
+        "2026-10-23 10:00:02 甲\n再聊甲\n2026-10-23 10:00:03 乙\n保密回复甲二\n",
+        "2026-10-23 11:00:00 甲\n问题乙\n2026-10-23 11:00:01 乙\n保密回复乙一\n"
+        "2026-10-23 11:00:02 甲\n再聊乙\n2026-10-23 11:00:03 乙\n保密回复乙二\n",
         "2026-10-23 12:00:00 甲\n留出问题\n2026-10-23 12:00:01 乙\n保密回复一\n"
         "2026-10-23 12:00:02 甲\n继续话题\n2026-10-23 12:00:03 乙\n保密回复二\n",
     ]

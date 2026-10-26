@@ -304,14 +304,27 @@ def test_recovery_defers_to_a_current_worker_heartbeat(settings, engine, db, own
 @pytest.mark.asyncio
 async def test_recovery_real_gateway_kill_keeps_unknown_and_sends_pending(engine, db, owner):
     sent, first_request, second_request = [], asyncio.Event(), asyncio.Event()
+    outbound_ids = []
+    tail_id = None
     for position in range(2):
         task = Task(user_id=owner, kind="chat", status="completed")
         db.add(task)
         db.flush()
-        db.add(OutboundMessage(
+        outbound = OutboundMessage(
             user_id=owner, task_id=task.id, qq_id="750000001", content=f"synthetic-{position}",
             created_at=datetime.now(UTC) + timedelta(seconds=position),
-        ))
+        )
+        db.add(outbound)
+        db.flush()
+        outbound_ids.append(outbound.id)
+        if position == 0:
+            tail = OutboundMessage(
+                user_id=owner, task_id=task.id, qq_id="750000001", sequence=1,
+                content="synthetic-tail-must-not-send", created_at=outbound.created_at,
+            )
+            db.add(tail)
+            db.flush()
+            tail_id = tail.id
     db.commit()
 
     async def server(socket):
@@ -349,7 +362,7 @@ async def test_recovery_real_gateway_kill_keeps_unknown_and_sends_pending(engine
             await asyncio.to_thread(running.communicate, timeout=10)
         db.expire_all()
         assert db.scalar(select(OutboundMessage.status).where(
-            OutboundMessage.content == "synthetic-0"
+            OutboundMessage.id == outbound_ids[0]
         )) == "sending"
         restarted = child("gateway", **env)
         try:
@@ -357,7 +370,7 @@ async def test_recovery_real_gateway_kill_keeps_unknown_and_sends_pending(engine
             for _ in range(100):
                 with Session(engine) as check:
                     status = check.scalar(select(OutboundMessage.status).where(
-                        OutboundMessage.content == "synthetic-1"
+                        OutboundMessage.id == outbound_ids[1]
                     ))
                 if status == "sent":
                     break
@@ -367,7 +380,11 @@ async def test_recovery_real_gateway_kill_keeps_unknown_and_sends_pending(engine
             restarted.kill()
             await asyncio.to_thread(restarted.communicate, timeout=10)
     db.expire_all()
-    first = db.scalar(select(OutboundMessage).where(OutboundMessage.content == "synthetic-0"))
-    assert first.status == "unknown" and first.attempts == 1
+    first = db.scalar(select(OutboundMessage).where(OutboundMessage.id == outbound_ids[0]))
+    assert first.status == "unknown" and first.attempts == 1 and first.content == ""
+    second = db.get(OutboundMessage, outbound_ids[1])
+    assert second.status == "sent" and second.attempts == 1 and second.content == ""
+    tail = db.get(OutboundMessage, tail_id)
+    assert tail.status == "cancelled" and tail.attempts == 0 and tail.content == ""
     assert sent == ["synthetic-0", "synthetic-1"]
     assert db.scalar(select(func.count()).select_from(ModelCall)) == 0

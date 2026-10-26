@@ -1,23 +1,23 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { request } from './api';
 import { ErrorNotice } from './ui';
+import { LifePlan } from './life-plan';
+import type { LifePlanHandle } from './life-plan';
 
 type MemoryKind = 'fact' | 'inference' | 'fiction' | 'preference' | 'life';
 type MemoryItem = {
   id: string; project_id: string | null; kind: MemoryKind; content: string; basis: string;
-  allow_chat: boolean; allow_writing: boolean; source_message_id: string | null;
+  allow_chat: boolean; allow_writing: boolean; source_message_id: string | null; source_task_id: string | null;
   source_deleted: boolean; created_at: string; updated_at: string;
   life_kind: 'event' | 'dream' | null; occurred_at: string | null; shared_at: string | null;
   source_chapter_id: string | null; source_version: number | null;
 };
-type ChatMessage = { id: string; role: string; content: string; sent_at: string; context_excluded: boolean };
 type MemoryMapEdge = { source: string; target: string; type: 'source' | 'project' | 'timeline' | 'semantic'; distance?: number };
 type MemoryMapData = { nodes: MemoryItem[]; edges: MemoryMapEdge[]; semantic_enabled: boolean };
-type Source = { status: 'available' | 'deleted' | 'manual'; message: ChatMessage | null }
+type Source = { status: 'agent' | 'manual' | 'deleted'; message: null }
   | { status: 'chapter'; chapter: { id: string; title: string; version: number; content: string } };
 type Draft = Pick<MemoryItem, 'project_id' | 'kind' | 'content' | 'basis' | 'allow_chat' | 'allow_writing' | 'life_kind' | 'occurred_at'>;
-type Modal = { kind: 'leave' } | { kind: 'memory-delete'; item: MemoryItem } | { kind: 'chat-delete'; item: ChatMessage }
-  | { kind: 'clear'; start: string; end: string } | { kind: 'source'; source: Source };
+type Modal = { kind: 'leave' } | { kind: 'memory-delete'; item: MemoryItem } | { kind: 'source'; source: Source };
 export type MemoryHandle = { requestLeave: (action: () => void) => void };
 
 const kinds: Record<MemoryKind, string> = { fact: '明确事实', inference: '推测', fiction: '文学想象', preference: '相处偏好', life: '虚拟生活' };
@@ -29,7 +29,7 @@ const localTime = (value: string) => {
   const date = new Date(value);
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 19);
 };
-const sourceLabel = (item: MemoryItem) => item.source_chapter_id ? `来自日记 · 版本 ${item.source_version}` : item.source_message_id ? item.source_deleted ? '原始聊天已删除' : '来自原始聊天' : '手动添加';
+const sourceLabel = (item: MemoryItem) => item.source_chapter_id ? `来自日记 · 版本 ${item.source_version}` : item.source_task_id ? '由聊天 Agent 从本轮内容提升' : '手动添加';
 
 const mapKinds: MemoryKind[] = ['fact', 'preference', 'life', 'inference', 'fiction'];
 const mapColors: Record<MemoryKind, string> = { fact: '#426653', preference: '#9a6b35', life: '#6a5a8d', inference: '#8d5848', fiction: '#477783' };
@@ -75,10 +75,9 @@ function MemoryMap({ data, projects, onOpen }: { data: MemoryMapData; projects: 
 }
 
 export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
-  const [tab, setTab] = useState<'memory' | 'chat'>('memory');
+  const [tab, setTab] = useState<'memory' | 'plan'>('memory');
   const [view, setView] = useState<'list' | 'map'>('list');
   const [memories, setMemories] = useState<MemoryItem[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [projects, setProjects] = useState<{ id: string; title: string }[]>([]);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
@@ -96,14 +95,12 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   const [selected, setSelected] = useState<MemoryItem | null>(null);
   const [draft, setDraft] = useState<Draft>(emptyDraft);
   const [baseline, setBaseline] = useState<Draft>(emptyDraft);
-  const [sourceId, setSourceId] = useState<string | null>(null);
-  const [start, setStart] = useState('');
-  const [end, setEnd] = useState('');
   const [modal, setModal] = useState<Modal | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const contentInput = useRef<HTMLTextAreaElement>(null);
   const pending = useRef<(() => void) | null>(null);
+  const lifePlan = useRef<LifePlanHandle>(null);
   const dirty = editing && JSON.stringify(draft) !== JSON.stringify(baseline);
 
   function failure(cause: unknown) { setError(cause instanceof Error ? cause.message : '操作失败，请重试。'); }
@@ -116,6 +113,7 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   }
   function requestLeave(action: () => void) {
     if (busy) return;
+    if (tab === 'plan') { lifePlan.current?.requestLeave(action); return; }
     if (dirty) { pending.current = action; setModal({ kind: 'leave' }); }
     else action();
   }
@@ -129,16 +127,14 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   useEffect(() => {
     let active = true;
     setLoading(true); setError('');
+    if (tab === 'plan') { setLoading(false); return () => { active = false; }; }
     const params = new URLSearchParams({ query, limit: String(pageSize), offset: String(offset) });
-    if (tab === 'memory' && kind) params.set('kind', kind);
+    if (kind) params.set('kind', kind);
     async function load() {
       try {
         if (tab === 'memory') {
           const items = await request<MemoryItem[]>(`/memories?${params}`);
           if (active) setMemories(items);
-        } else {
-          const items = await request<ChatMessage[]>(`/chat-messages?${params}`);
-          if (active) setMessages(items);
         }
       } catch (cause) { if (active) failure(cause); }
       finally { if (active) setLoading(false); }
@@ -173,15 +169,14 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     return () => window.removeEventListener('keydown', shortcut);
   }, [editing, busy, modal]);
   useEffect(() => { if (modal) dialog.current?.showModal(); else dialog.current?.close(); }, [modal]);
-  useEffect(() => { if (editing) contentInput.current?.focus(); }, [editing, selected?.id, sourceId]);
+  useEffect(() => { if (editing) contentInput.current?.focus(); }, [editing, selected?.id]);
 
-  function openEditor(item: MemoryItem | null, source?: ChatMessage) {
-    const next = item ? draftOf(item) : { ...emptyDraft(), content: source?.content ?? '' };
+  function openEditor(item: MemoryItem | null) {
+    const next = item ? draftOf(item) : emptyDraft();
     setSelected(item); setDraft(next); setBaseline(item ? next : emptyDraft());
-    setSourceId(item?.source_message_id ?? source?.id ?? null);
     setEditing(true); setTab('memory'); setError(''); setNotice('');
   }
-  function switchTab(next: 'memory' | 'chat') {
+  function switchTab(next: 'memory' | 'plan') {
     requestLeave(() => { setTab(next); setView('list'); setEditing(false); setSearch(''); setQuery(''); setOffset(0); setNotice(''); });
   }
   async function save() {
@@ -190,7 +185,7 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     try {
       const item = selected
         ? await request<MemoryItem>(`/memories/${selected.id}`, draft, 'PUT')
-        : await request<MemoryItem>('/memories', { ...draft, source_message_id: sourceId });
+        : await request<MemoryItem>('/memories', draft);
       setSelected(item); setDraft(draftOf(item)); setBaseline(draftOf(item));
       setNotice('记忆已保存，后续交流与创作按已保存的用途使用。'); setRefresh(value => value + 1);
       return true;
@@ -212,31 +207,23 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
     if (!modal || modal.kind === 'leave' || modal.kind === 'source') return;
     setBusy(true); setError(''); setNotice('');
     try {
-      if (modal.kind === 'memory-delete') {
-        await request(`/memories/${modal.item.id}`, undefined, 'DELETE');
-        if (selected?.id === modal.item.id) setEditing(false);
-        setNotice('记忆已删除。原始聊天与已有作品保留。');
-      } else if (modal.kind === 'chat-delete') {
-        await request(`/chat-messages/${modal.item.id}`, undefined, 'DELETE');
-        setNotice('聊天原文已删除。独立记忆与已有作品保留。');
-      } else {
-        const result = await request<{ deleted_count: number }>('/chat-messages/clear', { start: new Date(modal.start).toISOString(), end: new Date(modal.end).toISOString() });
-        setNotice(`已清理 ${result.deleted_count} 条聊天原文。独立记忆与已有作品保留。`);
-      }
+      await request(`/memories/${modal.item.id}`, undefined, 'DELETE');
+      if (selected?.id === modal.item.id) setEditing(false);
       setModal(null); setOffset(0); setRefresh(value => value + 1);
     } catch (cause) { failure(cause); }
     finally { setBusy(false); }
   }
-  const count = tab === 'memory' ? memories.length : messages.length;
+  const count = memories.length;
 
   return <main id="main" className="works-page memory-page" tabIndex={-1}>
-    <div className="memory-heading"><div><p className="eyebrow">记得，也可以重新理解</p><h1>记忆与日常</h1><p className="page-subtitle">哪些事留下，如何使用，由你决定。</p></div><button className="primary" disabled={busy} onClick={() => requestLeave(() => openEditor(null))}>添加记忆</button></div>
-    <nav className="work-tabs" aria-label="记忆页面"><button aria-current={tab === 'memory' ? 'page' : undefined} onClick={() => { if (tab !== 'memory') switchTab('memory'); }}>记忆条目</button><button aria-current={tab === 'chat' ? 'page' : undefined} onClick={() => { if (tab !== 'chat') switchTab('chat'); }}>原始聊天</button></nav>
+    <div className="memory-heading"><div><p className="eyebrow">记得，也可以重新理解</p><h1>记忆与日常</h1><p className="page-subtitle">哪些事留下，如何使用，由你决定。</p></div>{tab !== 'plan' && <button className="primary" disabled={busy} onClick={() => requestLeave(() => openEditor(null))}>添加记忆</button>}</div>
+    <nav className="work-tabs" aria-label="记忆页面"><button aria-current={tab === 'memory' ? 'page' : undefined} onClick={() => { if (tab !== 'memory') switchTab('memory'); }}>记忆条目</button><button aria-current={tab === 'plan' ? 'page' : undefined} onClick={() => { if (tab !== 'plan') switchTab('plan'); }}>每周提案</button></nav>
     {error && !modal && <ErrorNotice message={error} />}
     {notice && <p className="memory-notice" role="status">{notice}</p>}
-    {editing && <section className="material-paper memory-editor" aria-labelledby="memory-editor-title">
+    {tab === 'plan' && <LifePlan ref={lifePlan} />}
+    {tab !== 'plan' && editing && <section className="material-paper memory-editor" aria-labelledby="memory-editor-title">
       <div className="panel-toolbar"><h2 id="memory-editor-title">{selected ? '纠正与用途' : '添加记忆'}</h2><button className="text-button" disabled={busy} onClick={() => requestLeave(() => setEditing(false))}>返回列表</button></div>
-      <p className="form-copy">保存后生效。纠正、删除或收紧用途后，相关原始对话及引用它的后续对话不再作为模型依据，原话仍可查看；已有作品需另行修改。</p>
+      <p className="form-copy">保存后生效。LISA 不保存原始聊天；这里的记忆只来自你的明确输入，或聊天 Agent 在本轮内容中主动提升的条目。</p>
       <form ref={form} onSubmit={event => { event.preventDefault(); void save(); }}>
         <fieldset disabled={busy}>
           <div className="field"><label htmlFor="memory-content">记忆内容</label><textarea id="memory-content" ref={contentInput} required maxLength={2000} rows={5} value={draft.content} onChange={event => changeDraft({ ...draft, content: event.target.value })} /><p className="field-hint">最多 2,000 个字符，只保留需要记住的要点。</p></div>
@@ -249,28 +236,27 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
           </>}
           <fieldset className="memory-uses"><legend>允许使用的场景</legend><label><input type="checkbox" checked={draft.allow_chat} onChange={event => changeDraft({ ...draft, allow_chat: event.target.checked })} />日常交流</label><label><input type="checkbox" checked={draft.allow_writing} onChange={event => changeDraft({ ...draft, allow_writing: event.target.checked })} />作品创作</label></fieldset>
           <p className="field-hint">关闭作品创作后，这条记忆不会再作为后续作品素材。两个用途都关闭时，仅保留供你查看。</p>
-          <p className="memory-source-label">来源：{selected ? sourceLabel(selected) : sourceId ? '原始聊天' : '手动添加'}</p>
+          <p className="memory-source-label">来源：{selected ? sourceLabel(selected) : '手动添加'}</p>
         </fieldset>
         <div className="save-bar"><button className="primary" disabled={busy}>{busy ? '正在处理…' : '保存记忆'}</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : selected ? '已保存' : '填写后保存 · Ctrl+S'}</p></div>
       </form>
     </section>}
-    {!editing && <>
-      {tab === 'chat' && <div className="memory-guidance"><p>这里是 LISA 保存的聊天记录。删除原话不会删除已形成的独立记忆；希望 LISA 忘记的内容，请同时检查记忆条目。</p><details><summary>按时间范围清理聊天</summary><form className="chat-clear-form" onSubmit={event => { event.preventDefault(); if (new Date(start) >= new Date(end)) { setError('结束时间需要晚于开始时间。'); return; } setError(''); setModal({ kind: 'clear', start, end }); }}><div className="field"><label htmlFor="chat-start">开始时间（含）</label><input id="chat-start" type="datetime-local" required value={start} onChange={event => setStart(event.target.value)} /></div><div className="field"><label htmlFor="chat-end">结束时间（不含）</label><input id="chat-end" type="datetime-local" required value={end} onChange={event => setEnd(event.target.value)} /></div><p className="field-hint">时间按当前设备的本地时区。清理覆盖这一时间段内的全部聊天，不受下方搜索条件限制。</p><button className="secondary danger" disabled={busy}>清理此时间段</button></form></details></div>}
-      {tab === 'memory' && <div className="memory-view-tabs" role="tablist" aria-label="记忆呈现方式"><button role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'is-selected' : ''} onClick={() => setView('list')}>列表</button><button role="tab" aria-selected={view === 'map'} className={view === 'map' ? 'is-selected' : ''} onClick={() => setView('map')}>记忆地图</button></div>}
-      <form className="memory-search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); setOffset(0); setRefresh(value => value + 1); }}><div className="field"><label htmlFor="memory-search">{tab === 'memory' ? '搜索记忆' : '搜索聊天'}</label><input id="memory-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder={tab === 'memory' ? '输入想找的内容' : '搜索原话'} /></div>{tab === 'memory' && <div className="field"><label htmlFor="memory-filter">类型筛选</label><select id="memory-filter" value={kind} onChange={event => { setKind(event.target.value); setOffset(0); }}><option value="">全部类型</option>{Object.entries(kinds).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div>}<button className="secondary" disabled={loading}>搜索</button></form>
-      {tab === 'memory' && kind === 'life' && <p className="field-hint life-timeline-note">虚拟生活时间线 · 按发生时间由近到远排列。尚无成功分享记录，不代表事件尚未成立。</p>}
-      {tab === 'memory' && view === 'map' ? mapLoading ? <p className="loading-note" role="status">正在读取记忆地图…</p> : mapError ? <><ErrorNotice message={mapError} /><button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button></> : !mapData?.nodes.length ? <div className="empty-paper"><h2>{query || kind ? '没有符合条件的记忆' : '还没有留下记忆'}</h2><p>记忆地图会根据已保存的记忆显示节点和关系。</p></div> : <MemoryMap data={mapData} projects={projects} onOpen={openEditor} /> : loading ? <p className="loading-note" role="status">正在读取{tab === 'memory' ? '记忆' : '聊天'}…</p> : error ? <button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button> : count === 0 ? <div className="empty-paper"><h2>{query || kind || offset ? '没有符合条件的记录' : tab === 'memory' ? '还没有留下记忆' : '还没有聊天记录'}</h2><p>{tab === 'memory' ? '可以手动添加，也可以从原始聊天中留下一条记忆。' : '与 LISA 的日常交流，会保存在这里。'}</p></div> : <div className="memory-list" aria-label={tab === 'memory' ? '记忆条目列表' : '聊天列表'}>
-        {tab === 'memory' ? memories.map(item => <article className="memory-entry" key={item.id}>
+    {tab === 'memory' && !editing && <>
+      <div className="memory-view-tabs" role="tablist" aria-label="记忆呈现方式"><button role="tab" aria-selected={view === 'list'} className={view === 'list' ? 'is-selected' : ''} onClick={() => setView('list')}>列表</button><button role="tab" aria-selected={view === 'map'} className={view === 'map' ? 'is-selected' : ''} onClick={() => setView('map')}>记忆地图</button></div>
+      <form className="memory-search" onSubmit={event => { event.preventDefault(); setQuery(search.trim()); setOffset(0); setRefresh(value => value + 1); }}><div className="field"><label htmlFor="memory-search">搜索记忆</label><input id="memory-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="输入想找的内容" /></div><div className="field"><label htmlFor="memory-filter">类型筛选</label><select id="memory-filter" value={kind} onChange={event => { setKind(event.target.value); setOffset(0); }}><option value="">全部类型</option>{Object.entries(kinds).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></div><button className="secondary" disabled={loading}>搜索</button></form>
+      {kind === 'life' && <p className="field-hint life-timeline-note">虚拟生活时间线 · 按发生时间由近到远排列。尚无成功分享记录，不代表事件尚未成立。</p>}
+      {view === 'map' ? mapLoading ? <p className="loading-note" role="status">正在读取记忆地图…</p> : mapError ? <><ErrorNotice message={mapError} /><button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button></> : !mapData?.nodes.length ? <div className="empty-paper"><h2>{query || kind ? '没有符合条件的记忆' : '还没有留下记忆'}</h2><p>记忆地图会根据已保存的记忆显示节点和关系。</p></div> : <MemoryMap data={mapData} projects={projects} onOpen={openEditor} /> : loading ? <p className="loading-note" role="status">正在读取记忆…</p> : error ? <button className="secondary" onClick={() => setRefresh(value => value + 1)}>重新读取</button> : count === 0 ? <div className="empty-paper"><h2>{query || kind || offset ? '没有符合条件的记录' : '还没有留下记忆'}</h2><p>可以手动添加记忆；聊天 Agent 也只会在本轮内容中主动提升明确条目。</p></div> : <div className="memory-list" aria-label="记忆条目列表">
+        {memories.map(item => <article className="memory-entry" key={item.id}>
           <div className="memory-meta"><span className="memory-kind">{kinds[item.kind]}</span><span>{item.kind === 'life' ? 'LISA 的生活' : item.project_id ? projects.find(project => project.id === item.project_id)?.title ?? '作品记忆' : '共同记忆'}</span><time dateTime={item.updated_at}>{time(item.updated_at)}</time></div>
           {item.kind === 'life' && <div className="life-meta"><span>{item.life_kind === 'dream' ? '做过的梦' : '已发生的虚拟事件'}</span>{item.occurred_at && <span>发生于 {time(item.occurred_at)}</span>}<span>{item.shared_at ? `已分享 · ${time(item.shared_at)}` : '尚无成功分享记录'}</span></div>}
           <p className="memory-content">{item.content}</p>{item.kind === 'inference' && <p className="memory-basis">推测依据：{item.basis}</p>}
-          <div className="memory-entry-footer"><p>{[item.allow_chat ? '用于交流' : '不用于交流', item.allow_writing ? '用于创作' : '不用于创作'].join(' · ')}<span>{sourceLabel(item)}</span></p><div className="memory-actions">{(item.source_chapter_id || item.source_message_id) && !item.source_deleted && <button className="text-button" disabled={busy} onClick={() => void viewSource(item)}>查看来源</button>}<button className="text-button" disabled={busy} onClick={() => openEditor(item)}>纠正与用途</button><button className="text-button danger" disabled={busy} onClick={() => { setError(''); setModal({ kind: 'memory-delete', item }); }}>删除记忆</button></div></div>
-        </article>) : messages.map(item => <article className="memory-entry" key={item.id}><div className="memory-meta"><span className="memory-kind">{item.role === 'user' ? '我' : 'LISA'}</span><time dateTime={item.sent_at}>{time(item.sent_at)}</time>{item.context_excluded && <span>仅供查看，不再作为模型依据</span>}</div><p className="memory-content">{item.content}</p><div className="memory-actions"><button className="text-button" disabled={busy || item.context_excluded} onClick={() => openEditor(null, item)}>记为记忆</button><button className="text-button danger" disabled={busy} onClick={() => { setError(''); setModal({ kind: 'chat-delete', item }); }}>删除原话</button></div></article>)}
+          <div className="memory-entry-footer"><p>{[item.allow_chat ? '用于交流' : '不用于交流', item.allow_writing ? '用于创作' : '不用于创作'].join(' · ')}<span>{sourceLabel(item)}</span></p><div className="memory-actions">{(item.source_chapter_id || item.source_task_id) && !item.source_deleted && <button className="text-button" disabled={busy} onClick={() => void viewSource(item)}>查看来源</button>}<button className="text-button" disabled={busy} onClick={() => openEditor(item)}>纠正与用途</button><button className="text-button danger" disabled={busy} onClick={() => { setError(''); setModal({ kind: 'memory-delete', item }); }}>删除记忆</button></div></div>
+        </article>)}
       </div>}
       {!loading && view === 'list' && (offset > 0 || count === pageSize) && <nav className="memory-pagination" aria-label="记录分页"><button className="secondary" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - pageSize))}>上一页</button><span>第 {Math.floor(offset / pageSize) + 1} 页</span><button className="secondary" disabled={count < pageSize} onClick={() => setOffset(offset + pageSize)}>下一页</button></nav>}
     </>}
     <dialog ref={dialog} className="leave-dialog memory-dialog" aria-labelledby="memory-dialog-title" onCancel={event => { event.preventDefault(); if (!busy) setModal(null); }}>
-      {modal?.kind === 'leave' ? <><h2 id="memory-dialog-title">有未保存的记忆修改</h2><p>保存后再离开，或放弃本次修改。未保存的内容与用途不会生效。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setModal(null)} autoFocus>继续编辑</button></div></> : modal?.kind === 'source' ? <><h2 id="memory-dialog-title">记忆来源</h2>{modal.source.status === 'chapter' ? <><p className="field-hint">{modal.source.chapter.title} · 版本 {modal.source.chapter.version}</p><p className="source-content">{modal.source.chapter.content}</p><p className="field-hint">这是形成记忆时采用的日记版本，之后的改稿不会自动改写这条记忆。</p></> : modal.source.status === 'available' && modal.source.message ? <><p className="field-hint">{modal.source.message.role === 'user' ? '我' : 'LISA'} · {time(modal.source.message.sent_at)}</p><p className="source-content">{modal.source.message.content}</p>{modal.source.message.context_excluded && <p className="field-hint">这段原话仅供查看，不再作为模型依据。</p>}</> : <p>{modal.source.status === 'deleted' ? '原始聊天已删除。独立记忆仍然保留。' : '这条记忆由你手动添加。'}</p>}<button className="secondary" onClick={() => setModal(null)} autoFocus>关闭来源</button></> : modal && <><h2 id="memory-dialog-title">{modal.kind === 'memory-delete' ? '删除这条记忆？' : modal.kind === 'chat-delete' ? '删除这条聊天原文？' : '清理这个时间段的聊天？'}</h2>{modal.kind === 'memory-delete' ? <p>这条记忆将停止后续使用，相关原始对话及引用它的后续对话也不再作为模型依据。原始聊天与已有作品保留，不会从原话自动恢复这条记忆。</p> : <p>所选原文将从 LISA 保存的数据中清除，无法再查看。独立记忆与已有作品保留；保留的记忆会显示“原始聊天已删除”。希望 LISA 忘记的内容，还需另行删除记忆。</p>}{modal.kind === 'clear' && <p className="clear-range">{time(modal.start)}（含）<br />至 {time(modal.end)}（不含）<br />清理整个时间段，不受搜索条件限制。</p>}{error && <ErrorNotice message={error} />}<div className="button-row"><button className="secondary danger" disabled={busy} onClick={() => void confirmDelete()}>{busy ? '正在清理…' : modal.kind === 'memory-delete' ? '确认删除记忆' : modal.kind === 'chat-delete' ? '确认删除原话' : '确认清理聊天'}</button><button className="text-button" disabled={busy} onClick={() => setModal(null)} autoFocus>取消</button></div></>}
+      {modal?.kind === 'leave' ? <><h2 id="memory-dialog-title">有未保存的记忆修改</h2><p>保存后再离开，或放弃本次修改。未保存的内容与用途不会生效。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setModal(null)} autoFocus>继续编辑</button></div></> : modal?.kind === 'source' ? <><h2 id="memory-dialog-title">记忆来源</h2>{modal.source.status === 'chapter' ? <><p className="field-hint">{modal.source.chapter.title} · 版本 {modal.source.chapter.version}</p><p className="source-content">{modal.source.chapter.content}</p><p className="field-hint">这是形成记忆时采用的日记版本，之后的改稿不会自动改写这条记忆。</p></> : modal.source.status === 'agent' ? <p>这条记忆由聊天 Agent 根据当轮内容主动提升；原始聊天不会被保存。</p> : <p>这条记忆由你手动添加。</p>}<button className="secondary" onClick={() => setModal(null)} autoFocus>关闭来源</button></> : modal && <><h2 id="memory-dialog-title">删除这条记忆？</h2><p>这条记忆将停止后续使用。LISA 不保存原始聊天，也不会从聊天记录重新提取它；已有作品需另行修改。</p>{error && <ErrorNotice message={error} />}<div className="button-row"><button className="secondary danger" disabled={busy} onClick={() => void confirmDelete()}>{busy ? '正在删除…' : '确认删除记忆'}</button><button className="text-button" disabled={busy} onClick={() => setModal(null)} autoFocus>取消</button></div></>}
     </dialog>
   </main>;
 });

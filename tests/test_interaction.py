@@ -50,16 +50,15 @@ def view(db, user):
     return interaction_view(db, user.id, now=NOW)
 
 
-def test_repeat_dates_outweigh_single_day_burst(db, observation_user):
+def test_repeated_dates_and_bursts_never_create_history_inferences(db, observation_user):
     user = observation_user
     messages(db, user.id, [1, 2, 3], hour=12)
     messages(db, user.id, [4] * 100, hour=0)
     result = view(db, user)
-    assert result["sample_count"] == 103
-    assert result["active_days"] == 4
-    assert result["preferred_hours"] == {"start": 18, "end": 24, "active_days": 3}
-    assert result["kind"] == "inference"
-    assert len(result["source_message_ids"]) == 103
+    assert result["sample_count"] == result["active_days"] == 0
+    assert result["preferred_hours"] is None
+    assert result["source_message_ids"] == []
+    assert interaction_context(db, user.id, now=NOW) == ""
     assert db.scalar(select(func.count()).select_from(Memory)) == 0
 
 
@@ -79,22 +78,35 @@ def test_majority_required_across_active_dates(db, observation_user):
     assert view(db, observation_user)["preferred_hours"] is None
 
 
-def test_timezone_changes_local_slots_without_writing_evidence(db, observation_user):
+def test_timezone_is_explicit_setting_without_history_inference(db, observation_user):
     messages(db, observation_user.id, [1, 2, 3], hour=12)
-    assert view(db, observation_user)["preferred_hours"]["start"] == 18
+    assert view(db, observation_user)["timezone"] == "Asia/Shanghai"
     preference = ContactPreference(user_id=observation_user.id, timezone="America/New_York")
     db.add(preference)
     db.flush()
     result = view(db, observation_user)
-    assert result["preferred_hours"] == {"start": 6, "end": 12, "active_days": 3}
+    assert result["preferred_hours"] is None
+    assert result["sample_count"] == 0 and result["source_message_ids"] == []
     assert result["timezone"] == "America/New_York"
+    assert db.scalar(select(func.count()).select_from(Memory)) == 0
 
 
 @pytest.mark.parametrize(
     "excluded",
-    ["deleted", "excluded", "assistant", "web", "failed", "error", "other", "old", "future"],
+    [
+        "valid",
+        "deleted",
+        "excluded",
+        "assistant",
+        "web",
+        "failed",
+        "error",
+        "other",
+        "old",
+        "future",
+    ],
 )
-def test_only_valid_owned_qq_feedback_is_observed(db, observation_user, excluded):
+def test_legacy_feedback_is_never_observed(db, observation_user, excluded):
     items, task = messages(db, observation_user.id, [1, 2, 3])
     if excluded == "deleted":
         for item in items:
@@ -121,7 +133,7 @@ def test_only_valid_owned_qq_feedback_is_observed(db, observation_user, excluded
     elif excluded == "old":
         for item in items:
             item.sent_at = NOW - timedelta(days=15)
-    else:
+    elif excluded == "future":
         for item in items:
             item.sent_at = NOW + timedelta(hours=1)
     db.flush()
@@ -129,41 +141,47 @@ def test_only_valid_owned_qq_feedback_is_observed(db, observation_user, excluded
     assert interaction_context(db, observation_user.id, now=NOW) == ""
 
 
-def test_removing_source_immediately_removes_time_inference(db, observation_user):
+def test_erasing_legacy_sources_leaves_no_inference_or_source_reference(db, observation_user):
     items, _ = messages(db, observation_user.id, [1, 2, 3])
-    assert view(db, observation_user)["preferred_hours"]
-    items[0].deleted_at = NOW
-    items[0].content = ""
+    before = view(db, observation_user)
+    for item in items:
+        db.delete(item)
     db.flush()
     result = view(db, observation_user)
+    assert result == before
+    assert result["sample_count"] == 0 and result["source_message_ids"] == []
     assert result["preferred_hours"] is None
-    assert str(items[0].id) not in result["source_message_ids"]
+    assert interaction_context(db, observation_user.id, now=NOW) == ""
 
 
-def test_window_is_bounded_to_most_recent_200(db, observation_user):
+def test_large_legacy_history_is_not_sampled(db, observation_user):
     messages(db, observation_user.id, [1] * 200)
-    older, _ = messages(db, observation_user.id, [2, 3, 4])
+    messages(db, observation_user.id, [2, 3, 4])
     result = view(db, observation_user)
-    assert result["sample_count"] == 200
-    assert result["active_days"] == 1
-    assert str(older[0].id) not in result["source_message_ids"]
+    assert result["sample_count"] == result["active_days"] == 0
+    assert result["source_message_ids"] == []
+    assert result["preferred_hours"] is None
 
 
-@pytest.mark.parametrize("recent_length,trend", [(80, "longer"), (10, "shorter"), (42, None)])
-def test_text_lengths_and_recent_change_require_both_weeks(
-    db, observation_user, recent_length, trend
+@pytest.mark.parametrize("recent_length", [80, 10, 42])
+def test_text_and_image_history_never_generate_length_or_trend_profiles(
+    db, observation_user, recent_length
 ):
     messages(db, observation_user.id, [8, 9, 10, 11, 12], content="旧" * 40)
     messages(db, observation_user.id, [1, 2, 3, 4, 5], content="新" * recent_length)
     messages(db, observation_user.id, [1, 2, 3], content="媒体描述" * 500, kind="image")
     length = view(db, observation_user)["text_length"]
-    assert length["sample_count"] == 10
-    assert length["median"] == (40 + recent_length) / 2
-    assert length["recent_count"] == length["previous_count"] == 5
-    assert length["trend"] == trend
-    context = interaction_context(db, observation_user.id, now=NOW)
-    assert len(context) <= 1000 and "inference" in context
-    assert "媒体描述" not in context and "旧" * 40 not in context
+    assert length == {
+        "sample_count": 0,
+        "median": None,
+        "recent_count": 0,
+        "previous_count": 0,
+        "recent_median": None,
+        "previous_median": None,
+        "trend": None,
+    }
+    assert interaction_context(db, observation_user.id, now=NOW) == ""
+    assert db.scalar(select(func.count()).select_from(Memory)) == 0
 
 
 def test_short_term_change_not_inferred_from_few_messages(db, observation_user):
@@ -188,30 +206,30 @@ def test_api_observations_read_only_and_user_scoped(client, db, owner):
     assert db.get(Account, owner).last_active_at == before
 
 
-def test_preferred_hours_delay_at_most_two_hours(db, contact_context):
+def test_legacy_hours_do_not_delay_eligible_contact(db, contact_context):
     user, _, _, now, settings = contact_context
-    messages(db, user.id, [1, 2, 3], hour=12)  # Local 18-24.
+    messages(db, user.id, [1, 2, 3], hour=12)
     user.last_active_at = now - timedelta(hours=4)
     db.flush()
-    assert contact_block_reason(db, settings, user.id, now=now) == "preferred_hours"
+    assert contact_block_reason(db, settings, user.id, now=now) is None
     assert contact_block_reason(db, settings, user.id, now=now + timedelta(hours=2)) is None
 
 
-def test_arrival_of_preferred_hours_ends_delay_early(db, contact_context):
+def test_legacy_hours_cannot_override_explicit_minimum_interval(db, contact_context):
     user, _, _, now, settings = contact_context
     messages(db, user.id, [1, 2, 3], hour=12)
-    now = now.replace(hour=9)  # Local 17:00, preferred starts at 18:00.
-    user.last_active_at = now - timedelta(hours=4)
+    now = now.replace(hour=10)
+    user.last_active_at = now - timedelta(minutes=239)
     db.flush()
-    assert contact_block_reason(db, settings, user.id, now=now) == "preferred_hours"
-    assert contact_block_reason(db, settings, user.id, now=now + timedelta(hours=1)) is None
+    assert contact_block_reason(db, settings, user.id, now=now) == "min_interval"
+    assert contact_block_reason(db, settings, user.id, now=now + timedelta(minutes=1)) is None
 
 
 @pytest.mark.parametrize(
     "override,reason",
     [("inactive", "inactive"), ("quiet", "quiet_hours"), ("disabled", "user_disabled")],
 )
-def test_hard_contact_limits_precede_observed_hours(db, contact_context, override, reason):
+def test_explicit_contact_limits_apply_with_legacy_history(db, contact_context, override, reason):
     user, _, _, now, settings = contact_context
     messages(db, user.id, [1, 2, 3], hour=12)
     preference = db.get(ContactPreference, user.id)

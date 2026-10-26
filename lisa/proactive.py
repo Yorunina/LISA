@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from lisa.chat_style import expression_guide
 from lisa.contact_policy import contact_block_reason, contact_snapshot
-from lisa.interaction import interaction_context
 from lisa.life import (
     LIFE_INSTRUCTIONS,
     LifeCandidate,
@@ -17,7 +16,7 @@ from lisa.life import (
     adopt_life_events,
     queue_life_shares,
 )
-from lisa.memory import memory_context, record_chat_references, usable_chat_clause
+from lisa.memory import memory_context, record_chat_references
 from lisa.model_calls import (
     BudgetExceeded,
     ModelBusy,
@@ -29,7 +28,6 @@ from lisa.model_calls import (
 )
 from lisa.models import (
     Account,
-    ChatMessage,
     ContactPreference,
     OutboundMessage,
     Persona,
@@ -40,6 +38,7 @@ from lisa.models import (
 from lisa.progress import ProgressMention, progress_context, progress_is_current, resolve_progress
 from lisa.settings import Settings
 from lisa.sharing import chapter_link
+from lisa.style_profiles import resolve_personality_style
 from lisa.topics import DefaultDesign, adopt_default_design, topic_context
 
 
@@ -114,20 +113,15 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             return
         user_id = task.user_id
         persona = db.scalar(select(Persona).where(Persona.user_id == user_id))
-        history = list(
-            db.scalars(
-                select(ChatMessage)
-                .join(Task, ChatMessage.task_id == Task.id)
-                .where(
-                    ChatMessage.user_id == user_id,
-                    usable_chat_clause(),
-                    Task.status == "completed",
-                )
-                .order_by(ChatMessage.created_at.desc())
-                .limit(12)
-            )
+        style_card = resolve_personality_style(
+            db,
+            user_id,
+            scene="casual",
+            fallback=persona.prompt if persona else "",
         )
-        history.reverse()
+        # Proactive contact has no retained chat history to replay.  It uses
+        # explicit memories and current project facts only.
+        history = []
         instructions = (
             "你是该用户独立的文学创作伙伴 LISA。这是一条温和简短的主动私聊，"
             "不是对新消息的回复。以自己的虚构日常、兴趣或感受开启轻松话题；"
@@ -137,7 +131,7 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             "不宣称执行了未保存的创作、不将待定意见变成共识、不发起写作任务。"
             "只有提供可选已保存成果时才可提及创作进展，否则progress_mention必须null。"
             f"当前 UTC 时间：{datetime.now(UTC).isoformat()}。\n"
-            f"用户选定的性格名称：{persona.name}\n性格设定：\n{persona.prompt}"
+            f"用户选定的性格名称：{persona.name}\n交流风格卡：\n{style_card['prompt']}"
             + "\n" + expression_guide() + LIFE_INSTRUCTIONS
             + "\nlife_mentions只列本次reply明确提及的已提供生活记忆id，evidence逐字来自reply。"
         )
@@ -146,7 +140,7 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
         topics = topic_context(project)
         project_id = project.id if project else None
         provided_tentative = project.tentative if topics else ""
-        optional_context = interaction_context(db, user_id) + topics
+        optional_context = topics
         provided_progress, progress_text = progress_context(db, user_id)
         optional_context += progress_text
         memories = memory_context(
@@ -158,11 +152,10 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
              + sent_meme_context(db, item)}
             for item in history
         ] + [{"role": "user", "content": "请分享一条自然的生活话题，不要求我立即回应。"}]
-        history_ids = [item.id for item in history]
         task.status, task.started_at = "running", datetime.now(UTC)
         from lisa.shared_retrieval import recall_shared
         public_context = recall_shared(
-            db, settings, user_id, "chat", "\n".join(item.content for item in history[-3:])
+            db, settings, user_id, "chat", ""
         )
         optional_context += public_context.text
     error = None
@@ -186,7 +179,6 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             messages = trim_history(
                 settings, instructions, messages, len(history), schema=ContactReply
             )
-        used_history_ids = history_ids[len(history_ids) + 1 - len(messages) :]
         generator = generate or generate_contact
         result = ContactReply.model_validate(
             await generator(settings, engine, task_id, user_id, instructions, messages)
@@ -225,7 +217,7 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
             return
         record_references(db, task_id, public_context)
         meme = select_meme(db, user_id, result.meme_id, public_context)
-        record_chat_references(db, task_id, memory_ids, used_history_ids)
+        record_chat_references(db, task_id, memory_ids)
         adopt_default_design(
             db, user_id, project_id, result.default_design, provided_tentative=provided_tentative
         )
@@ -264,28 +256,18 @@ async def execute_contact(settings: Settings, engine, task_id: str, *, generate=
 
 
 def adopt_delivered_contact(db: Session, message: OutboundMessage) -> None:
-    """Only confirmed delivery becomes chat history and newly adopted life events."""
+    """Only confirmed delivery adopts newly generated LISA life events."""
     task = db.get(Task, message.task_id)
     user = db.scalar(select(Account).where(Account.id == message.user_id).with_for_update())
     changed = user.memory_revision != task.request["memory_revision"] or not progress_is_current(
         db, user.id, (task.input_snapshot or {}).get("progress")
     )
-    source = ChatMessage(
-        user_id=message.user_id,
-        task_id=task.id,
-        role="assistant",
-        content=message.content,
-        sent_at=message.finished_at,
-        context_excluded=changed,
-    )
-    db.add(source)
-    db.flush()
     if not changed:
         ids = adopt_life_events(
             db,
             user.id,
             [LifeCandidate.model_validate(item) for item in task.input_snapshot["life_events"]],
             message.content,
-            source_message_id=source.id,
+            source_task_id=task.id,
         )
         queue_life_shares(db, user.id, task.id, ids)

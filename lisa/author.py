@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from lisa.character_calls import CharacterUnavailable, consult_character
 from lisa.characters import KnowledgeObservation, adopt_character_knowledge, adopt_character_names
+from lisa.context_budget import ContextBudgetExceeded, ContextItem, pack_mapping
 from lisa.life import LIFE_INSTRUCTIONS, LifeCandidate
 from lisa.memory import memory_context
 from lisa.model_calls import (
@@ -25,7 +26,9 @@ from lisa.model_calls import (
     ModelCallFailed,
     ModelCallUnknown,
     ModelInputTooLarge,
+    _reply_request,
     generate_structured,
+    request_size,
     trim_history,
 )
 from lisa.models import (
@@ -45,6 +48,7 @@ from lisa.retrieval import Context, record_references
 from lisa.scheduling import autonomous_start_allowed
 from lisa.settings import Settings
 from lisa.style_profiles import resolve_writing_style
+from lisa.style_runtime import writing_task
 from lisa.works import adopt_result, document_text
 
 
@@ -92,6 +96,93 @@ class _WritingAttempt:
     knowledge: list[KnowledgeObservation] = field(default_factory=list)
 
 
+def _pack_author_messages(
+    settings: Settings, instructions: str, messages: list[dict]
+) -> tuple[list[dict], dict]:
+    """Keep the task packet complete while allowing detailed material to be recalled."""
+    if not messages or not isinstance(messages[0].get("content"), str):
+        return messages, {"included": [], "omitted": [], "request_bytes": None}
+    try:
+        payload = json.loads(messages[0]["content"])
+    except (TypeError, ValueError):
+        return messages, {"included": [], "omitted": [], "request_bytes": None}
+    if not isinstance(payload, dict):
+        return messages, {"included": [], "omitted": [], "request_bytes": None}
+
+    priorities = {
+        # A compact character roster is useful when it fits; detailed knowledge
+        # is supplied by scoped retrieval or the selected role call.
+        "characters": 90,
+        "preferences": 50,
+        "tentative": 40,
+    }
+    items = [
+        ContextItem(
+            key=key,
+            value=value,
+            priority=priorities.get(key, 100),
+            required=key not in priorities,
+        )
+        for key, value in payload.items()
+    ]
+    measure_settings = settings.model_copy(
+        update={"model_max_output_tokens": settings.writing_output_tokens}
+    )
+
+    def measure(values: dict) -> int:
+        candidate = [{"role": "user", "content": json.dumps(values, ensure_ascii=False)}]
+        return request_size(
+            _reply_request(measure_settings, instructions, candidate, WritingResult)
+        )
+
+    try:
+        packed = pack_mapping(items, settings.model_max_input_bytes, measure=measure)
+    except ContextBudgetExceeded as exc:
+        raise ModelInputTooLarge(str(exc)) from exc
+    packed_messages = [
+        {
+            **messages[0],
+            "content": json.dumps(packed.values, ensure_ascii=False),
+        },
+        *messages[1:],
+    ]
+    return packed_messages, {
+        "included": list(packed.included),
+        "omitted": list(packed.omitted),
+        "request_bytes": packed.measured_bytes,
+    }
+
+
+def _character_choice_context(messages: list[dict]) -> tuple[str, list[dict]]:
+    """Build the small packet needed to decide whether a role should participate."""
+    payload = {}
+    if messages and isinstance(messages[0].get("content"), str):
+        try:
+            value = json.loads(messages[0]["content"])
+            if isinstance(value, dict):
+                payload = value
+        except (TypeError, ValueError):
+            pass
+    keep = (
+        "title",
+        "kind",
+        "goal",
+        "agreement",
+        "constraints",
+        "summary",
+        "plot_state",
+        "context",
+        "target_text",
+    )
+    reduced = {key: payload[key] for key in keep if key in payload}
+    instructions = (
+        "你是作者的角色参与判断器。只判断本次有限任务是否需要一个已有角色提供自身反应。"
+        "根据任务目标、当前剧情、场景和明确约束判断；简单任务直接完成，不要调用角色。"
+        "不要创作正文，不要补全未提供的设定，不要把角色猜测写成事实。"
+    )
+    return instructions, [{"role": "user", "content": json.dumps(reduced, ensure_ascii=False)}]
+
+
 async def _write_with_character(
     settings,
     engine,
@@ -121,18 +212,19 @@ async def _write_with_character(
             )
         ]
     if available:
+        choice_instructions, choice_messages = _character_choice_context(messages)
         choice = AuthorChoice.model_validate(
             await (decide or choose_character)(
                 settings,
                 engine,
                 task_id,
                 user_id,
-                instructions
-                + "\n先判断是否需要角色参与：简单任务直接返回result且character_id为空；"
-                "仅当本次场景涉及某角色、其独立反应确有帮助时，返回一名可用角色的ID且result为空。"
-                "角色只能读取自己保存的已知信息，你不能向其传入任务要求、秘密剧情或自由文本问题。",
+                choice_instructions
+                + "\n仅当本次场景涉及某角色、其独立反应确有帮助时，"
+                "返回一名可用角色的ID且result为空。"
+                "角色只能读取自己保存的已知信息；作者判断阶段不传入角色秘密或自由文本问题。",
                 [
-                    *messages,
+                    *choice_messages,
                     {
                         "role": "user",
                         "content": json.dumps(
@@ -234,7 +326,12 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
         )
     else:
         author_role = "你是小说作者。小说人物经历不是LISA的生活事实，life_events必须为空。"
-    writing_style = resolve_writing_style(db, project.user_id, project.id)
+    writing_style = resolve_writing_style(
+        db,
+        project.user_id,
+        project.id,
+        task=writing_task(project.kind, task.kind),
+    )
     if writing_style["prompt"]:
         author_role += (
             f"\n已应用写作风格（{writing_style['effective_profile_name']}）：\n"
@@ -255,6 +352,8 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
             "worldbook是固定提供的核心设定，检索到的设定条目是补充资料。"
             "设定的年代、地点和例外条件必须结合当前剧情判断；叙述倒叙不改变事件发生顺序。"
             "未检索到的设定不代表不存在，不凭空补齐关键规则或让角色预知未来事实。"
+            "characters.entries是逐个人物的已保存档案，legacy_notes是尚未整理的旧人物资料。"
+            "人物档案供作者塑造人物，不表示角色知道其中的秘密；未启用独立参与不影响人物存在。"
             "只有后续确有必要独立参与的具名角色，才在character_names中提出建立配置；"
             "最多两名，名称必须逐字出现在本次paragraphs。不要为每个具名人物创建角色。"
             "此处只建立名字和默认提示，不自动复制任何知识、秘密或人物经历。"
@@ -272,7 +371,18 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
                         "agreement": project.agreement,
                         "worldbook": project.worldbook,
                         "constraints": project.constraints,
-                        "characters": project.characters,
+                        "characters": {
+                            "legacy_notes": project.characters,
+                            "entries": [
+                                {"id": str(role.id), "name": role.name,
+                                 "definition": role.definition}
+                                for role in db.scalars(
+                                    select(Character)
+                                    .where(Character.project_id == project.id)
+                                    .order_by(Character.created_at, Character.id)
+                                )
+                            ],
+                        },
                         "preferences": project.preferences,
                         "tentative": project.tentative,
                         "summary": project.summary,
@@ -294,6 +404,7 @@ def _snapshot(db: Session, task: Task, project: Project, settings: Settings) -> 
 
 
 def _messages_for_attempt(db: Session, user_id: UUID, snapshot: dict) -> list[dict]:
+    base_messages = snapshot.get("source_messages", snapshot["messages"])
     source = snapshot.get("context_source")
     if source and db.scalar(
         select(Memory.id).where(
@@ -303,13 +414,13 @@ def _messages_for_attempt(db: Session, user_id: UUID, snapshot: dict) -> list[di
             Memory.revision > 1,
         )
     ):
-        messages = deepcopy(snapshot["messages"])
+        messages = deepcopy(base_messages)
         payload = json.loads(messages[0]["content"])
         # Keep an explicitly requested rewrite target; surrounding source text is optional.
         payload["context"] = ""
         messages[0]["content"] = json.dumps(payload, ensure_ascii=False)
         return messages
-    return snapshot["messages"]
+    return deepcopy(base_messages)
 
 
 def _saved_notice(db, settings, task, chapter) -> str:
@@ -362,6 +473,47 @@ async def _cancelable(coroutine, engine, task_id):
         if not request.done():
             request.cancel()
             await asyncio.gather(request, return_exceptions=True)
+
+
+def _finish_author(
+    settings, engine, task_id, user_id, memory_revision, recalled, failure, result, attempt,
+) -> None:
+    """Recheck current ownership and adopt the finite result in one transaction."""
+    from lisa.shared_retrieval import shared_references_current
+
+    with Session(engine) as db, db.begin():
+        user = db.scalar(select(Account).where(Account.id == user_id).with_for_update())
+        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
+        if task is None or task.status != "running":
+            return
+        if user is None or not user.active:
+            failure = "account_unavailable"
+        elif not failure and (
+            user.memory_revision != memory_revision
+            or not shared_references_current(db, recalled, user_id)
+        ):
+            failure = "context_changed"
+        if not failure:
+            try:
+                chapter = adopt_result(db, task, result.model_dump())
+            except HTTPException:
+                failure = "target_changed"
+            else:
+                if chapter:
+                    adopt_character_knowledge(
+                        db, task, attempt.participation_position, attempt.knowledge
+                    )
+                    adopt_character_names(
+                        db, task, result.character_names, "\n".join(result.paragraphs)
+                    )
+                    _notice(
+                        db,
+                        task,
+                        _saved_notice(db, settings, task, chapter),
+                    )
+                return
+        task.status, task.error, task.finished_at = "failed", failure, datetime.now(UTC)
+        _notice(db, task, "这次创作没有保存新正文，原文仍在。请在网页查看任务原因和可用操作。")
 
 
 async def execute_author(
@@ -435,7 +587,8 @@ async def execute_author(
         project_id = project.id
         query = task.request["goal"] + "\n" + (task.request.get("target_text") or "")
         query += "\n" + json.loads(messages[0]["content"]).get("context", "")[-600:]
-    failure = None
+    failure = result = attempt = None
+    recalled = Context()
     try:
         recalled = await _cancelable(
             retrieve_context(settings, engine, task_id, user_id, project_id, "writing", query),
@@ -459,7 +612,10 @@ async def execute_author(
                 raise ContextChanged
         if recalled.text:
             instructions = snapshot["instructions"] + recalled.text
+        source_messages = deepcopy(messages)
+        packed_stats = None
         try:
+            messages, packed_stats = _pack_author_messages(settings, instructions, messages)
             trim_history(
                 settings.model_copy(
                     update={"model_max_output_tokens": settings.writing_output_tokens}
@@ -472,6 +628,16 @@ async def execute_author(
         except ModelInputTooLarge:
             instructions = snapshot["instructions"]
             recalled = Context()
+            messages, packed_stats = _pack_author_messages(settings, instructions, messages)
+        if packed_stats is not None:
+            with Session(engine) as db, db.begin():
+                current = db.get(Task, task_id)
+                if current is not None and current.input_snapshot is not None:
+                    snapshot = dict(current.input_snapshot)
+                    snapshot.setdefault("source_messages", source_messages)
+                    snapshot["messages"] = messages
+                    snapshot["context_pack"] = packed_stats
+                    current.input_snapshot = snapshot
         with Session(engine) as db, db.begin():
             record_references(db, task_id, recalled)
         attempt = await _cancelable(
@@ -542,36 +708,6 @@ async def execute_author(
         failure = "model_failed"
     except ValueError:
         failure = "invalid_writing_result"
-    with Session(engine) as db, db.begin():
-        user = db.scalar(select(Account).where(Account.id == user_id).with_for_update())
-        task = db.scalar(select(Task).where(Task.id == task_id).with_for_update())
-        if task is None or task.status != "running":
-            return
-        if user is None or not user.active:
-            failure = "account_unavailable"
-        elif not failure and (
-            user.memory_revision != memory_revision
-            or not shared_references_current(db, recalled, user_id)
-        ):
-            failure = "context_changed"
-        if not failure:
-            try:
-                chapter = adopt_result(db, task, result.model_dump())
-            except HTTPException:
-                failure = "target_changed"
-            else:
-                if chapter:
-                    adopt_character_knowledge(
-                        db, task, attempt.participation_position, attempt.knowledge
-                    )
-                    adopt_character_names(
-                        db, task, result.character_names, "\n".join(result.paragraphs)
-                    )
-                    _notice(
-                        db,
-                        task,
-                        _saved_notice(db, settings, task, chapter),
-                    )
-                return
-        task.status, task.error, task.finished_at = "failed", failure, datetime.now(UTC)
-        _notice(db, task, "这次创作没有保存新正文，原文仍在。请在网页查看任务原因和可用操作。")
+    _finish_author(
+        settings, engine, task_id, user_id, memory_revision, recalled, failure, result, attempt,
+    )

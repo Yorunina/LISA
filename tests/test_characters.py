@@ -29,6 +29,26 @@ CONFIG = {
 RETRIEVAL_DEFAULTS = {"enabled": False, "limit": 3, "max_chars": 1500}
 
 
+def test_structured_definitions_are_independent_and_old_clients_preserve_them(client, project):
+    first = create(client, project, definition={"identity": " 调查记者 ", "motivation": "寻找旧友"})
+    second = create(client, project, name="周宁", enabled=False, known_information="")
+    assert first["definition"]["identity"] == "调查记者"
+    assert second["definition"]["identity"] == ""
+    path = f"/api/characters/{first['id']}"
+    updated = client.put(path, json=CONFIG | {"prompt": "保留旧指引"}, headers=HEADERS).json()
+    assert updated["definition"] == first["definition"]
+    data = CONFIG | {"definition": first["definition"] | {"personality": "谨慎"}}
+    saved = client.put(path, json=data, headers=HEADERS).json()
+    assert saved["revision"] == 3
+    assert client.put(path, json=data, headers=HEADERS).json()["revision"] == 3
+    listed = client.get(f"/api/projects/{project['id']}/characters").json()
+    assert listed[1] == second
+    for invalid in [{"identity": "长" * 1001}, {"secret_access": True}]:
+        response = client.put(path, json=CONFIG | {"definition": invalid}, headers=HEADERS)
+        assert response.status_code == 422
+    assert client.get(f"/api/projects/{project['id']}/characters").json()[0] == saved
+
+
 def create(client, project, **changes):
     response = client.post(
         f"/api/projects/{project['id']}/characters", json=CONFIG | changes, headers=HEADERS

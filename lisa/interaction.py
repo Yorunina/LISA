@@ -1,87 +1,32 @@
-"""Read-only interaction observations from at most 200 valid QQ messages in 14 days."""
+"""Interaction settings without retaining or analyzing raw chat history."""
 
-from collections import Counter
 from datetime import UTC, datetime, timedelta
-from statistics import median
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from lisa.models import ChatMessage, ContactPreference, Task
+from lisa.models import ContactPreference
 
 
 def interaction_view(db: Session, user_id: UUID, *, now: datetime | None = None) -> dict:
-    """Statistics are observations; time/length suggestions remain revisable inferences."""
+    """Return only an empty observation; raw chat history is not retained."""
     now = now or datetime.now(UTC)
-    start = now - timedelta(days=14)
     preference = db.get(ContactPreference, user_id)
     timezone = preference.timezone if preference else "Asia/Shanghai"
-    zone = ZoneInfo(timezone)
-    messages = db.scalars(
-        select(ChatMessage)
-        .join(Task, Task.id == ChatMessage.task_id)
-        .where(
-            ChatMessage.user_id == user_id,
-            ChatMessage.role == "user",
-            ChatMessage.deleted_at.is_(None),
-            ChatMessage.context_excluded.is_(False),
-            ChatMessage.sent_at >= start,
-            ChatMessage.sent_at <= now,
-            Task.user_id == user_id,
-            Task.kind == "chat",
-            Task.source == "qq",
-            Task.status == "completed",
-            Task.error.is_(None),
-        )
-        .order_by(ChatMessage.sent_at.desc(), ChatMessage.created_at.desc(), ChatMessage.id.desc())
-        .limit(200)
-    ).all()
-    day_slots = {
-        (message.sent_at.astimezone(zone).date(), message.sent_at.astimezone(zone).hour // 6)
-        for message in messages
-    }
-    active_days = len({day for day, _ in day_slots})
-    votes = Counter(slot for _, slot in day_slots)
     preferred = None
-    if votes:
-        ranked = votes.most_common()
-        slot, days = ranked[0]
-        if days >= 3 and days * 2 >= active_days and (len(ranked) == 1 or days > ranked[1][1]):
-            preferred = {"start": slot * 6, "end": (slot + 1) * 6, "active_days": days}
-
-    texts = [message for message in messages if message.kind == "text"]
-    recent = [message for message in texts if message.sent_at >= now - timedelta(days=7)]
-    previous = [message for message in texts if message.sent_at < now - timedelta(days=7)]
-    recent_median = median([len(message.content) for message in recent]) if recent else None
-    previous_median = median([len(message.content) for message in previous]) if previous else None
-    trend = None
-    if len(recent) >= 5 and len(previous) >= 5:
-        delta = recent_median - previous_median
-        if abs(delta) >= max(10, previous_median * 0.25):
-            trend = "longer" if delta > 0 else "shorter"
     return {
         "kind": "inference",
-        "explanation": (
-            "仅据近期有效 QQ 用户消息推测交流习惯，不代表作息、职业、情绪或亲密程度；明确设置优先。"
-        ),
+        "explanation": "LISA 不保存原始聊天，也不从消息历史维护交流习惯推测；明确设置优先。",
         "timezone": timezone,
-        "sample_count": len(messages),
-        "active_days": active_days,
-        "period_start": start.isoformat(),
+        "sample_count": 0,
+        "active_days": 0,
+        "period_start": (now - timedelta(days=14)).isoformat(),
         "period_end": now.isoformat(),
-        "source_message_ids": [str(message.id) for message in messages],
+        "source_message_ids": [],
         "preferred_hours": preferred,
-        "text_length": {
-            "sample_count": len(texts),
-            "median": median([len(message.content) for message in texts]) if texts else None,
-            "recent_count": len(recent),
-            "previous_count": len(previous),
-            "recent_median": recent_median,
-            "previous_median": previous_median,
-            "trend": trend,
-        },
+        "text_length": {"sample_count": 0, "median": None, "recent_count": 0,
+                         "previous_count": 0, "recent_median": None, "previous_median": None,
+                         "trend": None},
     }
 
 

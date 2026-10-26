@@ -4,6 +4,7 @@ import type { Character } from '../../web/characters'
 import type { WorldbookEntry } from '../../web/worldbook'
 import type { StyleLibrary, WritingStyle } from '../../web/api'
 import { readFile } from 'node:fs/promises'
+import { plotFields, writingFields, readSections, readItems } from '../../web/material-text'
 
 const doc = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] })
 const work = () => ({ id: 'work-1', title: '雨夜来信', kind: 'novel', is_current: true, completed: false, worldbook: '', worldbook_entries: [] as WorldbookEntry[], constraints: '', characters: '', author_prompt: '', summary: '', plot_state: '', agreement: '', preferences: '', tentative: '' })
@@ -42,13 +43,14 @@ async function stubStudy(page: Page, seeded = false) {
     schedule: schedule(),
     scheduleFails: false,
     chapterSaves: [] as { title: string; content: object }[],
-    requests: [] as { path: string; body: Record<string, unknown> }[],
+    requests: [] as { path: string; body: Record<string, unknown>; summary: boolean }[],
   }
   await page.route('**/api/**', async route => {
     const req = route.request()
     const path = new URL(req.url()).pathname.replace('/api', '')
     const body = req.method() === 'GET' ? {} : req.postDataJSON()
-    state.requests.push({ path, body })
+    const summary = new URL(req.url()).searchParams.get('summary') === 'true'
+    state.requests.push({ path, body, summary })
     if (path === '/auth/me') return route.fulfill({ json: { id: 'synthetic-reader', username: '合成读者' } })
     if (path === '/setup') return route.fulfill({ json: { qq_id: '700000099', initialized: true, persona: { name: '测试小莎', prompt: '只用于合成浏览器测试。', version: 1 }, presets: [] } })
     if (path === '/service-status') return route.fulfill({ json: { status: 'ready', message: '合成服务已就绪。' } })
@@ -138,13 +140,17 @@ async function stubStudy(page: Page, seeded = false) {
       if (path.endsWith('/chapters') || path.endsWith('/tasks')) return route.fulfill({ json: [] })
       return route.fulfill({ json: other })
     }
-    if (path === '/projects') return route.fulfill({ json: state.project ? [state.project, ...state.others] : [] })
-    if (path === '/projects/work-1' && req.method() === 'GET') return route.fulfill({ json: state.project })
+    if (path === '/projects') {
+      const items = state.project ? [state.project, ...state.others] : []
+      return route.fulfill({ json: items.map(item => summary ? { id: item.id, title: item.title, kind: item.kind, is_current: item.is_current, completed: item.completed, index_revision: 1, material_revision: JSON.stringify(item) } : item) })
+    }
+    if (path === '/projects/work-1' && req.method() === 'GET') return route.fulfill({ json: { ...state.project, index_revision: 1 } })
     if (path === '/projects/work-1' && req.method() === 'PUT') {
       if (state.saveFails) return route.fulfill({ status: 503, json: { detail: '合成保存失败，请重试。' } })
       state.project = { ...state.project!, ...body }; return route.fulfill({ json: state.project })
     }
-    if (path === '/projects/work-1/chapters') return route.fulfill({ json: state.chapters })
+    if (path === '/projects/work-1/chapters') return route.fulfill({ json: summary ? state.chapters.map(({ id, title, position, version }) => ({ id, title, position, version })) : state.chapters })
+    if (/^\/chapters\/chapter-\d+$/.test(path) && req.method() === 'GET') return route.fulfill({ json: state.chapters.find(item => path.endsWith(item.id)) })
     if (path === '/chapters/chapter-1' && req.method() === 'PUT') {
       if (state.saveFails) return route.fulfill({ status: 503, json: { detail: '合成保存失败，请重试。' } })
       state.chapterSaves.push(body)
@@ -317,7 +323,9 @@ test('worldbook entries preserve edits, search, links and plot state on desktop 
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
   await expect(page.getByRole('complementary', { name: '当前剧情填写提示' })).toBeVisible()
-  await page.getByLabel('剧情状态内容').fill('时间：旧历319年。地点：北境。禁令尚未生效。')
+  await page.getByLabel('当前时间', { exact: true }).fill('旧历319年。')
+  await page.getByLabel('当前地点', { exact: true }).fill('北境。')
+  await page.getByLabel('正在发生的事', { exact: true }).fill('禁令尚未生效。')
   await page.getByRole('button', { name: '保存资料', exact: true }).click()
   await expect.poll(() => state.project!.plot_state).toContain('旧历319年')
   await page.screenshot({ path: testInfo.outputPath('mobile-plot-state.png'), fullPage: true })
@@ -329,6 +337,130 @@ test('worldbook entries preserve edits, search, links and plot state on desktop 
   await page.getByRole('button', { name: '保存资料', exact: true }).click()
   await expect.poll(() => state.project!.worldbook_entries.length).toBe(1)
   expect(state.project!.worldbook_entries[0].related_ids).toEqual([])
+})
+
+test('material settings separate rules, constraints, preferences, writing and current plot with save protection', async ({ page }, testInfo) => {
+  const state = await stubStudy(page, true)
+  Object.assign(state.project!, { worldbook: '旧世界书原文。\n多行仍是同一段。', plot_state: '原有剧情：主角仍在路上。', author_prompt: '旧作者补充写法。' })
+  await page.getByRole('button', { name: '创作资料', exact: true }).click()
+  await page.getByRole('button', { name: '新增约束', exact: true }).click()
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('移除空条目')
+  await page.getByLabel('约束 1', { exact: true }).fill('不得靠巧合破解谜题。\n线索必须事先出现。')
+  await page.getByRole('button', { name: '新增约束', exact: true }).click()
+  await page.getByLabel('约束 2', { exact: true }).fill('主角不能读心。')
+  await page.getByRole('button', { name: '世界书', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
+  expect(readItems(state.project!.constraints, '约束').values).toEqual(['不得靠巧合破解谜题。\n线索必须事先出现。', '主角不能读心。'])
+  await page.getByRole('button', { name: '新增规则', exact: true }).click()
+  await page.getByLabel('规则 1', { exact: true }).fill('时间只能向前。')
+  state.saveFails = true
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('合成保存失败')
+  await expect(page.getByLabel('规则 1', { exact: true })).toHaveValue('时间只能向前。')
+  state.saveFails = false
+  await page.getByLabel('规则 1', { exact: true }).press('Control+s')
+  await expect.poll(() => readItems(state.project!.worldbook, '规则').values).toEqual(['时间只能向前。'])
+  expect(readItems(state.project!.worldbook, '规则').legacy).toBe('旧世界书原文。\n多行仍是同一段。')
+  await page.getByRole('button', { name: '剧情状态', exact: true }).click()
+  await page.getByLabel('当前时间', { exact: true }).fill('第一天傍晚')
+  await page.getByLabel('当前地点', { exact: true }).fill('车站')
+  await page.getByLabel('未解线索与悬念', { exact: true }).fill('寄信人仍未知')
+  await page.getByLabel('人物知情提醒', { exact: true }).fill('沈舟不知道信已送达')
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => readSections(state.project!.plot_state, plotFields).values[1]).toBe('车站')
+  expect(readSections(state.project!.plot_state, plotFields).legacy).toBe('原有剧情：主角仍在路上。')
+  await page.getByRole('button', { name: '写作风格', exact: true }).click()
+  await page.getByLabel('叙述视角', { exact: true }).fill('第三人称限知')
+  await page.getByLabel('对白写法', { exact: true }).fill('用停顿表现犹豫')
+  await page.getByRole('button', { name: '保存写作设置', exact: true }).click()
+  await expect.poll(() => readSections(state.project!.author_prompt, writingFields).values[0]).toBe('第三人称限知')
+  await page.getByRole('button', { name: '讨论记录', exact: true }).click()
+  await page.getByText('偏好倾向', { exact: true }).click()
+  await page.getByText('待确认想法', { exact: true }).click()
+  await page.getByRole('button', { name: '新增偏好', exact: true }).click()
+  await page.getByLabel('偏好 1', { exact: true }).fill('目前更喜欢开放式结尾')
+  await page.getByRole('button', { name: '新增想法', exact: true }).click()
+  await page.getByLabel('想法 1', { exact: true }).fill('是否让寄信人是旧友？尚未决定')
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => readItems(state.project!.tentative, '想法').values.length).toBe(1)
+  expect(state.project!.constraints).not.toContain('开放式结尾')
+  await page.getByRole('button', { name: '剧情状态', exact: true }).click()
+  await expect(page.getByLabel('当前地点', { exact: true })).toHaveValue('车站')
+  await page.screenshot({ path: testInfo.outputPath('desktop-structured-plot.png'), fullPage: true })
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-structured-plot.png'), fullPage: true })
+  await page.getByRole('button', { name: '创作要求', exact: true }).click()
+  await page.getByRole('button', { name: '移除约束 1', exact: true }).click()
+  await page.getByRole('button', { name: '讨论记录', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改', exact: true }).click()
+  await page.getByRole('button', { name: '创作要求', exact: true }).click()
+  await expect(page.getByLabel('约束 1', { exact: true })).toHaveValue('不得靠巧合破解谜题。\n线索必须事先出现。')
+})
+
+test('individual character dossiers manage definitions, legacy notes and protected switching', async ({ page }, testInfo) => {
+  const state = await stubStudy(page, true)
+  state.project!.characters = '旧版：许知夏是记者，沈舟是她的旧友。'
+  await page.getByRole('button', { name: '创作资料', exact: true }).click()
+  await page.getByRole('button', { name: '人物设定', exact: true }).click()
+  await expect(page.getByLabel('人物设定内容')).toHaveCount(0)
+  await page.getByText('旧版人物资料 · 待整理为独立角色', { exact: true }).click()
+  await expect(page.getByText(state.project!.characters, { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '新建角色', exact: true }).click()
+  await expect(page.getByLabel('角色 prompt', { exact: true })).not.toBeVisible()
+  await page.getByLabel('角色名称', { exact: true }).fill('许知夏')
+  for (const [label, value] of [['身份与背景', '调查记者'], ['性格与行为', '谨慎，但涉及旧友时会冲动'], ['目标与动机', '查清失踪真相'], ['人物关系', '沈舟是失联的旧友'], ['说话方式', '短句，先问问题']]) {
+    await page.getByLabel(label, { exact: true }).fill(value)
+  }
+  state.saveFails = true
+  await page.getByRole('button', { name: '保存角色', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText('合成角色保存或读取失败')
+  await expect(page.getByLabel('目标与动机')).toHaveValue('查清失踪真相')
+  state.saveFails = false
+  await page.getByLabel('目标与动机').press('Control+s')
+  await expect.poll(() => state.characters.length).toBe(1)
+  expect(state.characters[0].definition).toEqual({ identity: '调查记者', personality: '谨慎，但涉及旧友时会冲动', motivation: '查清失踪真相', relationships: '沈舟是失联的旧友', voice: '短句，先问问题' })
+  expect(state.characters[0].enabled).toBe(false)
+  await page.getByRole('button', { name: '新建角色', exact: true }).click()
+  await page.getByLabel('角色名称', { exact: true }).fill('沈舟')
+  await expect(page.getByLabel('身份与背景')).toHaveValue('')
+  await page.getByLabel('身份与背景').fill('修表匠')
+  await page.getByRole('button', { name: '保存角色', exact: true }).click()
+  await expect.poll(() => state.characters.length).toBe(2)
+  await page.getByLabel('性格与行为').fill('尚未保存的性格')
+  const first = page.getByRole('navigation', { name: '作品角色列表' }).getByRole('button', { name: /许知夏/ })
+  await first.click()
+  await page.getByRole('dialog').getByRole('button', { name: '继续编辑', exact: true }).click()
+  await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('沈舟')
+  await first.click()
+  await page.getByRole('dialog').getByRole('button', { name: '放弃修改', exact: true }).click()
+  await expect(page.getByLabel('身份与背景')).toHaveValue('调查记者')
+  await page.getByLabel('查找人物').fill('修表')
+  await expect(first).toHaveCount(0)
+  await page.getByRole('button', { name: /沈舟 修表匠/ }).click()
+  await expect(page.getByLabel('性格与行为')).toHaveValue('')
+  await page.getByLabel('查找人物').fill('不存在的人物')
+  await expect(page.getByText('没有匹配的人物。试试其他姓名或清空搜索。')).toBeVisible()
+  await page.getByLabel('查找人物').fill('')
+  await first.click()
+  await page.getByText('旧版人物资料 · 待整理为独立角色', { exact: true }).click()
+  await page.screenshot({ path: testInfo.outputPath('desktop-character-dossiers.png'), fullPage: true })
+  await page.setViewportSize({ width: 1024, height: 900 })
+  const workspace = await page.locator('.character-workspace').boundingBox()
+  const column = await page.locator('.character-workspace > .writing-column').boundingBox()
+  expect(column!.width).toBe(workspace!.width)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await page.screenshot({ path: testInfo.outputPath('mobile-character-dossiers.png'), fullPage: true })
+  await page.getByText('旧版人物资料 · 待整理为独立角色', { exact: true }).click()
+  await page.getByRole('button', { name: '编辑旧版人物资料', exact: true }).click()
+  await page.getByLabel('人物设定内容').fill('旧资料经人工整理后保留。')
+  await page.getByRole('button', { name: '保存资料', exact: true }).click()
+  await expect.poll(() => state.project!.characters).toBe('旧资料经人工整理后保留。')
+  await page.getByRole('button', { name: '管理独立角色', exact: true }).click()
+  await expect(page.getByLabel('身份与背景')).toHaveValue('调查记者')
+  expect(state.characters[1].definition?.identity).toBe('修表匠')
 })
 
 test('character configuration preserves edits, validates knowledge and isolates works', async ({ page }, testInfo) => {
@@ -361,11 +493,12 @@ test('character configuration preserves edits, validates knowledge and isolates 
   await page.getByLabel('角色名称', { exact: true }).press('Control+s')
   await expect.poll(() => state.characters.length).toBe(1)
   expect(state.characters[0].enabled).toBe(true)
-  await expect(page.getByRole('button', { name: '许知夏 可参与创作' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '许知夏 可独立参与创作' })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('desktop-characters.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
   await page.screenshot({ path: testInfo.outputPath('mobile-characters.png'), fullPage: true })
+  await page.getByText('高级设置 · 补充指引与知识检索', { exact: true }).click()
   await page.getByLabel('角色 prompt', { exact: true }).fill('说话简短，先观察再行动。')
   await page.getByRole('button', { name: '保存角色', exact: true }).click()
   await expect.poll(() => state.characters[0].revision).toBe(2)
@@ -405,13 +538,14 @@ test('character scene and retrieval settings save together and remain isolated w
   state.characters.push(...['许知夏', '沈舟'].map((name, index) => ({ id: `character-${index + 1}`, project_id: 'work-1', name, prompt: '按自己的经历行动。', known_information: `${name}只知道自己经历的事。`, current_scene: '', retrieval_config: characterRetrievalConfig(), enabled: true, revision: 1, created_at: '2026-10-23T10:00:00Z' })))
   await page.getByRole('button', { name: '角色', exact: true }).click()
   await expect(page.getByLabel('角色名称', { exact: true })).toHaveValue('许知夏')
+  await page.getByText('高级设置 · 补充指引与知识检索', { exact: true }).click()
   await expect(page.getByText('服务尚未启用向量检索。开启此配置后暂取已知信息开头；当前可见场景始终保留。')).toBeVisible()
   await page.getByLabel('当前可见场景', { exact: true }).fill('站台只剩一盏灯，门外有人敲门。')
   await page.getByLabel('按当前场景检索角色已知信息').check()
   await page.getByLabel('角色召回数量（条）').fill('6')
   await page.getByLabel('角色知识文本预算（字符）').fill('2100')
   state.saveFails = true
-  await page.getByRole('button', { name: '沈舟 可参与创作', exact: true }).click()
+  await page.getByRole('button', { name: '沈舟 可独立参与创作', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('合成角色修改失败')
   await expect(page.getByLabel('当前可见场景', { exact: true })).toHaveValue('站台只剩一盏灯，门外有人敲门。')
@@ -432,11 +566,11 @@ test('character scene and retrieval settings save together and remain isolated w
   await expect(page.getByLabel('角色召回数量（条）')).toHaveValue('3')
   await expect(page.getByLabel('当前可见场景', { exact: true })).toHaveValue('站台只剩一盏灯，门外有人敲门。')
   expect(state.characters[0].retrieval_config.limit).toBe(6)
-  await page.getByRole('button', { name: '沈舟 可参与创作', exact: true }).click()
+  await page.getByRole('button', { name: '沈舟 可独立参与创作', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '放弃修改', exact: true }).click()
   await expect(page.getByLabel('当前可见场景', { exact: true })).toHaveValue('')
   await expect(page.getByLabel('角色召回数量（条）')).toHaveValue('3')
-  await page.getByRole('button', { name: '许知夏 可参与创作', exact: true }).click()
+  await page.getByRole('button', { name: '许知夏 可独立参与创作', exact: true }).click()
   await expect(page.getByLabel('角色召回数量（条）')).toHaveValue('6')
   await page.getByLabel('角色召回数量（条）').fill('9')
   await page.getByLabel('角色召回数量（条）').press('Control+s')
@@ -656,7 +790,8 @@ test('polling preserves edits, chapter and persona navigation protect input, rew
   await page.getByLabel('作品方向（已确认）').fill('尚未保存的共识。')
   await page.getByRole('button', { name: '人物设定', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
-  await expect(page.getByLabel('人物设定内容')).toBeVisible()
+  await expect(page.getByRole('region', { name: '作品角色配置' })).toBeVisible()
+  await expect(page.getByLabel('人物设定内容')).toHaveCount(0)
   expect(state.project!.agreement).toBe('尚未保存的共识。')
   await page.getByRole('button', { name: '正文', exact: true }).click()
   await expect(editor).toContainText('模型刚刚保存的新版。')
@@ -1071,4 +1206,69 @@ test('reading stays compact while library and task pages keep their own controls
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
   await expect(page.getByRole('button', { name: '性格与风格', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('mobile-clean-reading.png'), fullPage: true })
+})
+
+
+test('work refresh transfers summaries and reloads only a changed selected chapter', async ({ page }) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  const editor = page.getByRole('textbox', { name: '章节正文' })
+  await expect(editor).toContainText('她站在雨里的车站。')
+  state.chapters.push({ ...chapter(), id: 'chapter-2', title: '第二章', position: 2 })
+  const initialBodyReads = state.requests.filter(item => item.path === '/chapters/chapter-1').length
+  const initialProjectReads = state.requests.filter(item => item.path === '/projects/work-1').length
+  await page.clock.fastForward(5_100)
+  await expect(page.getByRole('button', { name: '第二章', exact: true })).toBeVisible()
+  await page.clock.fastForward(5_100)
+  expect(state.requests.filter(item => item.path === '/chapters/chapter-1')).toHaveLength(initialBodyReads)
+  expect(state.requests.filter(item => item.path === '/projects/work-1')).toHaveLength(initialProjectReads)
+  expect(state.requests.filter(item => item.path === '/projects' || item.path.endsWith('/chapters')).every(item => item.summary)).toBe(true)
+  expect(state.requests.filter(item => item.path === '/chapters/chapter-2')).toHaveLength(0)
+  state.chapters[0] = { ...state.chapters[0], version: 2, content: doc('正式采用的新正文。') }
+  await page.clock.fastForward(5_100)
+  await expect(editor).toContainText('正式采用的新正文。')
+  expect(state.requests.filter(item => item.path === '/chapters/chapter-1')).toHaveLength(initialBodyReads + 1)
+})
+
+test('a delayed chapter refresh cannot overwrite edits made while it is loading', async ({ page }) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  const editor = page.getByRole('textbox', { name: '章节正文' })
+  await expect(editor).toContainText('她站在雨里的车站。')
+  let release: (() => void) | undefined
+  let requested = false
+  await page.route('**/api/chapters/chapter-1', async route => {
+    if (route.request().method() !== 'GET') return route.fallback()
+    requested = true
+    await new Promise<void>(resolve => { release = resolve })
+    return route.fulfill({ json: { ...state.chapters[0], content: doc('迟到的远端正文。') } })
+  })
+  state.chapters[0].version = 2
+  await page.clock.fastForward(5_100)
+  await expect.poll(() => requested).toBe(true)
+  await editor.fill('这段正在编辑，不应被迟到响应替换。')
+  release!()
+  await expect(page.getByText('这一章已有新的正式内容。', { exact: false })).toBeVisible()
+  await expect(editor).toContainText('这段正在编辑，不应被迟到响应替换。')
+})
+
+
+test('hidden work pages stop polling and refresh immediately when visible', async ({ page }) => {
+  await page.clock.install()
+  const state = await stubStudy(page, true)
+  const editor = page.getByRole('textbox', { name: '章节正文' })
+  await expect(editor).toContainText('她站在雨里的车站。')
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: true })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  const reads = state.requests.filter(item => item.path === '/projects').length
+  await page.clock.fastForward(60_000)
+  expect(state.requests.filter(item => item.path === '/projects')).toHaveLength(reads)
+  state.chapters[0] = { ...state.chapters[0], version: 2, content: doc('返回页面后显示的新正文。') }
+  await page.evaluate(() => {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: false })
+    document.dispatchEvent(new Event('visibilitychange'))
+  })
+  await expect(editor).toContainText('返回页面后显示的新正文。')
 })

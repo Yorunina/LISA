@@ -13,7 +13,7 @@ from lisa.author import _snapshot, execute_author
 from lisa.chat import claim_outbound, execute_chat, finish_delivery, ingest_message
 from lisa.dialogue import Conversation, Dialogue
 from lisa.life import LifeCandidate, LifeMention
-from lisa.models import Chapter, ChapterVersion, Memory, OutboundMessage, Project, Task
+from lisa.models import Chapter, ChapterVersion, ChatMessage, Memory, OutboundMessage, Project, Task
 
 EVENT = "下午在旧书店买了一本有批注的诗集。"
 OCCURRED = datetime(2026, 1, 10, 7, 0, tzinfo=UTC)
@@ -63,6 +63,28 @@ def chat(db, number, content="今天怎么样？"):
     )
     db.commit()
     return task_id
+
+
+@pytest.mark.asyncio
+async def test_cancelled_tail_is_not_marked_as_shared_when_inflight_head_succeeds(
+    settings, engine, db, client, owner,
+):
+    task_id = chat(db, 901)
+
+    async def generate(*args):
+        return Conversation(reply="今天去逛书店了。\n" + EVENT,
+                            messages=["今天去逛书店了。", EVENT], life_events=[event()])
+
+    await execute_chat(settings, engine, task_id, generate=generate)
+    first = claim_outbound(db, "720000001")
+    first_id = first.id
+    db.commit()
+    chat(db, 902, content="我想换个话题")
+    finish_delivery(db, first_id, "sent", "synthetic-first-part")
+    db.commit()
+    db.expire_all()
+    item = db.scalar(select(Memory).where(Memory.kind == "life"))
+    assert item is not None and item.shared_at is None
 
 
 @pytest.mark.asyncio
@@ -132,7 +154,8 @@ async def test_chat_life_exists_before_delivery_and_becomes_diary_context(
     db.expire_all()
     item = db.scalar(select(Memory).where(Memory.kind == "life"))
     assert item is not None and item.shared_at is None
-    assert item.source_message_id is not None
+    assert item.source_message_id is None and item.source_task_id == chat_id
+    assert db.scalar(select(ChatMessage.id).where(ChatMessage.task_id == chat_id)) is None
     assert db.scalar(select(Project)) is None  # A life event never creates an extra diary project.
     response = client.post(
         "/api/projects",

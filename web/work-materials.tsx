@@ -3,6 +3,7 @@ import type { Ref } from 'react';
 import { request } from './api';
 import type { StyleLibrary, WritingStyle } from './api';
 import { ErrorNotice } from './ui';
+import { ItemTextEditor, readItems } from './material-text';
 
 export function GuidedField({ id, label, hint, placeholder, example, value, busy, onChange, rows = 5 }: { id: string; label: string; hint: string; placeholder: string; example: string; value: string; busy: boolean; onChange: (value: string) => void; rows?: number }) {
   return <div className="field guided-field"><label htmlFor={id}>{label}</label><p className="field-hint" id={`${id}-hint`}>{hint}</p><textarea id={id} aria-describedby={`${id}-hint`} rows={rows} maxLength={12000} value={value} placeholder={placeholder} disabled={busy} onChange={event => onChange(event.target.value)} /><details className="field-example"><summary>看一个填写示例</summary><p>{example}</p><button className="text-button" type="button" disabled={busy || !!value.trim()} onClick={() => onChange(example)}>填入此示例</button>{!!value.trim() && <span className="field-hint">已有内容时仅供参考。</span>}</details></div>;
@@ -11,14 +12,20 @@ export function GuidedField({ id, label, hint, placeholder, example, value, busy
 export function RequirementsForm({ direction, constraints, busy, onDirection, onConstraints }: { direction: string; constraints: string; busy: boolean; onDirection: (value: string) => void; onConstraints: (value: string) => void }) {
   return <div className="guided-materials"><p className="material-intro">先说清故事要往哪里走。只填写已经确定的内容，其余可以留空；文字风格在「写作风格」单独设置。</p>
     <GuidedField id="work-direction" label="作品方向（已确认）" hint="写什么故事、围绕谁、主要矛盾是什么？保存后视为已确认的创作方向。" placeholder="例如：现实悬疑，围绕一封迟来的信展开。主角寻找寄信人，逐渐发现旧友隐瞒的往事。" example="写一部现实悬疑小说。主角收到一封迟来的信，循着线索寻找寄信人，逐渐发现旧友隐瞒的往事。" value={direction} busy={busy} onChange={onDirection} />
-    <GuidedField id="work-constraints" label="必须遵守（可选）" hint="只写不可违背的要求或禁区，建议每行一条。一般喜好放在「讨论记录」。" placeholder={'不得出现超自然力量。\n必须保留主角与旧友的核心关系。'} example={'不得出现超自然力量。\n主角不能靠偶然获得关键答案。'} value={constraints} busy={busy} onChange={onConstraints} rows={4} />
+    <ItemTextEditor title="必须遵守（可选）" singular="约束" hint="每条只写一项不可违背的要求。一般喜好放在讨论记录。" placeholder="例如：主角不能靠偶然获得关键答案。" rawLabel="必须遵守（可选）" value={constraints} busy={busy} onChange={onConstraints} />
   </div>;
+}
+
+function discussionPreview(text: string, singular: string) {
+  const parts = readItems(text, singular);
+  const content = [parts.legacy, ...parts.values].filter(item => item.trim()).join(' · ');
+  return content.slice(0, 100) + (content.length > 100 ? '…' : '');
 }
 
 export function DiscussionForm({ preferences, tentative, busy, onPreferences, onTentative }: { preferences: string; tentative: string; busy: boolean; onPreferences: (value: string) => void; onTentative: (value: string) => void }) {
   return <div className="guided-materials"><p className="material-intro">留住交流中的倾向和未定想法。这里的内容不会自动成为已确认要求；确定后，请整理到「创作要求」。</p>
-    <details className="discussion-section"><summary><strong>偏好倾向</strong><span className="material-label">仅供参考</span><span>{preferences.trim() ? '已有记录' : '可留空'}</span></summary><p className="discussion-preview">{preferences.trim() ? preferences.slice(0, 100) + (preferences.length > 100 ? '…' : '') : '例如：似乎更喜欢克制的对白，但还没有确定。'}</p><GuidedField id="work-preferences" label="偏好倾向内容" hint="可以写喜欢或不喜欢什么，也可纠正 LISA 的推测。注明是否只是当前倾向。" placeholder="我目前更喜欢缓慢展开、对白克制的写法；需要时可以调整。" example="目前更偏好缓慢展开、对白克制的故事，但不要求每一场都如此。" value={preferences} busy={busy} onChange={onPreferences} rows={4} /></details>
-    <details className="discussion-section"><summary><strong>待确认想法</strong><span className="material-label">尚未决定</span><span>{tentative.trim() ? '已有记录' : '可留空'}</span></summary><p className="discussion-preview">{tentative.trim() ? tentative.slice(0, 100) + (tentative.length > 100 ? '…' : '') : '例如：寄信人是否设为旧友，留待后续商量。'}</p><GuidedField id="work-tentative" label="待确认想法内容" hint="写清尚未决定的问题或备选方案。不要将已发生的剧情放在这里。" placeholder="寄信人可能是旧友，也可能是旧友的家人，尚未决定。" example="寄信人是否设为主角的旧友？目前保留这一可能，等线索确定后再决定。" value={tentative} busy={busy} onChange={onTentative} rows={4} /></details>
+    <details className="discussion-section"><summary><strong>偏好倾向</strong><span className="material-label">仅供参考</span><span>{preferences.trim() ? '已有记录' : '可留空'}</span></summary><p className="discussion-preview">{preferences.trim() ? discussionPreview(preferences, '偏好') : '例如：似乎更喜欢克制的对白，但还没有确定。'}</p><ItemTextEditor title="偏好条目" singular="偏好" hint="仅供参考，不会自动升级为明确约束。" placeholder="例如：目前更偏好克制对白，但不要求每场都如此。" rawLabel="偏好倾向内容" value={preferences} busy={busy} onChange={onPreferences} /></details>
+    <details className="discussion-section"><summary><strong>待确认想法</strong><span className="material-label">尚未决定</span><span>{tentative.trim() ? '已有记录' : '可留空'}</span></summary><p className="discussion-preview">{tentative.trim() ? discussionPreview(tentative, '想法') : '例如：寄信人是否设为旧友，留待后续商量。'}</p><ItemTextEditor title="待确认条目" singular="想法" hint="尚未决定；保存不代表授权推进依赖该想法的剧情。" placeholder="例如：寄信人是否设为旧友？仍需商量。" rawLabel="待确认想法内容" value={tentative} busy={busy} onChange={onTentative} /></details>
   </div>;
 }
 

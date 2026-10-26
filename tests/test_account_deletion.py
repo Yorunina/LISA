@@ -145,7 +145,7 @@ def test_delete_cleans_owned_data_and_preserves_other_users_and_budget(
             ServiceEvent(
                 id="delete-account-event",
                 bot_id="910000001",
-                message_id="delete-account",
+                message_id="delete-account-service",
                 qq_id=QQ,
                 sent_at=now,
             ),

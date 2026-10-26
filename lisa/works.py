@@ -1,4 +1,5 @@
 import re
+from collections import defaultdict
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -9,7 +10,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, func, select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB, current_user
@@ -343,6 +344,16 @@ class ProjectUpdate(BaseModel):
         return validate_entries(value)
 
 
+class ProjectSummary(BaseModel):
+    material_revision: str
+    id: UUID
+    title: str
+    kind: str
+    is_current: bool
+    completed: bool
+    index_revision: int
+
+
 class ProjectView(ProjectUpdate):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
@@ -388,6 +399,13 @@ class ChapterInput(BaseModel):
         if value["type"] != "doc":
             raise ValueError("Expected a Tiptap document")
         return value
+
+
+class ChapterSummary(BaseModel):
+    id: UUID
+    title: str
+    position: int
+    version: int
 
 
 class ChapterView(ChapterInput):
@@ -448,8 +466,9 @@ class HandoffView(BaseModel):
     finishing_tasks: list[FinishingTaskView]
 
 
-def task_view(db: Session, task: Task) -> TaskView:
-    calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task.id)).all()
+def task_view(db: Session, task: Task, *, calls=None) -> TaskView:
+    if calls is None:
+        calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task.id)).all()
     unresolved = any(call.state in {"reserved", "unknown"} for call in calls)
     return TaskView(
         **{
@@ -485,11 +504,33 @@ def task_view(db: Session, task: Task) -> TaskView:
     )
 
 
-@router.get("/api/projects", response_model=list[ProjectView])
-def list_projects(user: User, db: DB):
-    return db.scalars(
+def task_views(db: Session, tasks: list[Task]) -> list[TaskView]:
+    """Load the ledger once for a list, including tasks without any calls."""
+    calls_by_task = defaultdict(list)
+    if tasks:
+        for call in db.scalars(select(ModelCall).where(ModelCall.task_id.in_(
+            [task.id for task in tasks]
+        ))):
+            calls_by_task[call.task_id].append(call)
+    return [task_view(db, task, calls=calls_by_task[task.id]) for task in tasks]
+
+
+@router.get("/api/projects", response_model=list[ProjectView | ProjectSummary])
+def list_projects(user: User, db: DB, summary: bool = False):
+    if summary:
+        rows = db.execute(select(
+            Project.id, Project.title, Project.kind, Project.is_current,
+            Project.completed, Project.index_revision,
+            # Search revision deliberately excludes fixed author context. This read-only
+            # fingerprint covers every material field without invalidating search indexes.
+            func.md5(cast(func.jsonb_build_array(*[
+                getattr(Project, name) for name in ProjectUpdate.model_fields
+            ]), Text)).label("material_revision"),
+        ).where(Project.user_id == user.id).order_by(Project.created_at)).mappings()
+        return [ProjectSummary(**row) for row in rows]
+    return [ProjectView.model_validate(item) for item in db.scalars(
         select(Project).where(Project.user_id == user.id).order_by(Project.created_at)
-    ).all()
+    )]
 
 
 @router.post("/api/projects", response_model=ProjectView, status_code=201)
@@ -532,8 +573,8 @@ def get_handoff(user: User, db: DB):
     ).all()
     return HandoffView(
         finishing_tasks=[
-            FinishingTaskView(**task_view(db, task).model_dump(), project_title=title)
-            for task, title in rows
+            FinishingTaskView(**view.model_dump(), project_title=title)
+            for view, (_, title) in zip(task_views(db, [task for task, _ in rows]), rows)
         ]
     )
 
@@ -597,8 +638,19 @@ def update_project(project_id: UUID, body: ProjectUpdate, user: User, db: DB):
     return project
 
 
-@router.get("/api/projects/{project_id}/chapters", response_model=list[ChapterView])
-def list_chapters(project_id: UUID, user: User, db: DB):
+@router.get(
+    "/api/projects/{project_id}/chapters", response_model=list[ChapterView | ChapterSummary]
+)
+def list_chapters(project_id: UUID, user: User, db: DB, summary: bool = False):
+    if summary:
+        if db.scalar(select(Project.id).where(
+            Project.id == project_id, Project.user_id == user.id
+        )) is None:
+            raise HTTPException(404, "作品不存在。")
+        rows = db.execute(select(
+            Chapter.id, Chapter.title, Chapter.position, Chapter.version,
+        ).where(Chapter.project_id == project_id).order_by(Chapter.position)).mappings()
+        return [ChapterSummary(**row) for row in rows]
     project = require_project(db, user, project_id)
     return [
         chapter_view(chapter)
@@ -717,7 +769,7 @@ def list_tasks(project_id: UUID, user: User, db: DB):
         .order_by(Task.created_at.desc())
         .limit(50)
     )
-    return [task_view(db, task) for task in tasks]
+    return task_views(db, list(tasks))
 
 
 def require_writing_task(

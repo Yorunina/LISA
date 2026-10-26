@@ -50,9 +50,12 @@ class Settings(BaseSettings):
     model_task_usd: Decimal = Field(default=Decimal("0.15"), gt=0)
     model_input_per_million: Decimal = Field(default=Decimal("2"), gt=0)
     model_output_per_million: Decimal = Field(default=Decimal("10"), gt=0)
+    # Conservative application cap in serialized UTF-8 bytes. The provider
+    # model supports a much larger token window; this protects cost and latency.
+    model_max_input_bytes: int = Field(default=64_000, ge=16_000, le=4_194_304)
     model_max_output_tokens: int = Field(default=600, ge=64, le=4096)
     model_concurrency: int = Field(default=1, ge=1, le=8)
-    model_timeout_seconds: float = Field(default=60, gt=0, le=180)
+    model_timeout_seconds: float = Field(default=120, gt=0, le=180)
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")

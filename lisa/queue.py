@@ -1,17 +1,22 @@
 import json
+import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from time import perf_counter
+from uuid import UUID
 
 import procrastinate
 from procrastinate.exceptions import JobRetry
 from procrastinate.retry import BaseRetryStrategy
-from sqlalchemy import text
+from sqlalchemy import select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from lisa.retrieval import indexing_enabled
 from lisa.settings import Settings
 
 CHAT_SILENCE_SECONDS = 10
+logger = logging.getLogger(__name__)
 
 
 class ExplicitRetry(BaseRetryStrategy):
@@ -35,7 +40,39 @@ def _execution_engine(settings, key):
 
 async def _execute_task(settings, task_id, execute):
     with _execution_engine(settings, task_id) as engine:
-        await execute(settings, engine, task_id)
+        started = perf_counter()
+        _log_task_wait(engine, task_id)
+        outcome = "returned"
+        try:
+            await execute(settings, engine, task_id)
+        except BaseException as exc:
+            # No exception text: provider/SQL errors can contain private values.
+            outcome = type(exc).__name__
+            raise
+        finally:
+            logger.info(
+                "task=%s execution_ms=%.1f outcome=%s",
+                task_id, (perf_counter() - started) * 1000, outcome,
+            )
+
+
+def _log_task_wait(engine, task_id):
+    from lisa.models import Task
+
+    try:
+        with Session(engine) as db:
+            row = db.execute(
+                select(Task.kind, Task.created_at).where(Task.id == UUID(str(task_id)))
+            ).one_or_none()
+            if row:
+                logger.info(
+                    "task=%s kind=%s task_age_ms=%.1f",
+                    task_id, row.kind,
+                    max(0, (datetime.now(UTC) - row.created_at).total_seconds() * 1000),
+                )
+    except (SQLAlchemyError, ValueError):
+        # Observability must not change task execution or expose SQL parameters.
+        logger.warning("task=%s queue_timing_unavailable", task_id)
 
 
 def create_queue(settings: Settings | None = None) -> procrastinate.App:
@@ -130,6 +167,12 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
 
         await _execute_task(settings, task_id, execute_contact)
 
+    @app.task(name="lisa.life_plan", queue="lisa", retry=ExplicitRetry())
+    async def life_plan_task(task_id: str):
+        from lisa.life_plans import execute_life_plan
+
+        await _execute_task(settings, task_id, execute_life_plan)
+
     @app.task(name="lisa.contact_sweep", queue="lisa", lock="contact-sweep")
     def contact_sweep(timestamp: int):
         if not settings.proactive_enabled:
@@ -181,6 +224,10 @@ def reschedule_chat(db: Session, job_id: int, *, until: datetime) -> None:
 
 def enqueue_contact(db: Session, task_id, user_id) -> int:
     return _enqueue(db, task_id, "lisa.contact", "lisa", f"chat:{user_id}")
+
+
+def enqueue_life_plan(db: Session, task_id, user_id) -> int:
+    return _enqueue(db, task_id, "lisa.life_plan", "lisa", f"life-plan:{user_id}")
 
 
 def enqueue_author(db: Session, task_id, user_id) -> int:

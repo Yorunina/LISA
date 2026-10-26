@@ -10,17 +10,19 @@ import { RetrievalEditor, TaskReferences } from './retrieval';
 import type { RetrievalView } from './retrieval';
 import { ErrorNotice } from './ui';
 import { ShareWork } from './sharing';
+import { pollWhileVisible } from './polling';
 import { CharacterEditor, TaskCharacters, characterDraft, newCharacter } from './characters';
 import type { Character, CharacterDefaults, CharacterDraft } from './characters';
 import { PlotStateGuide, WorldbookEditor } from './worldbook';
+import { SectionTextEditor, plotFields, writingFields, readItems } from './material-text';
 import type { WorldbookEntry } from './worldbook';
-import { DiscussionForm, GuidedField, RequirementsForm, WorkStylePicker } from './work-materials';
+import { DiscussionForm, RequirementsForm, WorkStylePicker } from './work-materials';
 import type { WorkStyleHandle } from './work-materials';
 
 const materials = [
   ['agreement', '创作要求', '确定故事的方向，以及必须遵守的要求。'],
   ['worldbook', '世界书', '故事的世界、背景与基本规则。'],
-  ['characters', '人物设定', '作品中的人物、动机与关系。'],
+  ['characters', '人物设定', '旧版人物资料，待逐个整理为独立角色。'],
   ['author_prompt', '写作风格', '选择已保存的风格，再补充本作品独有的写法。'],
   ['summary', '作品摘要', '已经发生的主要故事。'],
   ['plot_state', '剧情状态', '当前进展、悬念与待处理线索。'],
@@ -31,7 +33,9 @@ const workTabs: [WorkTab, string][] = [['body', '正文'], ['materials', '创作
 
 type MaterialPage = typeof materials[number][0];
 type MaterialKey = MaterialPage | 'constraints' | 'tentative';
-type Project = Record<MaterialKey, string> & { id: string; title: string; kind: string; is_current: boolean; completed: boolean; worldbook_entries?: WorldbookEntry[] };
+type ProjectSummary = { id: string; title: string; kind: string; is_current: boolean; completed: boolean; index_revision: number; material_revision?: string };
+type Project = Record<MaterialKey, string> & ProjectSummary & { worldbook_entries?: WorldbookEntry[] };
+type ChapterSummary = Pick<Chapter, 'id' | 'title' | 'version' | 'position'>;
 type Task = { id: string; kind: string; goal: string; status: string; error: string | null; can_cancel: boolean; can_retry: boolean; input_tokens: number; output_tokens: number; charged_usd: string | number; reserved_usd: string | number; adopted_at: string | null };
 type FinishingTask = Task & { project_id: string; project_title: string };
 type Schedule = { enabled: boolean; status: 'no_plan' | 'scheduled' | 'paused' | 'waiting' | 'disabled'; pause_reason: string | null; due_at: string | null; goal: string | null; project_id: string | null; remaining_scenes: number };
@@ -44,7 +48,7 @@ const taskErrors: Record<string, string> = {
   agreement_required: '请先保存已确认共识，再开始写作。',
   autonomous_paused: '自主创作已暂停，当前任务未开始。',
   target_changed: '原文片段已改变，请重新选择后发起重写。',
-  context_changed: '记忆或聊天记录已更新，这次结果未保存；可用最新资料重试。',
+  context_changed: '记忆已更新，这次结果未保存；可用最新资料重试。',
   writing_scope_exceeded: '生成内容超出本次范围，原文保留。',
   model_busy: '创作服务暂时繁忙，请稍后重试。',
   budget_exhausted: '可用额度已用尽，本次创作已停止。',
@@ -86,16 +90,24 @@ function ScheduleNote({ schedule, failed, projectId, compact = false }: { schedu
 
 export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandle>; onStyles: (projectId: string) => void; initialProjectId?: string | null }) {
   const [project, setProject] = useState<Project | null>(null);
-  const [projects, setProjects] = useState<Project[]>([]);
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [finishingTasks, setFinishingTasks] = useState<FinishingTask[]>([]);
   const currentProject = useRef<Project | null>(null);
+  const viewEpoch = useRef(0);
+  const materialRevision = useRef<string | undefined>(undefined);
+  const lifetime = useRef<AbortController | null>(null);
+  useEffect(() => {
+    lifetime.current = new AbortController();
+    return () => { viewEpoch.current += 1; lifetime.current?.abort(); };
+  }, []);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newKind, setNewKind] = useState<'novel' | 'diary'>('novel');
-  const [chapters, setChapters] = useState<Chapter[]>([]);
+  const [chapters, setChapters] = useState<ChapterSummary[]>([]);
   const [chapter, setChapter] = useState<Chapter | null>(null);
+  const [chapterLoading, setChapterLoading] = useState(false);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState<JSONContent>(emptyDoc);
   const [tab, setTab] = useState<WorkTab>('body');
@@ -135,21 +147,34 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   const pending = useRef<(() => void) | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const dirty = charactersOpen ? !!roleDraft && JSON.stringify(roleDraft) !== characterBaseline : retrievalOpen ? !!retrieval && JSON.stringify(retrieval.config) !== retrievalBaseline : (tab === 'body' || tab === 'materials') && (material ? draft !== materialBaseline || secondaryDraft !== secondaryBaseline || (material === 'author_prompt' && styleDirty) || (material === 'worldbook' && JSON.stringify(settingEntries) !== settingBaseline) : !!chapter && (title !== chapter.title || JSON.stringify(content) !== JSON.stringify(chapter.content)));
-  const latest = useRef({ dirty, chapter, material });
-  latest.current = { dirty, chapter, material };
+  const latest = useRef({ dirty, chapter, material, busy });
+  latest.current = { dirty, chapter, material, busy };
   const editor = useEditor({ extensions: [StarterKit], content: emptyDoc, editorProps: { attributes: { 'aria-label': '章节正文', role: 'textbox', 'aria-multiline': 'true' } }, onUpdate: ({ editor: current }) => { setContent(current.getJSON()); setSaved(false); } });
   useEffect(() => { editor?.setEditable(!busy, false); }, [editor, busy]);
 
   function failure(cause: unknown) { setError(cause instanceof Error ? cause.message : '操作失败，请重试。'); }
   function updateProject(next: Project | null) { currentProject.current = next; setProject(next); }
-  function openProject(next: Project | null) {
+  async function openProject(summary: ProjectSummary | null) {
+    const epoch = ++viewEpoch.current;
+    const previousProject = currentProject.current;
+    currentProject.current = null;
+    setLoading(true); setError('');
+    let next: Project | null = null;
+    try {
+      if (summary) next = await request<Project>(`/projects/${summary.id}`, undefined, undefined, { signal: lifetime.current?.signal });
+      if (epoch !== viewEpoch.current) return;
+    } catch (cause) { if (epoch === viewEpoch.current) { currentProject.current = previousProject; failure(cause); } return; }
+    finally { if (epoch === viewEpoch.current) setLoading(false); }
+
+    materialRevision.current = summary?.material_revision;
     setTab('body'); setCharacters(null); setRoleDraft(null); setRetrieval(null); setExported(false);
-    updateProject(next); setChapter(null); setChapters([]); setTasks([]); setMaterial(null);
+    updateProject(next); setChapter(null); setChapterLoading(false); setChapters([]); setTasks([]); setMaterial(null);
     setTitle(''); setContent(emptyDoc); setDraft(''); setMaterialBaseline(''); setSaved(false);
     setSecondaryDraft(''); setSecondaryBaseline(''); setStyleDirty(false);
     setGoal(''); setTargetText(''); setKind(next?.completed ? 'rewrite' : 'scene'); setError(''); setPollError('');
   }
   function openMaterial(key: MaterialPage) {
+    viewEpoch.current += 1;
     const text = currentProject.current![key];
     setTab('materials'); setMaterial(key); setDraft(text); setMaterialBaseline(text); setSaved(false);
     const secondary = key === 'agreement' ? currentProject.current!.constraints : key === 'preferences' ? currentProject.current!.tentative : '';
@@ -162,8 +187,24 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
     setCharacterId(next?.id ?? null); setRoleDraft(value); setCharacterBaseline(JSON.stringify(value)); setSaved(false); setError('');
   }
   function openChapter(next: Chapter) {
+    viewEpoch.current += 1;
     setChapter(next); setTitle(next.title); setContent(next.content); setMaterial(null); setSaved(false); setTargetText('');
     editor?.commands.setContent(next.content, { emitUpdate: false });
+  }
+  async function selectChapter(summary: ChapterSummary) {
+    const cached = latest.current.chapter;
+    if (cached?.id === summary.id && cached.version === summary.version) {
+      openChapter(cached);
+      return;
+    }
+    const projectId = currentProject.current?.id;
+    const epoch = ++viewEpoch.current;
+    setChapterLoading(true); setBusy(true); setError('');
+    try {
+      const next = await request<Chapter>(`/chapters/${summary.id}`, undefined, undefined, { signal: lifetime.current?.signal });
+      if (viewEpoch.current === epoch && currentProject.current?.id === projectId) openChapter(next);
+    } catch (cause) { if (viewEpoch.current === epoch) failure(cause); }
+    finally { if (viewEpoch.current === epoch || viewEpoch.current === epoch + 1) { setBusy(false); setChapterLoading(false); } }
   }
   function requestLeave(action: () => void) {
     if (busy) return;
@@ -180,7 +221,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
       setMaterial(null);
       if (next === 'body') {
         const savedChapter = chapters.find(item => item.id === chapter?.id) ?? chapters[0];
-        if (savedChapter) openChapter(savedChapter);
+        if (savedChapter) void selectChapter(savedChapter);
       }
       setTab(next);
     });
@@ -189,8 +230,8 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   async function load() {
     setLoading(true); setError('');
     try {
-      const list = await request<Project[]>('/projects');
-      setProjects(list); openProject(list.find(item => item.id === initialProjectId) ?? list.find(item => item.is_current) ?? list[0] ?? null);
+      const list = await request<ProjectSummary[]>('/projects?summary=true', undefined, undefined, { signal: lifetime.current?.signal });
+      setProjects(list); await openProject(list.find(item => item.id === initialProjectId) ?? list.find(item => item.is_current) ?? list[0] ?? null);
     } catch (cause) { failure(cause); }
     finally { setLoading(false); }
   }
@@ -216,16 +257,22 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   useEffect(() => {
     if (!project) return;
     let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function refresh() {
+    async function refresh(signal: AbortSignal) {
+      const epoch = viewEpoch.current;
       try {
         const [nextProjects, nextChapters, nextTasks, handoff] = await Promise.all([
-          request<Project[]>('/projects'),
-          request<Chapter[]>(`/projects/${project!.id}/chapters`), request<Task[]>(`/projects/${project!.id}/tasks`),
-          request<{ finishing_tasks: FinishingTask[] }>('/projects/handoff'),
+          request<ProjectSummary[]>('/projects?summary=true', undefined, undefined, { signal }),
+          request<ChapterSummary[]>(`/projects/${project!.id}/chapters?summary=true`, undefined, undefined, { signal }), request<Task[]>(`/projects/${project!.id}/tasks`, undefined, undefined, { signal }),
+          request<{ finishing_tasks: FinishingTask[] }>('/projects/handoff', undefined, undefined, { signal }),
         ]);
-        if (!active || currentProject.current?.id !== project!.id) return;
-        const nextProject = nextProjects.find(item => item.id === project!.id)!;
+        if (!active || currentProject.current?.id !== project!.id || epoch !== viewEpoch.current || latest.current.busy) return;
+        const summary = nextProjects.find(item => item.id === project!.id);
+        if (!summary) throw new Error('作品已不可用。');
+        const previous = currentProject.current;
+        const nextProject = summary.material_revision !== materialRevision.current
+          ? await request<Project>(`/projects/${summary.id}`, undefined, undefined, { signal }) : { ...previous, ...summary };
+        if (!active || currentProject.current?.id !== project!.id || epoch !== viewEpoch.current || latest.current.busy) return;
+        materialRevision.current = summary.material_revision;
         setProjects(nextProjects); setFinishingTasks(handoff.finishing_tasks);
         updateProject(nextProject); setChapters(nextChapters); setTasks(nextTasks); setPollError('');
         const current = latest.current;
@@ -239,29 +286,31 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
         }
         const updated = nextChapters.find(item => item.id === current.chapter?.id);
         if (!current.dirty && !current.material && (!current.chapter || (updated && updated.version !== current.chapter.version))) {
-          const next = updated ?? nextChapters[0];
-          if (next) openChapter(next);
+          const summary = updated ?? nextChapters[0];
+          if (summary) {
+            const next = await request<Chapter>(`/chapters/${summary.id}`, undefined, undefined, { signal });
+            // A response cannot replace a newer selection, edit, or explicit save.
+            if (active && epoch === viewEpoch.current && currentProject.current?.id === project!.id && !latest.current.dirty && !latest.current.busy && !latest.current.material) openChapter(next);
+          }
         }
       } catch { if (active) setPollError('暂时无法刷新作品资料、章节与任务状态，稍后自动重试。当前编辑内容仍保留。'); }
-      finally { if (active) timer = setTimeout(refresh, 5_000); }
     }
-    void refresh();
-    return () => { active = false; clearTimeout(timer); };
+    const stop = pollWhileVisible(refresh);
+    return () => { active = false; stop(); };
   }, [project?.id, editor]);
   useEffect(() => {
     if (!project) return;
     let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function refreshSchedule() {
+    async function refreshSchedule(signal: AbortSignal) {
       try {
-        const next = await request<Schedule>('/schedule');
+        const next = await request<Schedule>('/schedule', undefined, undefined, { signal });
         if (active) { setSchedule(next); setScheduleError(false); }
       } catch { if (active) setScheduleError(true); }
-      finally { if (active) timer = setTimeout(refreshSchedule, 5_000); }
+
     }
     setSchedule(null); setScheduleError(false);
-    void refreshSchedule();
-    return () => { active = false; clearTimeout(timer); };
+    const stop = pollWhileVisible(refreshSchedule);
+    return () => { active = false; stop(); };
   }, [project?.id]);
   useEffect(() => {
     if (!dirty) return;
@@ -282,14 +331,20 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
 
   async function save() {
     if (!project || tab === 'tasks' || tab === 'library' || (charactersOpen ? !roleDraft : retrievalOpen ? !retrieval : !material && !chapter)) return false;
+    const lists: [string, string, string][] = material === 'worldbook' ? [[draft, '规则', '核心规则']] : material === 'agreement' ? [[secondaryDraft, '约束', '必须遵守']] : material === 'preferences' ? [[draft, '偏好', '偏好倾向'], [secondaryDraft, '想法', '待确认想法']] : [];
+    for (const [text, singular, label] of lists) {
+      if (readItems(text, singular).values.some(item => !item.trim())) { setError(`请填写每条${label}，或移除空条目。`); return false; }
+    }
+    if (material && (draft.length > (material === 'worldbook' || material === 'characters' ? 30000 : 12000) || secondaryDraft.length > 12000)) { setError('资料超过字符上限，请缩减原有文字或条目后再保存。'); return false; }
     if (material === 'worldbook' && settingEntries.some(item => !item.title.trim() || !item.content.trim())) { setError('请填写每条设定的标题和正文，或删除空条目。'); return false; }
     if (retrievalOpen && retrieval && (!Number.isInteger(retrieval.config.limit) || retrieval.config.limit < 1 || retrieval.config.limit > 12 || !Number.isInteger(retrieval.config.max_chars) || retrieval.config.max_chars < 300 || retrieval.config.max_chars > 6000)) { setError('召回数量须为 1–12 的整数，文本预算须为 300–6000 的整数。'); return false; }
-    if (charactersOpen && roleDraft && (!roleDraft.name.trim() || !roleDraft.prompt.trim() || (roleDraft.enabled && !roleDraft.known_information.trim()))) { setError('请填写角色名称与 prompt；启用角色前必须填写已知信息。'); return false; }
+    if (charactersOpen && roleDraft && (!roleDraft.name.trim() || !roleDraft.prompt.trim() || (roleDraft.enabled && !roleDraft.known_information.trim()))) { setError('请填写角色名称与高级设置中的补充指引；启用角色前必须填写已知信息。'); return false; }
     if (charactersOpen && roleDraft) {
       const config = roleDraft.retrieval_config;
       if (!Number.isInteger(config.limit) || config.limit < 1 || config.limit > 8 || !Number.isInteger(config.max_chars) || config.max_chars < 300 || config.max_chars > 3000) { setError('角色召回数量须为 1–8 的整数，知识文本预算须为 300–3000 的整数。'); return false; }
     }
     if (!charactersOpen && !retrievalOpen && !material && !title.trim()) { setError('请填写章节标题。'); return false; }
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     let materialSaved = false;
     try {
@@ -308,6 +363,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
         if (material === 'worldbook' && JSON.stringify(settingEntries) !== settingBaseline) changes.worldbook_entries = settingEntries;
         if (Object.keys(changes).length) {
           const next = await request<Project>(`/projects/${project.id}`, changes, 'PUT');
+          materialRevision.current = undefined;
           updateProject(next); setDraft(next[material]); setMaterialBaseline(next[material]);
           const secondary = secondaryKey ? next[secondaryKey] : '';
           setSecondaryDraft(secondary); setSecondaryBaseline(secondary);
@@ -325,6 +381,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   }
   async function deleteCharacter() {
     if (!characterId) return false;
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       await request(`/characters/${characterId}`, undefined, 'DELETE');
@@ -339,6 +396,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
     pending.current?.(); pending.current = null;
   }
   async function createProject() {
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       const next = await request<Project>('/projects', { title: newTitle, kind: newKind });
@@ -361,6 +419,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   }
   async function changeProjectState(action: 'activate' | 'complete') {
     if (!project) return;
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       const next = await request<Project>(`/projects/${project.id}/${action}`, {});
@@ -373,6 +432,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
     finally { setBusy(false); }
   }
   async function cancelFinishingTask(task: FinishingTask) {
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       const next = await request<Task>(`/tasks/${task.id}/cancel`, {});
@@ -383,6 +443,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
   }
   async function startTask() {
     if (!project) return;
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       const next = await request<Task>(`/projects/${project.id}/tasks`, { kind, goal, ...(kind === 'rewrite' ? { chapter_id: chapter?.id, target_text: targetText } : {}) });
@@ -391,6 +452,7 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
     finally { setBusy(false); }
   }
   async function taskAction(task: Task, action: 'cancel' | 'retry') {
+    viewEpoch.current += 1;
     setBusy(true); setError('');
     try {
       const next = await request<Task>(`/tasks/${task.id}/${action}`, {});
@@ -436,11 +498,11 @@ export function Works({ ref, onStyles, initialProjectId }: { ref: Ref<WorksHandl
       {remoteChanged && dirty && <p className="work-warning" role="status">这一章已有新的正式内容。当前未保存修改仍在这里；保存将以你的编辑为准，放弃修改后可查看新内容。</p>}
       {tab === 'tasks' ? <div className="task-workspace">        <section className="generation-panel" aria-labelledby="generation-title"><p className="eyebrow">与 LISA 一起写</p><h2 id="generation-title">{isDiary ? '下一段日记' : '下一段故事'}</h2><form onSubmit={event => { event.preventDefault(); void startTask(); }}><div className="field"><label htmlFor="task-kind">创作方式</label><select disabled={busy} id="task-kind" value={kind} onChange={event => setKind(event.target.value as 'scene' | 'rewrite')}><option value="scene" disabled={project.completed}>{isDiary ? '写一段日记' : '写一个场景'}</option><option value="rewrite" disabled={!chapter}>局部重写</option></select></div>{project.completed && <p className="field-hint">作品已完结，可执行一次局部重写；如需新增正文，请先点击「继续创作」。</p>}{kind === 'scene' && !project.agreement.trim() && <p className="work-warning">先在「创作资料 → 创作要求」保存确定的创作要求；也可以先去 QQ 商量。</p>}{kind === 'rewrite' && <div className="field"><label htmlFor="rewrite-target">要重写的原文</label><textarea disabled={busy} id="rewrite-target" required rows={4} maxLength={4000} value={targetText} onChange={event => setTargetText(event.target.value)} /><p className="field-hint">从当前章节已保存的正文中复制一段原文，且该段只出现一次。仅替换这段文字。</p></div>}<div className="field"><label htmlFor="task-goal">这次的创作要求</label><textarea disabled={busy} id="task-goal" required rows={3} maxLength={4000} value={goal} onChange={event => setGoal(event.target.value)} placeholder={isDiary ? '例如：记录今天整理旧书的一段经历，写到合上最后一本书时结束。' : '例如：写两人在雨夜车站重逢的一个场景，停在他们认出彼此时。'} /></div>{dirty && <p className="field-hint">当前有未保存修改。任务使用已保存的内容，需要时请先保存。</p>}<button className="primary" disabled={busy || (kind === 'scene' && (project.completed || !project.agreement.trim())) || (kind === 'rewrite' && !chapter)}>开始{kind === 'scene' ? '写作' : '局部重写'}</button><p className="field-hint">网页发起的任务不会另发 QQ 通知。结果采用后直接成为正式正文。</p></form></section>
         <section className="tasks-panel" aria-labelledby="tasks-title"><h2 id="tasks-title">创作任务</h2><ScheduleNote schedule={schedule} failed={scheduleError} projectId={project.id} />{!tasks.length ? <p className="field-hint">还没有创作任务。</p> : <ol className="task-list">{tasks.map(task => <li key={task.id}><div className="task-heading"><strong>{task.kind === 'rewrite' ? '局部重写' : isDiary ? '日记写作' : '场景写作'}</strong><span>{task.adopted_at ? '已采用' : statusNames[task.status] ?? task.status}</span></div><p>{task.goal}</p>{task.error && <p className="task-error">{taskErrors[task.error] ?? '这次创作未完成，原文保留。请稍后重试。'}</p>}{task.status === 'cancelled' && <p className="field-hint">已保存的正文与版本保留；本次未采用内容不再写入。</p>}<p className="field-hint">输入 {task.input_tokens ?? 0} / 输出 {task.output_tokens ?? 0} tokens · 开发估算 {money(task.charged_usd)}{Number(task.reserved_usd) > 0 ? ` · 预留估算 ${money(task.reserved_usd)}` : ''}</p>{task.can_cancel && <button className="text-button" disabled={busy} onClick={() => void taskAction(task, 'cancel')}>取消任务</button>}{task.can_retry && <><button className="text-button" disabled={busy} onClick={() => void taskAction(task, 'retry')}>使用最新保存内容重试</button><p className="field-hint">重试创建新任务；原任务估算费用保留。</p></>}<TaskReferences taskId={task.id} status={task.status} /><TaskCharacters taskId={task.id} status={task.status} /></li>)}</ol>}</section>
-      </div> : tab === 'library' ? null : <div className="work-layout"><section className="writing-column">
-        {charactersOpen ? characters && characterDefaults ? <CharacterEditor items={characters} defaults={characterDefaults} selectedId={characterId} draft={roleDraft} busy={busy} dirty={dirty} saved={saved} onSelect={next => requestLeave(() => openCharacter(next))} onChange={next => { setRoleDraft(next); setSaved(false); }} onSave={() => void save()} onDelete={deleteCharacter} /> : <section className="material-paper">{characterError ? <><ErrorNotice message={characterError} /><button className="text-button" onClick={() => setCharacterRetry(value => value + 1)}>重新读取角色</button></> : <p role="status">正在读取角色…</p>}</section> : retrievalOpen ? retrieval ? <RetrievalEditor view={retrieval} busy={busy} dirty={dirty} saved={saved} onChange={config => { setRetrieval({ ...retrieval, config }); setSaved(false); }} onSave={() => void save()} /> : <section className="material-paper">{retrievalError ? <><ErrorNotice message={retrievalError} /><button className="text-button" onClick={() => setRetrievalRetry(value => value + 1)}>重新读取检索配置</button></> : <p role="status">正在读取检索配置…</p>}</section> : versionsOpen && chapter ? <Versions key={chapter.id} chapter={chapter} busy={busy} setBusy={setBusy} onRestored={restoredChapter} /> : material ? <section className="material-paper"><p className="eyebrow">创作资料</p><h2>{materialInfo?.[1]}</h2><p className="form-copy">{materialInfo?.[2]}</p>{material === 'agreement' ? <RequirementsForm direction={draft} constraints={secondaryDraft} busy={busy} onDirection={value => { setDraft(value); setSaved(false); }} onConstraints={value => { setSecondaryDraft(value); setSaved(false); }} /> : material === 'preferences' ? <DiscussionForm preferences={draft} tentative={secondaryDraft} busy={busy} onPreferences={value => { setDraft(value); setSaved(false); }} onTentative={value => { setSecondaryDraft(value); setSaved(false); }} /> : material === 'author_prompt' ? <><WorkStylePicker key={project.id} ref={stylePicker} projectId={project.id} busy={busy} onDirty={setStyleDirty} onManage={() => requestLeave(() => onStyles(project.id))} /><GuidedField id="work-writing-notes" label="本作品补充写法（可选）" hint="只补充所选方案没有说清的写法，如视角、节奏或对白要求，不用重复抄写风格指引。没有方案时，直接描述想要的写法即可。" placeholder={'例如：改为第三人称限知视角。\n对白简短，少解释人物情绪。'} example={'采用第三人称限知视角，只写主角能感知的事。\n对白简短，用动作表现情绪，避免反复解释。'} value={draft} busy={busy} onChange={value => { setDraft(value); setSaved(false); }} rows={6} /></> : material === 'worldbook' ? <WorldbookEditor key={project.id} core={draft} entries={settingEntries} busy={busy} onCore={value => { setDraft(value); setSaved(false); }} onChange={value => { setSettingEntries(value); setSaved(false); }} /> : <>{material === 'plot_state' && <PlotStateGuide />}<div className="field"><label htmlFor="material-content">{materialInfo?.[1]}内容</label><textarea id="material-content" maxLength={material === 'characters' ? 30000 : 12000} rows={material === 'plot_state' ? 12 : 16} value={draft} placeholder={material === 'summary' ? '概括已经发生的主要故事，按事件顺序写。尚未采用的计划不要记成事实。' : material === 'plot_state' ? '时间与地点：\n正在发生的事：\n尚未解决的线索：\n需要注意的人物知情范围：' : '例如：林雨，调查记者，想找回失踪旧友；与寄信人有一段未解开的旧事。'} onChange={event => { setDraft(event.target.value); setSaved(false); }} disabled={busy} /></div></>}<div className="save-bar"><button className="primary" onClick={() => void save()} disabled={busy}>{material === 'author_prompt' ? '保存写作设置' : '保存资料'}</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : '已保存的内容用于后续创作'}</p></div></section>
-          : chapter ? <section className="chapter-paper"><fieldset className="editor-toolbar" aria-label="正文格式" disabled={busy}><button className={editor?.isActive('bold') ? 'selected' : ''} aria-label="加粗" onClick={() => editor?.chain().focus().toggleBold().run()}>B</button><button aria-label="斜体" onClick={() => editor?.chain().focus().toggleItalic().run()}><i>I</i></button><button onClick={() => editor?.chain().focus().setParagraph().run()}>段落</button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>小标题</button></fieldset><label className="sr-only" htmlFor="chapter-title">章节标题</label><input id="chapter-title" className="chapter-title" value={title} maxLength={160} onChange={event => { setTitle(event.target.value); setSaved(false); }} disabled={busy} /><EditorContent editor={editor} /><div className="save-bar"><button className="primary" onClick={() => void save()} disabled={busy}>保存正文</button><p role="status">{busy ? '正在处理…' : dirty ? '有未保存修改 · Ctrl+S 保存' : `已保存 · 版本 ${chapter.version}`}</p></div></section>
+      </div> : tab === 'library' ? null : <div className={`work-layout${charactersOpen ? ' character-workspace' : ''}`}><section className="writing-column">
+        {charactersOpen ? characters && characterDefaults ? <CharacterEditor items={characters} defaults={characterDefaults} selectedId={characterId} draft={roleDraft} busy={busy} dirty={dirty} saved={saved} legacy={project.characters} onLegacy={() => requestLeave(() => openMaterial('characters'))} onSelect={next => requestLeave(() => openCharacter(next))} onChange={next => { setRoleDraft(next); setSaved(false); }} onSave={() => void save()} onDelete={deleteCharacter} /> : <section className="material-paper">{characterError ? <><ErrorNotice message={characterError} /><button className="text-button" onClick={() => setCharacterRetry(value => value + 1)}>重新读取角色</button></> : <p role="status">正在读取角色…</p>}</section> : retrievalOpen ? retrieval ? <RetrievalEditor view={retrieval} busy={busy} dirty={dirty} saved={saved} onChange={config => { setRetrieval({ ...retrieval, config }); setSaved(false); }} onSave={() => void save()} /> : <section className="material-paper">{retrievalError ? <><ErrorNotice message={retrievalError} /><button className="text-button" onClick={() => setRetrievalRetry(value => value + 1)}>重新读取检索配置</button></> : <p role="status">正在读取检索配置…</p>}</section> : versionsOpen && chapter ? <Versions key={chapter.id} chapter={chapter} busy={busy} setBusy={setBusy} onRestored={restoredChapter} /> : material ? <section className="material-paper"><p className="eyebrow">创作资料</p><h2>{material === 'characters' ? '旧版人物资料（待整理）' : materialInfo?.[1]}</h2>{material === 'characters' && <><p className="field-hint">此处仅保留旧资料。请到角色页逐个建立人物档案，核对后再移除重复或过期内容。</p><button className="secondary" disabled={busy} onClick={() => showTab('characters')}>管理独立角色</button></>}<p className="form-copy">{materialInfo?.[2]}</p>{material === 'agreement' ? <RequirementsForm direction={draft} constraints={secondaryDraft} busy={busy} onDirection={value => { setDraft(value); setSaved(false); }} onConstraints={value => { setSecondaryDraft(value); setSaved(false); }} /> : material === 'preferences' ? <DiscussionForm preferences={draft} tentative={secondaryDraft} busy={busy} onPreferences={value => { setDraft(value); setSaved(false); }} onTentative={value => { setSecondaryDraft(value); setSaved(false); }} /> : material === 'author_prompt' ? <><WorkStylePicker key={project.id} ref={stylePicker} projectId={project.id} busy={busy} onDirty={setStyleDirty} onManage={() => requestLeave(() => onStyles(project.id))} /><SectionTextEditor id="work-writing-notes" fields={writingFields} rawLabel="本作品补充写法（可选）" value={draft} busy={busy} onChange={value => { setDraft(value); setSaved(false); }} /></> : material === 'worldbook' ? <WorldbookEditor key={project.id} core={draft} entries={settingEntries} busy={busy} onCore={value => { setDraft(value); setSaved(false); }} onChange={value => { setSettingEntries(value); setSaved(false); }} /> : <>{material === 'plot_state' ? <><PlotStateGuide /><SectionTextEditor id="work-plot-state" fields={plotFields} rawLabel="剧情状态内容" value={draft} busy={busy} onChange={value => { setDraft(value); setSaved(false); }} /></> : <div className="field"><label htmlFor="material-content">{materialInfo?.[1]}内容</label><textarea id="material-content" maxLength={material === 'characters' ? 30000 : 12000} rows={16} value={draft} placeholder={material === 'summary' ? '概括已经发生的主要故事，按事件顺序写。尚未采用的计划不要记成事实。' : '例如：林雨，调查记者，想找回失踪旧友；与寄信人有一段未解开的旧事。'} onChange={event => { setDraft(event.target.value); setSaved(false); }} disabled={busy} /></div>}</>}<div className="save-bar"><button className="primary" onClick={() => void save()} disabled={busy}>{material === 'author_prompt' ? '保存写作设置' : '保存资料'}</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : '已保存的内容用于后续创作'}</p></div></section>
+          : chapterLoading ? <section className="chapter-paper" role="status">正在读取章节…</section> : chapter ? <section className="chapter-paper"><fieldset className="editor-toolbar" aria-label="正文格式" disabled={busy}><button className={editor?.isActive('bold') ? 'selected' : ''} aria-label="加粗" onClick={() => editor?.chain().focus().toggleBold().run()}>B</button><button aria-label="斜体" onClick={() => editor?.chain().focus().toggleItalic().run()}><i>I</i></button><button onClick={() => editor?.chain().focus().setParagraph().run()}>段落</button><button onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>小标题</button></fieldset><label className="sr-only" htmlFor="chapter-title">章节标题</label><input id="chapter-title" className="chapter-title" value={title} maxLength={160} onChange={event => { setTitle(event.target.value); setSaved(false); }} disabled={busy} /><EditorContent editor={editor} /><div className="save-bar"><button className="primary" onClick={() => void save()} disabled={busy}>保存正文</button><p role="status">{busy ? '正在处理…' : dirty ? '有未保存修改 · Ctrl+S 保存' : `已保存 · 版本 ${chapter.version}`}</p></div></section>
             : <section className="empty-paper"><span className="paper-flower" aria-hidden="true">✳</span><h2>{isDiary ? '第一段日记，等待落笔。' : '第一段故事，等待落笔。'}</h2><p>{isDiary ? '先在「创作资料 → 创作要求」保存作品方向，再到「创作任务」描述这一段日记要记录的片段。任务完成后，正式正文会出现在这里。' : '先在「创作资料 → 创作要求」保存作品方向，再到「创作任务」描述一个场景。任务完成后，正式正文会出现在这里。'}</p></section>}
-      </section><aside className="work-rail" aria-label={material ? '资料目录' : '章节目录'}><p className="eyebrow">{material ? '故事的底稿' : '章节目录'}</p>{material ? [['创作方向', ['agreement', 'author_prompt', 'preferences']], ['世界与人物', ['worldbook', 'characters']], ['当前剧情', ['summary', 'plot_state']]].map(([heading, keys]) => <div className="material-nav-group" key={heading as string}><h3>{heading}</h3>{materials.filter(([key]) => (keys as string[]).includes(key)).map(([key, label]) => <button key={key} aria-current={material === key ? 'page' : undefined} onClick={() => { if (key !== material) requestLeave(() => openMaterial(key)); }}>{label}</button>)}</div>) : chapters.length ? chapters.map(item => <button key={item.id} aria-current={chapter?.id === item.id ? 'page' : undefined} onClick={() => { if (chapter?.id !== item.id) requestLeave(() => { setTab('body'); openChapter(item); }); }}>{item.title}</button>) : <p className="field-hint">{isDiary ? '首段日记采用后会出现在目录中。' : '首个场景采用后会创建章节。'}</p>}<div className="rail-note">每一次保存，<br />都让故事更近一点。</div></aside></div>}
+      </section><aside className="work-rail" aria-label={material ? '资料目录' : '章节目录'}><p className="eyebrow">{material ? '故事的底稿' : '章节目录'}</p>{material ? [['创作方向', ['agreement', 'author_prompt', 'preferences']], ['世界与人物', ['worldbook', 'characters']], ['当前剧情', ['summary', 'plot_state']]].map(([heading, keys]) => <div className="material-nav-group" key={heading as string}><h3>{heading}</h3>{materials.filter(([key]) => (keys as string[]).includes(key)).map(([key, label]) => <button key={key} aria-current={material === key ? 'page' : undefined} onClick={() => { if (key === 'characters') showTab('characters'); else if (key !== material) requestLeave(() => openMaterial(key)); }}>{label}</button>)}</div>) : chapters.length ? chapters.map(item => <button key={item.id} aria-current={chapter?.id === item.id ? 'page' : undefined} onClick={() => { if (chapter?.id !== item.id) requestLeave(() => { setTab('body'); void selectChapter(item); }); }}>{item.title}</button>) : <p className="field-hint">{isDiary ? '首段日记采用后会出现在目录中。' : '首个场景采用后会创建章节。'}</p>}<div className="rail-note">每一次保存，<br />都让故事更近一点。</div></aside></div>}
     </>}
     <dialog ref={dialog} className="leave-dialog" aria-labelledby="work-leave-title" onCancel={event => { event.preventDefault(); setLeave(false); }}><h2 id="work-leave-title">有未保存的修改</h2><p>保存后再离开，或放弃本次修改。未保存的内容不会用于后续创作。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setLeave(false)} autoFocus>继续编辑</button></div></dialog>
   </main>;

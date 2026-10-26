@@ -10,6 +10,7 @@ import type { ContactSettingsHandle } from './contact-settings';
 import type { StyleProfilesHandle } from './style-profiles';
 import type { SharedHandle } from './shared';
 import { MemeSettings } from './meme-settings';
+import { SectionTextEditor, personaFields, readSections } from './material-text';
 import type { MemeSettingsHandle } from './meme-settings';
 const Works = lazy(() => import('./works').then(module => ({ default: module.Works })));
 const Memory = lazy(() => import('./memory').then(module => ({ default: module.Memory })));
@@ -188,6 +189,9 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
 
   async function savePersona(): Promise<boolean> {
     if (!personaForm.current?.reportValidity()) return false;
+    const parts = readSections(prompt, personaFields);
+    if (!parts.legacy.trim() && !parts.values.some(text => text.trim())) { setError('请填写至少一项性格说明。'); return false; }
+    if (prompt.length > 12000) { setError('性格说明总计最多 12000 字符，请缩减后再保存。'); return false; }
     setBusy(true);
     setError('');
     setSaved(false);
@@ -241,9 +245,9 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
               {setup.initialized && <ServiceNotice />}
               {editing ? <section className="setup-panel" aria-labelledby="persona-title">
                 <div className="panel-toolbar"><div><p className="eyebrow">{setup.persona ? '性格设计' : '第二步'}</p><h2 id="persona-title">LISA 性格</h2></div>{setup.persona && <button className="text-button" onClick={() => requestLeave('overview')} disabled={busy}>返回书房</button>}</div>
-                <div className="persona-style-entry"><p>也可以从聊天记录中提炼相处方式，试聊后再决定是否应用。</p><button className="secondary" disabled={busy} onClick={() => openStyles('personality')}>从 QQ 记录提炼性格</button></div><p className="form-copy">使用自定义 prompt 描述 LISA 的性格、背景与相处方式。正式性格预设尚在设计中。这是陪伴你的 LISA，与作品中的角色设置不同。</p>
+                <div className="persona-style-entry"><p>也可以从聊天记录中提炼相处方式，试聊后再决定是否应用。</p><button className="secondary" disabled={busy} onClick={() => openStyles('personality')}>从 QQ 记录提炼性格</button></div><p className="form-copy">分别描述 LISA 的性格、虚拟背景、相处方式与边界，按需填写即可。正式性格预设尚在设计中。这是陪伴你的 LISA，与作品中的角色设置不同。</p>
                 <form ref={personaForm} onSubmit={event => { event.preventDefault(); void savePersona(); }} aria-busy={busy}>
-                  <fieldset disabled={busy}><div className="field"><label htmlFor="persona-name">性格名称</label><input id="persona-name" value={name} onChange={event => { setName(event.target.value); setSaved(false); }} required maxLength={80} /></div><div className="field"><label htmlFor="persona-prompt">LISA 性格 prompt</label><textarea id="persona-prompt" value={prompt} onChange={event => { setPrompt(event.target.value); setSaved(false); }} required maxLength={12000} rows={10} aria-describedby="persona-hint" /><p id="persona-hint" className="field-hint">最多 12,000 个字符。修改保存后只影响后续交流与创作，已有记忆、关系经历和作品保留。</p></div></fieldset>
+                  <fieldset disabled={busy}><div className="field"><label htmlFor="persona-name">性格名称</label><input id="persona-name" value={name} onChange={event => { setName(event.target.value); setSaved(false); }} required maxLength={80} /></div><SectionTextEditor id="persona-design" fields={personaFields} rawLabel="LISA 性格 prompt" value={prompt} busy={busy} onChange={value => { setPrompt(value); setSaved(false); }} /><p className="field-hint">修改保存后只影响后续交流与创作，已有记忆、关系经历和作品保留。</p></fieldset>
                   <div className="save-bar"><button className="primary" disabled={busy}>{busy ? '正在保存…' : '保存性格'}</button><p role="status">{busy ? '请稍候' : dirty ? '有未保存修改 · Ctrl+S 保存' : saved ? '已保存' : setup.persona ? `当前版本 ${setup.persona.version}` : '保存后完成性格初始化'}</p></div>
                 </form>
               </section> : <section className="welcome-paper"><span className="paper-flower" aria-hidden="true">✳</span><h2>{setup.persona?.name}</h2><p>性格设置已保存。你们的经历，会从这里慢慢积累。</p><button className="secondary" onClick={() => { setEditing(true); setSaved(false); }}>调整 LISA 性格</button><button className="text-button" disabled={busy} onClick={() => openStyles('personality')}>从 QQ 记录提炼性格</button></section>}

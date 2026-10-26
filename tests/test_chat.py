@@ -229,6 +229,64 @@ async def test_new_turn_waits_behind_inflight_old_send(settings, engine, db, use
     assert claim_outbound(db, QQ).task_id == new_task_id
 
 
+@pytest.mark.asyncio
+async def test_new_input_during_generation_cancels_the_late_old_reply(
+    settings, engine, db, user_id,
+):
+    old_id = ingest(db, 1053, content="先前的问题")
+
+    async def generate(*args):
+        ingest(db, 1054, content="等等，我换个问题")
+        return Conversation(reply="迟到的旧回复", messages=["迟到的旧回复"])
+
+    await execute_chat(settings, engine, str(old_id), generate=generate)
+    db.expire_all()
+    reply = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == old_id))
+    assert reply.status == "cancelled" and reply.content == ""
+    assert claim_outbound(db, QQ) is None
+
+
+@pytest.mark.asyncio
+async def test_interrupted_inflight_failure_does_not_retry_the_old_reply(
+    settings, engine, db, user_id,
+):
+    old_id = ingest(db, 1055, content="旧问题")
+
+    async def generate(*args):
+        return Conversation(reply="旧回答")
+
+    await execute_chat(settings, engine, str(old_id), generate=generate)
+    outgoing = claim_outbound(db, QQ)
+    outgoing_id = outgoing.id
+    db.commit()
+    ingest(db, 1056, content="我有新问题")
+    finish_delivery(db, outgoing_id, "failed")
+    db.commit()
+    db.expire_all()
+    outgoing = db.get(OutboundMessage, outgoing_id)
+    assert outgoing.status == "failed" and outgoing.content == ""
+
+
+@pytest.mark.asyncio
+async def test_interrupting_the_last_pending_part_clears_already_sent_reply_bodies(
+    settings, engine, db, user_id,
+):
+    old_id = ingest(db, 1057)
+
+    async def generate(*args):
+        return Conversation(reply="甲\n乙", messages=["甲", "乙"])
+
+    await execute_chat(settings, engine, str(old_id), generate=generate)
+    first = claim_outbound(db, QQ)
+    finish_delivery(db, first.id, "sent", "synthetic-first")
+    db.commit()
+    ingest(db, 1058, content="换个话题")
+    db.expire_all()
+    parts = list(db.scalars(select(OutboundMessage).where(OutboundMessage.task_id == old_id)))
+    assert {part.status for part in parts} == {"sent", "cancelled"}
+    assert all(part.content == "" for part in parts)
+
+
 def test_ingest_and_queue_job_rollback_together(db, user_id):
     before = db.scalar(text("SELECT count(*) FROM procrastinate_jobs"))
     ingest_message(
@@ -274,7 +332,7 @@ def test_uninitialized_disabled_and_future_events_do_not_queue(db, user_id):
 
 
 @pytest.mark.asyncio
-async def test_bounded_batches_run_in_order_and_include_completed_reply(
+async def test_bounded_batches_run_in_order_without_replaying_completed_chat(
     settings, engine, db, user_id
 ):
     first = None
@@ -294,15 +352,19 @@ async def test_bounded_batches_run_in_order_and_include_completed_reply(
     await execute_chat(settings, engine, str(first), generate=generate)
     assert all("second batch" not in message["content"] for message in calls[0])
     await execute_chat(settings, engine, str(second), generate=generate)
-    assert any(message["content"] == "synthetic reply 1" for message in calls[1])
-    assert calls[1][-1]["content"].endswith("second batch")
+    assert len(calls[0]) == 20
+    assert len(calls[1]) == 1 and calls[1][0]["role"] == "user"
+    assert calls[1][0]["content"].endswith("second batch")
+    assert all("first batch" not in message["content"] for message in calls[1])
+    assert count(db, ChatMessage) == 0
     assert count(db, OutboundMessage) == 2
 
 
 @pytest.mark.asyncio
-async def test_long_old_message_does_not_block_new_chat_and_latest_history_is_kept(
+async def test_only_current_batch_enters_chat_after_prior_success_and_oversize_failure(
     settings, engine, db, user_id
 ):
+    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
     calls = []
 
     async def generate(settings, engine, task_id, account_id, instructions, messages):
@@ -324,16 +386,15 @@ async def test_long_old_message_does_not_block_new_chat_and_latest_history_is_ke
 
     instructions, messages = calls[-1]
     assert "chat_reader的独立合成性格" in instructions
-    assert [message["role"] for message in messages] == ["user", "assistant", "user", "user"]
-    assert messages[0]["content"].endswith("最新历史问题")
-    assert messages[1]["content"] == "最新历史回答"
-    assert messages[2]["content"].endswith("当前批次第一条")
-    assert messages[3]["content"].endswith("当前批次第二条")
+    assert [message["role"] for message in messages] == ["user", "user"]
+    assert messages[0]["content"].endswith("当前批次第一条")
+    assert messages[1]["content"].endswith("当前批次第二条")
+    assert all("最新历史" not in message["content"] for message in messages)
+    assert old_content not in instructions
     db.expire_all()
     assert db.get(Task, current).status == "completed"
-    assert (
-        db.scalar(select(ChatMessage.content).where(ChatMessage.task_id == old_task)) == old_content
-    )
+    assert count(db, ChatMessage) == 0
+
 
 
 @pytest.mark.asyncio
@@ -341,6 +402,7 @@ async def test_long_old_message_does_not_block_new_chat_and_latest_history_is_ke
 async def test_persona_and_current_batch_are_never_silently_truncated(
     settings, engine, db, user_id, oversized
 ):
+    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
     persona = db.scalar(select(Persona).where(Persona.user_id == user_id))
     if oversized == "persona":
         persona.prompt = "人格" * 6000
@@ -357,10 +419,8 @@ async def test_persona_and_current_batch_are_never_silently_truncated(
     db.expire_all()
     assert db.get(Task, task_id).error == "input_too_large"
     assert db.get(Task, task_id).status == "failed"
-    assert set(db.scalars(select(ChatMessage.content).where(ChatMessage.task_id == task_id))) == {
-        first,
-        second,
-    }
+    # Reject oversized inputs explicitly, then erase this terminal task's inbox.
+    assert count(db, ChatMessage) == 0
     notice = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == task_id))
     assert "缩短性格设定" in notice.content and "分段发送" in notice.content
     if oversized == "persona":
@@ -401,8 +461,11 @@ async def test_new_message_during_generation_gets_next_task_and_other_user_runs(
         await running
     await execute_chat(settings, engine, str(second), generate=generate)
     assert calls[-1][0] == user_id
-    assert any(message["content"] == f"reply for {user_id}" for message in calls[-1][2])
+    assert len(calls[-1][2]) == 1
+    assert calls[-1][2][0]["role"] == "user"
+    assert calls[-1][2][0]["content"].endswith("first user's follow up")
     assert all("other user's" not in message["content"] for message in calls[-1][2])
+    assert count(db, ChatMessage) == 0
 
 
 @pytest.mark.asyncio
@@ -427,12 +490,11 @@ async def test_message_time_order_and_completed_task_are_not_regenerated(
     db.expire_all()
     assert db.get(Account, user_id).last_active_at == now
     assert count(db, OutboundMessage) == 1
-    assert (
-        db.scalar(
-            select(func.count()).select_from(ChatMessage).where(ChatMessage.role == "assistant")
-        )
-        == 1
-    )
+    assert count(db, ChatMessage) == 0
+    # The metadata receipt still rejects replays after the raw inbox is erased.
+    assert ingest(db, 1, content="duplicate after cleanup") is None
+    assert count(db, ChatMessage) == 0
+
 
 
 @pytest.mark.asyncio
@@ -458,7 +520,29 @@ async def test_disabled_account_cannot_start_or_accept_reply(
     assert len(calls) == int(disable_during_call)
     assert db.get(Task, task_id).status == "failed"
     assert count(db, OutboundMessage) == 0
-    assert count(db, ChatMessage) == 1
+    assert count(db, ChatMessage) == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_chat_drops_late_reply_and_clears_current_input(
+    settings, engine, db, user_id
+):
+    task_id = ingest(db, "cancel-during-call", content="临时输入不得保留")
+
+    async def generate(*args):
+        with Session(engine) as session, session.begin():
+            task = session.get(Task, task_id)
+            task.status, task.error, task.finished_at = (
+                "cancelled", "user_cancelled", datetime.now(UTC)
+            )
+        return "迟到回复不得发送"
+
+    await execute_chat(settings, engine, task_id, generate=generate)
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert task.status == "cancelled" and task.error == "user_cancelled"
+    assert count(db, OutboundMessage) == 0
+    assert count(db, ChatMessage) == 0
 
 
 @pytest.mark.asyncio
@@ -486,7 +570,7 @@ async def test_model_failures_are_fixed_notices_not_assistant_history(
     task = db.get(Task, task_id)
     assert task.status == "failed" and task.error == error
     assert len(calls) == 1
-    assert count(db, ChatMessage) == 1
+    assert count(db, ChatMessage) == 0
     assert count(db, OutboundMessage) == 1
 
 
@@ -504,13 +588,15 @@ async def test_busy_model_retries_same_task_but_stops_after_five_minutes(
     db.expire_all()
     task = db.get(Task, task_id)
     assert task.status == "pending"
+    # A bounded retry keeps only its own temporary input until the task is terminal.
+    assert count(db, ChatMessage) == 1
     assert count(db, Task) == 1 and count(db, OutboundMessage) == 0
     task.created_at = datetime.now(UTC) - timedelta(minutes=6)
     db.commit()
     await execute_chat(settings, engine, str(task_id), generate=busy)
     db.expire_all()
     assert db.get(Task, task_id).error == "model_busy"
-    assert count(db, ChatMessage) == 1 and count(db, OutboundMessage) == 1
+    assert count(db, ChatMessage) == 0 and count(db, OutboundMessage) == 1
 
 
 @pytest.mark.asyncio

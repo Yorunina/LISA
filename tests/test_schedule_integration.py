@@ -181,7 +181,8 @@ async def test_casual_chat_keeps_exhausted_allowance_until_grounded_creative_fee
     assert list(db.scalars(select(ActivityPlan))) == []
 
     feedback = "上一段对白不错，继续这个方向。"
-    chat_id = receive(db, owner, "creative-reset", content=feedback)
+    feedback_at = datetime.now(UTC)
+    chat_id = receive(db, owner, "creative-reset", content=feedback, sent_at=feedback_at)
     await execute_chat(
         autonomy_settings,
         engine,
@@ -200,7 +201,8 @@ async def test_casual_chat_keeps_exhausted_allowance_until_grounded_creative_fee
             ChatMessage.role == "user",
         )
     )
-    assert work.last_creative_feedback_at == source.sent_at
+    assert source is None  # Terminal tasks remove raw input after recording structured feedback.
+    assert work.last_creative_feedback_at == feedback_at
     assert schedule_view(db, autonomy_settings, db.get(Account, owner)).remaining_scenes == 2
     plan = db.scalar(select(ActivityPlan).where(ActivityPlan.status == "pending"))
     assert plan is not None
@@ -254,12 +256,14 @@ async def test_ungrounded_or_failed_understanding_cannot_record_creative_feedbac
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("existing_newer", [True, False])
 async def test_feedback_uses_its_own_message_time_in_a_mixed_delayed_batch(
     autonomy_settings,
     engine,
     db,
     owner,
     project,
+    existing_newer,
 ):
     work_id = UUID(project["id"])
     now = datetime.now(UTC)
@@ -267,7 +271,7 @@ async def test_feedback_uses_its_own_message_time_in_a_mixed_delayed_batch(
     newer_feedback_at = now - timedelta(hours=1)
     work = db.get(Project, work_id)
     work.agreement = GOAL
-    work.last_creative_feedback_at = newer_feedback_at
+    work.last_creative_feedback_at = newer_feedback_at if existing_newer else None
     db.commit()
     feedback = "旧的那一段可以。"
     first = receive(db, owner, "old-feedback", content=feedback, sent_at=old_feedback_at)
@@ -288,22 +292,9 @@ async def test_feedback_uses_its_own_message_time_in_a_mixed_delayed_batch(
     )
     db.expire_all()
     assert db.get(Account, owner).last_active_at == now
-    assert db.get(Project, work_id).last_creative_feedback_at == newer_feedback_at
-    # With no newer feedback boundary, only the quoted old source supplies the time.
-    db.get(Project, work_id).last_creative_feedback_at = None
-    db.commit()
-    from lisa.scheduling import record_creative_feedback
-
-    sources = list(
-        db.scalars(
-            select(ChatMessage.id).where(
-                ChatMessage.task_id == first,
-                ChatMessage.role == "user",
-            )
-        )
-    )
-    record_creative_feedback(db, db.get(Task, first), sources, feedback)
-    assert db.get(Project, work_id).last_creative_feedback_at == old_feedback_at
+    expected = newer_feedback_at if existing_newer else old_feedback_at
+    assert db.get(Project, work_id).last_creative_feedback_at == expected
+    assert not list(db.scalars(select(ChatMessage).where(ChatMessage.task_id == first)))
 
 
 @pytest.mark.asyncio

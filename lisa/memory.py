@@ -1,4 +1,4 @@
-"""User-controlled memories and source exclusions; no derived copy of chat text."""
+"""User-controlled memories; raw chat input is transient and never archived."""
 
 import json
 from datetime import UTC, datetime
@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import and_, func, or_, select, true, update
+from sqlalchemy import and_, func, or_, select, true
 from sqlalchemy.orm import Session, aliased
 
 from lisa.auth import DB, current_user
@@ -19,7 +19,6 @@ from lisa.models import (
     IndexState,
     Memory,
     MemoryUse,
-    OutboundMessage,
     Project,
 )
 from lisa.retrieval import embedding_space, indexing_enabled
@@ -60,7 +59,7 @@ class MemoryBody(BaseModel):
 
 
 class MemoryCreate(MemoryBody):
-    source_message_id: UUID | None = None
+    pass
 
 
 class MemoryCandidate(BaseModel):
@@ -76,17 +75,6 @@ class MemoryCandidate(BaseModel):
     def inference_basis(self):
         if self.kind == "inference" and not self.basis:
             raise ValueError("推测须填写简要依据。")
-        return self
-
-
-class ClearRange(BaseModel):
-    start: AwareDatetime
-    end: AwareDatetime
-
-    @model_validator(mode="after")
-    def ordered(self):
-        if self.start >= self.end:
-            raise ValueError("结束时间必须晚于开始时间。")
         return self
 
 
@@ -112,32 +100,6 @@ def _require_memory(db: Session, user_id: UUID, memory_id: UUID) -> Memory:
     return item
 
 
-def _require_message(db: Session, user_id: UUID, message_id: UUID) -> ChatMessage:
-    item = db.scalar(
-        select(ChatMessage).where(ChatMessage.id == message_id, ChatMessage.user_id == user_id)
-    )
-    if item is None or item.deleted_at is not None:
-        raise HTTPException(404, "聊天记录不存在或已删除。")
-    return item
-
-
-def _exclude_source(db: Session, user_id: UUID, source_id: UUID | None) -> None:
-    if source_id is None:
-        return
-    source = db.get(ChatMessage, source_id)
-    if source is None or source.user_id != user_id:
-        return
-    # A turn's answer may repeat the original fact; exclude the whole task, not only its quote.
-    clause = (
-        ChatMessage.task_id == source.task_id if source.task_id else ChatMessage.id == source.id
-    )
-    db.execute(
-        update(ChatMessage)
-        .where(ChatMessage.user_id == user_id, clause)
-        .values(context_excluded=True)
-    )
-
-
 def _memory_view(db: Session, item: Memory) -> dict:
     source = db.get(ChatMessage, item.source_message_id) if item.source_message_id else None
     return {
@@ -153,6 +115,7 @@ def _memory_view(db: Session, item: Memory) -> dict:
             "active",
             "revision",
             "source_message_id",
+            "source_task_id",
             "source_chapter_id",
             "source_version",
             "life_kind",
@@ -165,26 +128,8 @@ def _memory_view(db: Session, item: Memory) -> dict:
 
 
 def _exclude_memory(db: Session, item: Memory) -> None:
-    _exclude_source(db, item.user_id, item.source_message_id)
-    db.execute(
-        update(ChatMessage)
-        .where(
-            ChatMessage.user_id == item.user_id,
-            ChatMessage.task_id.in_(
-                select(MemoryUse.task_id).where(MemoryUse.memory_id == item.id)
-            ),
-        )
-        .values(context_excluded=True)
-    )
-
-
-def _message_view(item: ChatMessage) -> dict:
-    from lisa.vision import message_text
-
-    return {
-        key: getattr(item, key)
-        for key in ("id", "role", "content", "kind", "sent_at", "context_excluded")
-    } | {"content": message_text(item)}
+    # Raw chat input is transient, so there is no retained source to exclude.
+    return
 
 
 def _map_chain(items: list[Memory], key, relation_type: str, edges: set[tuple[str, str, str]]):
@@ -367,13 +312,9 @@ def create_memory(body: MemoryCreate, db: DB, user: User):
     user = _mutating_user(db, user)
     if body.project_id:
         require_project(db, user, body.project_id)
-    if body.source_message_id:
-        _require_message(db, user.id, body.source_message_id)
     item = Memory(user_id=user.id, **body.model_dump())
     db.add(item)
     user.memory_revision += 1
-    if not body.allow_chat or not body.allow_writing:
-        _exclude_source(db, user.id, body.source_message_id)
     db.commit()
     return _memory_view(db, item)
 
@@ -435,11 +376,12 @@ def memory_source(memory_id: UUID, db: DB, user: User):
             },
         }
     if item.source_message_id is None:
+        if item.source_task_id is not None:
+            return {"status": "agent", "message": None}
         return {"status": "manual", "message": None}
-    source = db.get(ChatMessage, item.source_message_id)
-    if source is None or source.deleted_at is not None:
-        return {"status": "deleted", "message": None}
-    return {"status": "available", "message": _message_view(source)}
+    # Legacy rows may still carry a source ID before the migration runs, but
+    # the raw body is never exposed by the new product boundary.
+    return {"status": "deleted", "message": None}
 
 
 @router.get("/chat-messages")
@@ -450,59 +392,17 @@ def list_messages(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
-    statement = select(ChatMessage).where(
-        ChatMessage.user_id == user.id, ChatMessage.deleted_at.is_(None)
-    )
-    if query:
-        statement = statement.where(ChatMessage.content.contains(query, autoescape=True))
-    items = db.scalars(
-        statement.order_by(ChatMessage.sent_at.desc(), ChatMessage.id).limit(limit).offset(offset)
-    )
-    return [_message_view(item) for item in items]
-
-
-def _delete_messages(db: Session, user_id: UUID, messages: list[ChatMessage]) -> int:
-    now = datetime.now(UTC)
-    assistant_tasks = [m.task_id for m in messages if m.role == "assistant" and m.task_id]
-    for message in messages:
-        message.content, message.deleted_at, message.context_excluded = "", now, True
-        message.image_urls, message.image_description = [], ""
-    if assistant_tasks:
-        db.execute(
-            update(OutboundMessage)
-            .where(OutboundMessage.user_id == user_id, OutboundMessage.task_id.in_(assistant_tasks))
-            .values(content="", status="deleted", finished_at=now)
-        )
-    return len(messages)
+    raise HTTPException(410, "LISA 不再保存或提供原始聊天记录。")
 
 
 @router.delete("/chat-messages/{message_id}", status_code=204)
 def delete_message(message_id: UUID, db: DB, user: User):
-    user = _mutating_user(db, user)
-    message = _require_message(db, user.id, message_id)
-    _delete_messages(db, user.id, [message])
-    user.memory_revision += 1
-    db.commit()
+    raise HTTPException(410, "LISA 不再保存或提供原始聊天记录。")
 
 
 @router.post("/chat-messages/clear")
-def clear_messages(body: ClearRange, db: DB, user: User):
-    user = _mutating_user(db, user)
-    messages = list(
-        db.scalars(
-            select(ChatMessage).where(
-                ChatMessage.user_id == user.id,
-                ChatMessage.deleted_at.is_(None),
-                ChatMessage.sent_at >= body.start,
-                ChatMessage.sent_at < body.end,
-            )
-        )
-    )
-    count = _delete_messages(db, user.id, messages)
-    if count:
-        user.memory_revision += 1
-    db.commit()
-    return {"deleted_count": count}
+def clear_messages(db: DB, user: User):
+    raise HTTPException(410, "LISA 不再保存或提供原始聊天记录。")
 
 
 def memory_context(
@@ -564,8 +464,9 @@ def adopt_candidates(
     project_id: UUID | None,
     candidates: list[MemoryCandidate],
     source_ids: list[UUID],
+    source_task_id: UUID | None = None,
 ) -> None:
-    """Caller holds the account lock; re-read sources after the model request."""
+    """Promote only current-turn evidence, without retaining its raw message."""
     sources = list(
         db.scalars(
             select(ChatMessage)
@@ -604,7 +505,7 @@ def adopt_candidates(
         )
         if duplicate:
             if source.task_id:
-                record_chat_references(db, source.task_id, [duplicate], [])
+                record_chat_references(db, source_task_id or source.task_id, [duplicate])
             continue
         # Evidence only locates the source. Keep a reasoning summary, never a quote copy.
         basis = (
@@ -618,7 +519,8 @@ def adopt_candidates(
             Memory(
                 user_id=user_id,
                 project_id=scope_id,
-                source_message_id=source.id,
+                source_message_id=None,
+                source_task_id=source_task_id or source.task_id,
                 kind="inference" if visual else candidate.kind,
                 content=candidate.content,
                 basis=basis,
@@ -633,31 +535,10 @@ def record_chat_references(
     db: Session,
     task_id: UUID,
     memory_ids: list[UUID],
-    history_ids: list[UUID],
+    history_ids: list[UUID] | None = None,
 ) -> None:
-    """Record actual model context use so retained answers cannot revive excluded facts."""
+    """Record memory context use; raw chat history is never a source anymore."""
     used = set(memory_ids)
-    if history_ids:
-        history_tasks = select(ChatMessage.task_id).where(ChatMessage.id.in_(history_ids))
-        used.update(
-            db.scalars(
-                select(MemoryUse.memory_id).where(
-                    MemoryUse.task_id.in_(history_tasks),
-                )
-            )
-        )
-        # Raw messages that originally produced a memory are also its source material.
-        used.update(
-            db.scalars(
-                select(Memory.id).where(
-                    Memory.source_message_id.in_(
-                        select(ChatMessage.id).where(
-                            ChatMessage.task_id.in_(history_tasks),
-                        )
-                    ),
-                )
-            )
-        )
     existing = set(db.scalars(select(MemoryUse.memory_id).where(MemoryUse.task_id == task_id)))
     db.add_all(MemoryUse(memory_id=memory_id, task_id=task_id) for memory_id in used - existing)
     db.flush()

@@ -41,7 +41,9 @@ def _options(db, user_id, project_id, purpose, character_id):
         return {"character_id": character_id, "limit": config.limit, "max_chars": config.max_chars}
     if purpose == "writing" and project_id:
         return author_retrieval_config(db, user_id, project_id).model_dump()
-    return {} if purpose == "chat" else None
+    # The main chat agent keeps project identity and delegates full work context
+    # to the author agent. Chat retrieval may use memories, never work text.
+    return {"sources": ["memory"]} if purpose == "chat" else None
 
 
 async def retrieve_context(

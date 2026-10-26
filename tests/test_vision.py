@@ -13,7 +13,7 @@ from lisa import model_calls, vision
 from lisa.chat import execute_chat, ingest_message
 from lisa.dialogue import Conversation
 from lisa.gateway import parse_private_message
-from lisa.memory import MemoryCandidate, _delete_messages, _exclude_memory, _message_view
+from lisa.memory import MemoryCandidate
 from lisa.model_calls import ModelBusy
 from lisa.models import Account, ChatMessage, Memory, ModelCall, Task
 
@@ -132,7 +132,7 @@ def test_image_download_rejects_non_qq_locations(url):
 
 
 @pytest.mark.asyncio
-async def test_image_description_memory_history_and_source_cleanup(
+async def test_image_description_promotes_task_memory_and_erases_transient_source(
     visual_settings,
     engine,
     db,
@@ -159,12 +159,9 @@ async def test_image_description_memory_history_and_source_cleanup(
 
     await execute_chat(visual_settings, engine, task_id, generate=generate)
     db.expire_all()
-    source = db.get(ChatMessage, message_id)
-    assert source.content == "看看这张图" and source.image_description == CAPTION
-    assert source.image_urls == []
-    assert IMAGE_URL not in json.dumps(_message_view(source), default=str)
+    assert db.get(ChatMessage, message_id) is None
     memory = db.scalar(select(Memory).where(Memory.user_id == user_id))
-    assert memory.source_message_id == message_id
+    assert memory.source_message_id is None and memory.source_task_id == task_id
     assert memory.kind == "inference" and not memory.allow_writing and "图片" in memory.basis
     calls = list(db.scalars(select(ModelCall)))
     assert len(calls) == 1 and calls[0].configuration["api"] == "vision"
@@ -184,18 +181,19 @@ async def test_image_description_memory_history_and_source_cleanup(
     db.commit()
 
     async def remember(*args):
-        assert any(CAPTION in item["content"] for item in args[-1])
+        assert memory.content in args[-2]
+        assert len(args[-1]) == 1 and args[-1][0]["role"] == "user"
+        assert all(CAPTION not in item["content"] for item in args[-1])
+        assert IMAGE_URL not in args[-2] and "base64" not in args[-2]
         return "是雨夜车站。"
 
     await execute_chat(visual_settings, engine, followup, generate=remember)
     assert len(vision_sdk[0]) == 1
     db.expire_all()
-    _exclude_memory(db, memory)
-    assert source.context_excluded
-    _delete_messages(db, user_id, [source])
-    db.commit()
-    assert source.image_description == "" and source.image_urls == []
+    assert db.scalar(select(ChatMessage)) is None
     assert db.get(Memory, memory.id).active
+    assert IMAGE_URL not in str(db.get(Task, task_id).input_snapshot)
+    assert CAPTION not in str(db.get(Task, task_id).input_snapshot)
 
 
 @pytest.mark.asyncio
@@ -209,7 +207,9 @@ async def test_deleted_source_during_vision_cannot_be_restored(
     user_id, task_id, message_id = image_message
 
     def delete_source():
-        _delete_messages(db, user_id, [db.get(ChatMessage, message_id)])
+        # Simulate transient inbox invalidation while the vision request is in flight.
+        # The removed history-management API must not be reintroduced for this race.
+        db.delete(db.get(ChatMessage, message_id))
         db.get(Account, user_id).memory_revision += 1
         db.commit()
 
@@ -221,8 +221,7 @@ async def test_deleted_source_during_vision_cannot_be_restored(
     await execute_chat(visual_settings, engine, task_id, generate=forbidden)
     db.expire_all()
     assert db.get(Task, task_id).error == "context_changed"
-    source = db.get(ChatMessage, message_id)
-    assert source.content == source.image_description == "" and source.image_urls == []
+    assert db.get(ChatMessage, message_id) is None
     assert db.scalar(select(Memory)) is None
 
 
@@ -244,8 +243,13 @@ async def test_chat_slot_retry_reuses_saved_image_description(
 
     with pytest.raises(JobRetry):
         await execute_chat(visual_settings, engine, image_message[1], generate=generate)
+    db.expire_all()
+    source = db.get(ChatMessage, image_message[2])
+    assert source.image_description == CAPTION and source.image_urls == []
     await execute_chat(visual_settings, engine, image_message[1], generate=generate)
     assert len(vision_sdk[0]) == 1
+    db.expire_all()
+    assert db.get(ChatMessage, image_message[2]) is None
 
 
 @pytest.mark.asyncio
@@ -267,7 +271,7 @@ async def test_disabled_or_unreadable_image_has_explicit_fallback(
 
     await execute_chat(settings, engine, image_message[1], generate=generate)
     db.expire_all()
-    assert db.get(ChatMessage, image_message[2]).image_urls == []
+    assert db.get(ChatMessage, image_message[2]) is None
     assert db.scalar(select(ModelCall)) is None
 
 
@@ -289,4 +293,4 @@ async def test_invalid_vision_response_is_charged_and_not_adopted(
     assert db.scalar(select(Memory)) is None
     call = db.scalar(select(ModelCall))
     assert call.state == "failed" and call.charged_usd == Decimal("0.000075")
-    assert db.get(ChatMessage, image_message[2]).image_urls == []
+    assert db.get(ChatMessage, image_message[2]) is None

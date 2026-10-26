@@ -338,6 +338,7 @@ async def test_consult_uses_latest_role_after_query_edit_without_version_conflic
             role = writer.get(Character, role_id)
             role.name = "更新后的小满"
             role.prompt = "新要求：直说自己现在知道的事。"
+            role.definition = {"identity": "车站归客", "personality": "直率"}
             role.current_scene = "新场景：站在车站门外。"
             role.known_information = latest_knowledge
             role.retrieval_config = {
@@ -355,6 +356,13 @@ async def test_consult_uses_latest_role_after_query_edit_without_version_conflic
         payload = json.loads(messages[0]["content"])
         assert payload == {
             "name": "更新后的小满",
+            "definition": {
+                "identity": "车站归客",
+                "personality": "直率",
+                "motivation": "",
+                "relationships": "",
+                "voice": "",
+            },
             "known_information": latest_knowledge[:300] if retrieval_enabled else latest_knowledge,
             "current_scene": "新场景：站在车站门外。",
         }

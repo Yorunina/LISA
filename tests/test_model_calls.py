@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 
 from lisa import model_calls
 from lisa.model_calls import (
-    MAX_INPUT_BYTES,
     BudgetExceeded,
     ModelBusy,
     ModelCallFailed,
@@ -183,6 +182,8 @@ async def test_reservation_precedes_request_and_usage_settles_cost(
         "max_output_tokens": 600,
         "input_per_million": "10",
         "output_per_million": "50",
+        "request_bytes": 400,
+        "input_limit_bytes": 64000,
     }
     assert days[0].spent_usd == calls[0].charged_usd
     assert days[0].reserved_usd == 0
@@ -195,6 +196,7 @@ async def test_reservation_precedes_request_and_usage_settles_cost(
 async def test_history_trimming_uses_actual_request_size_and_keeps_current_input(
     model_settings, engine, task_account, sdk
 ):
+    model_settings = model_settings.model_copy(update={"model_max_input_bytes": 11_000})
     instructions = "完整性格与系统指令"
     messages = [
         {"role": "user", "content": "旧" * 4000},
@@ -210,7 +212,7 @@ async def test_history_trimming_uses_actual_request_size_and_keeps_current_input
     assert request["input"][-1]["content"] == "新" * 3000
     assert (
         len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode())
-        <= MAX_INPUT_BYTES
+        <= model_settings.model_max_input_bytes
     )
 
 
@@ -493,6 +495,8 @@ async def test_invalid_task_account_or_input_cannot_call_provider(
             db.get(Task, task_id).status = "succeeded"
     if condition == "wrong_user":
         user_id = uuid4()
+    if condition == "oversize":
+        model_settings = model_settings.model_copy(update={"model_max_input_bytes": 11_000})
     with pytest.raises(ModelCallFailed):
         await generate_reply(
             model_settings,

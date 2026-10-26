@@ -230,6 +230,45 @@ async def test_chat_recall_records_actual_memory_and_only_supplied_life_mentions
     assert db.get(Memory, item.id).shared_at is None
 
 
+@pytest.mark.asyncio
+async def test_chat_recall_excludes_project_and_chapter_sources(
+    recall_settings,
+    engine,
+    db,
+    owner,
+    project,
+    monkeypatch,
+):
+    work = db.get(Project, UUID(project["id"]))
+    work.constraints = "仅作者可见的作品约束：蓝色门牌必须沉默。"
+    db.add(
+        Chapter(
+            project_id=work.id,
+            title="不可带入聊天的章节",
+            position=1,
+            content=document("仅作者可见的章节正文：蓝色门牌在桥下。"),
+            version=1,
+        )
+    )
+    item = memory(db, owner)
+    await build_index(recall_settings, engine, db)
+    task_id = queue_chat(db, owner)
+    monkeypatch.setattr(
+        recall_module, "generate_embeddings", AsyncMock(return_value=[[1.0, 0.0]])
+    )
+
+    async def generate(settings, engine, current_task, user_id, instructions, messages):
+        assert item.content in instructions
+        assert "仅作者可见的作品约束" not in instructions
+        assert "仅作者可见的章节正文" not in instructions
+        return dialogue()
+
+    await execute_chat(recall_settings, engine, task_id, generate=generate)
+    assert [(row.source_kind, row.source_id) for row in reference_rows(db, task_id)] == [
+        ("memory", item.id)
+    ]
+
+
 @pytest.mark.parametrize("consumer", ["chat", "author"])
 @pytest.mark.asyncio
 async def test_unknown_query_stops_before_generation(

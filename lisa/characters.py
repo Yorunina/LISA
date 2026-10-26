@@ -42,11 +42,22 @@ class CharacterRetrievalConfig(BaseModel):
     max_chars: int = Field(default=1500, ge=300, le=3000, strict=True)
 
 
+class CharacterDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    identity: str = Field(default="", max_length=1000)
+    personality: str = Field(default="", max_length=1500)
+    motivation: str = Field(default="", max_length=1000)
+    relationships: str = Field(default="", max_length=1500)
+    voice: str = Field(default="", max_length=1000)
+
+
 class CharacterInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     name: str = Field(min_length=1, max_length=60)
     prompt: str = Field(min_length=1, max_length=3000)
+    definition: CharacterDefinition = Field(default_factory=CharacterDefinition)
     known_information: str = Field(default="", max_length=6000)
     current_scene: str = Field(default="", max_length=1500)
     retrieval_config: CharacterRetrievalConfig = Field(default_factory=CharacterRetrievalConfig)
@@ -127,6 +138,9 @@ def update_character(character_id: UUID, data: CharacterInput, user: User, db: D
     character = _require_character(db, user.id, character_id)
     _require_unique_name(db, character.project_id, data.name, character.id)
     values = data.model_dump()
+    # Older clients do not edit the structured definition.
+    if "definition" not in data.model_fields_set:
+        values.pop("definition")
     saved = CharacterView.model_validate(character).model_dump(include=values.keys())
     if saved != values:
         for key, value in values.items():

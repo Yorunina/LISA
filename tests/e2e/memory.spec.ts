@@ -3,26 +3,20 @@ import type { Page } from '@playwright/test'
 
 type Memory = {
   id: string; content: string; kind: string; basis: string; project_id: string | null;
-  allow_chat: boolean; allow_writing: boolean; source_message_id: string | null;
+  allow_chat: boolean; allow_writing: boolean; source_message_id: string | null; source_task_id: string | null;
   source_deleted: boolean; created_at: string; updated_at: string;
   life_kind?: 'event' | 'dream' | null; occurred_at?: string | null; shared_at?: string | null;
   source_chapter_id?: string | null; source_version?: number | null;
 }
-type Chat = { id: string; role: string; content: string; sent_at: string; context_excluded: boolean }
 const stamp = '2026-10-23T06:00:00Z'
 
 async function stubMemory(page: Page) {
   const state = {
-    memories: [{ id: 'memory-1', content: '喜欢在下雨的晚上读书。', kind: 'preference', basis: '', project_id: null, allow_chat: true, allow_writing: true, source_message_id: 'chat-1', source_deleted: false, created_at: stamp, updated_at: stamp }] as Memory[],
-    chats: [{ id: 'chat-1', role: 'user', content: '雨天晚上我喜欢读散文，这只是我的个人喜好。', sent_at: stamp, context_excluded: false }, { id: 'chat-2', role: 'assistant', content: '下次可以聊聊你最近读到的段落。', sent_at: '2026-10-23T06:01:00Z', context_excluded: false }] as Chat[],
+    memories: [{ id: 'memory-1', content: '喜欢在下雨的晚上读书。', kind: 'preference', basis: '', project_id: null, allow_chat: true, allow_writing: true, source_message_id: null, source_task_id: 'chat-task-1', source_deleted: false, created_at: stamp, updated_at: stamp }] as Memory[],
     saveFails: false,
     saves: [] as Record<string, unknown>[],
-    clearBodies: [] as { start: string; end: string }[],
     queries: [] as string[],
-  }
-  function deleteChat(id: string) {
-    state.chats = state.chats.filter(item => item.id !== id)
-    state.memories = state.memories.map(item => item.source_message_id === id ? { ...item, source_deleted: true } : item)
+    deprecatedRequests: [] as string[],
   }
   await page.route('**/api/**', async route => {
     const req = route.request()
@@ -47,7 +41,7 @@ async function stubMemory(page: Page) {
     if (path === '/memories' && req.method() === 'POST') {
       if (state.saveFails) return route.fulfill({ status: 503, json: { detail: '合成保存失败，请重试。' } })
       state.saves.push(body)
-      const item = { ...body, id: `memory-${state.memories.length + 1}`, source_deleted: false, created_at: stamp, updated_at: stamp }
+      const item = { ...body, id: `memory-${state.memories.length + 1}`, source_message_id: null, source_task_id: null, source_deleted: false, created_at: stamp, updated_at: stamp }
       state.memories.unshift(item)
       return route.fulfill({ status: 201, json: item })
     }
@@ -55,7 +49,7 @@ async function stubMemory(page: Page) {
     if (source) {
       const item = state.memories.find(item => item.id === source[1])!
       if (item.source_chapter_id) return route.fulfill({ json: { status: 'chapter', chapter: { id: item.source_chapter_id, title: '十月二十二日的梦', version: item.source_version, content: '昨夜做了一个梦，旧书店里长出了一棵银杏树。这是采用时的第二版。' } } })
-      return route.fulfill({ json: { status: item.source_deleted ? 'deleted' : 'available', message: state.chats.find(message => message.id === item.source_message_id) ?? null } })
+      return route.fulfill({ json: { status: item.source_task_id ? 'agent' : 'manual', message: null } })
     }
     const memory = path.match(/^\/memories\/([^/]+)$/)
     if (memory) {
@@ -69,20 +63,11 @@ async function stubMemory(page: Page) {
       const previous = state.memories.find(item => item.id === memory[1])!
       const item = { ...previous, ...body, shared_at: previous.kind === 'life' && (body.content !== previous.content || body.life_kind !== previous.life_kind || body.occurred_at !== previous.occurred_at) ? null : previous.shared_at }
       state.memories = state.memories.map(current => current.id === item.id ? item : current)
-      state.chats = state.chats.map(message => message.id === item.source_message_id ? { ...message, context_excluded: true } : message)
       return route.fulfill({ json: item })
     }
-    if (path === '/chat-messages') return route.fulfill({ json: state.chats.filter(item => item.content.includes(url.searchParams.get('query') || '')) })
-    if (path === '/chat-messages/clear') {
-      state.clearBodies.push(body)
-      const removed = state.chats.filter(item => item.sent_at >= body.start && item.sent_at < body.end)
-      for (const item of removed) deleteChat(item.id)
-      return route.fulfill({ json: { deleted_count: removed.length } })
-    }
-    const chat = path.match(/^\/chat-messages\/([^/]+)$/)
-    if (chat && req.method() === 'DELETE') {
-      expect(req.headers()['x-lisa-request']).toBe('1')
-      deleteChat(chat[1]); return route.fulfill({ status: 204 })
+    if (path.startsWith('/chat-messages')) {
+      state.deprecatedRequests.push(path)
+      return route.fulfill({ status: 410, json: { detail: 'LISA 不再保存或提供原始聊天记录。' } })
     }
     return route.fulfill({ status: 404, json: { detail: `Unexpected synthetic route: ${path}` } })
   })
@@ -104,7 +89,8 @@ test('memory map is a read-only visual view and opens the existing editor', asyn
 test('memory correction and use restrictions require save, failed leave preserves input, and source remains viewable', async ({ page }, testInfo) => {
   const state = await stubMemory(page)
   await page.getByRole('button', { name: '查看来源' }).click()
-  await expect(page.getByRole('dialog')).toContainText('雨天晚上我喜欢读散文')
+  await expect(page.getByRole('dialog')).toContainText('聊天 Agent 根据当轮内容主动提升')
+  await expect(page.getByRole('dialog')).toContainText('原始聊天不会被保存')
   await page.getByRole('button', { name: '关闭来源' }).click()
   await page.screenshot({ path: testInfo.outputPath('desktop-memory-list.png'), fullPage: true })
   await page.getByRole('button', { name: '纠正与用途' }).click()
@@ -114,7 +100,7 @@ test('memory correction and use restrictions require save, failed leave preserve
   await page.getByRole('button', { name: '个人设置' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '继续编辑' }).click()
   state.saveFails = true
-  await page.getByRole('button', { name: '原始聊天', exact: true }).click()
+  await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect(page.getByRole('alert')).toContainText('合成保存失败')
   await expect(page.getByLabel('记忆内容', { exact: true })).toHaveValue('喜欢在雨天傍晚读散文，不喜欢晚上熬夜。')
@@ -129,7 +115,9 @@ test('memory correction and use restrictions require save, failed leave preserve
   await page.screenshot({ path: testInfo.outputPath('mobile-memory-editor.png'), fullPage: true })
   await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('button', { name: '查看来源' }).click()
-  await expect(page.getByRole('dialog')).toContainText('这段原话仅供查看，不再作为模型依据')
+  await expect(page.getByRole('dialog')).toContainText('原始聊天不会被保存')
+  expect(state.memories[0].source_task_id).toBe('chat-task-1')
+  expect(state.memories[0].source_message_id).toBeNull()
   await page.getByRole('button', { name: '关闭来源' }).click()
   await page.getByLabel('搜索记忆').fill('不存在的条目')
   await page.getByRole('button', { name: '搜索', exact: true }).click()
@@ -142,43 +130,42 @@ test('memory correction and use restrictions require save, failed leave preserve
   expect(state.queries.some(query => query.includes('kind=fact'))).toBe(true)
 })
 
-test('source deletion and range clearing preserve independent memories and explain impact before deletion', async ({ page }, testInfo) => {
+test('memory deletion confirms scope, preserves other memories, and never offers raw chat history', async ({ page }, testInfo) => {
   const state = await stubMemory(page)
-  await page.getByRole('button', { name: '原始聊天', exact: true }).click()
-  await expect(page.getByText('雨天晚上我喜欢读散文，这只是我的个人喜好。', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: '删除原话', exact: true }).first().click()
-  await expect(page.getByRole('dialog')).toContainText('独立记忆与已有作品保留')
-  await page.getByRole('dialog').getByRole('button', { name: '取消', exact: true }).click()
-  expect(state.chats).toHaveLength(2)
-  await page.getByRole('button', { name: '删除原话', exact: true }).first().click()
-  await page.getByRole('button', { name: '确认删除原话', exact: true }).click()
-  await expect.poll(() => state.chats.length).toBe(1)
-  await page.getByRole('button', { name: '记忆条目', exact: true }).click()
-  await expect(page.getByText('原始聊天已删除', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '查看来源' })).toHaveCount(0)
-  expect(state.memories).toHaveLength(1)
-  await page.getByRole('button', { name: '原始聊天', exact: true }).click()
-  await page.getByText('按时间范围清理聊天', { exact: true }).click()
-  await page.getByLabel('开始时间（含）').fill('2026-10-23T00:00')
-  await page.getByLabel('结束时间（不含）').fill('2026-10-24T00:00')
+  state.memories.push({ ...state.memories[0], id: 'memory-independent', content: '手动留下的另一条记忆。', source_task_id: null })
+  await page.getByRole('button', { name: '搜索', exact: true }).click()
+  const entry = page.locator('.memory-entry').filter({ hasText: '喜欢在下雨的晚上读书。' })
+  await expect(page.getByRole('button', { name: '原始聊天', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '记为记忆', exact: true })).toHaveCount(0)
+  await expect(page.getByText('按时间范围清理聊天', { exact: true })).toHaveCount(0)
+  await entry.getByRole('button', { name: '删除记忆', exact: true }).click()
+  const confirmation = page.getByRole('dialog', { name: '删除这条记忆？' })
+  await expect(confirmation).toContainText('不会从聊天记录重新提取它')
+  await expect(confirmation).toContainText('已有作品需另行修改')
+  await confirmation.getByRole('button', { name: '取消', exact: true }).click()
+  expect(state.memories).toHaveLength(2)
+  await entry.getByRole('button', { name: '删除记忆', exact: true }).click()
+  state.saveFails = true
+  await confirmation.getByRole('button', { name: '确认删除记忆', exact: true }).click()
+  await expect(confirmation.getByRole('alert')).toContainText('合成保存失败')
+  expect(state.memories).toHaveLength(2)
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
-  await page.screenshot({ path: testInfo.outputPath('mobile-chat-cleanup.png'), fullPage: true })
-  await page.getByRole('button', { name: '清理此时间段', exact: true }).click()
-  await expect(page.getByRole('dialog')).toContainText('清理整个时间段，不受搜索条件限制')
-  expect(state.clearBodies).toHaveLength(0)
-  await page.getByRole('button', { name: '确认清理聊天', exact: true }).click()
-  await expect(page.getByText('已清理 1 条聊天原文。独立记忆与已有作品保留。', { exact: true })).toBeVisible()
-  expect(state.clearBodies[0].start).toMatch(/Z$/)
+  await page.screenshot({ path: testInfo.outputPath('mobile-memory-deletion.png'), fullPage: true })
+  state.saveFails = false
+  await confirmation.getByRole('button', { name: '确认删除记忆', exact: true }).click()
+  await expect(entry).toHaveCount(0)
+  const independent = page.locator('.memory-entry').filter({ hasText: '手动留下的另一条记忆。' })
+  await expect(independent).toContainText('手动添加')
+  await expect(independent.getByRole('button', { name: '查看来源' })).toHaveCount(0)
   expect(state.memories).toHaveLength(1)
-  await page.getByRole('button', { name: '记忆条目', exact: true }).click()
-  await page.getByRole('button', { name: '删除记忆', exact: true }).click()
-  await expect(page.getByRole('dialog')).toContainText('不会从原话自动恢复这条记忆')
-  await page.getByRole('button', { name: '确认删除记忆', exact: true }).click()
+  await independent.getByRole('button', { name: '删除记忆', exact: true }).click()
+  await confirmation.getByRole('button', { name: '确认删除记忆', exact: true }).click()
   await expect(page.getByRole('heading', { name: '还没有留下记忆' })).toBeVisible()
+  expect(state.deprecatedRequests).toEqual([])
 })
 
-test('manual inference needs its basis and unsaved memory can be discarded; chat can explicitly become a sourced memory', async ({ page }) => {
+test('manual inference needs its basis, unsaved edits can be discarded, and new memories have manual provenance', async ({ page }) => {
   const state = await stubMemory(page)
   await page.getByRole('button', { name: '添加记忆', exact: true }).click()
   await page.getByLabel('记忆内容', { exact: true }).fill('也许偏爱安静的叙事。')
@@ -188,29 +175,31 @@ test('manual inference needs its basis and unsaved memory can be discarded; chat
   await page.getByLabel('推测依据', { exact: true }).fill('多次选择节奏舒缓的散文，尚未明确确认。')
   await page.getByRole('button', { name: '保存记忆', exact: true }).click()
   await expect.poll(() => state.memories.length).toBe(2)
-  expect(state.memories[0]).toMatchObject({ kind: 'inference', allow_writing: false, source_message_id: null })
+  expect(state.memories[0]).toMatchObject({ kind: 'inference', allow_writing: false, source_message_id: null, source_task_id: null })
   await page.getByLabel('记忆内容', { exact: true }).fill('不会保存的改动。')
   await page.getByRole('button', { name: '我的作品', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '放弃修改' }).click()
   await expect(page.getByRole('button', { name: '创建小说', exact: true })).toBeVisible()
   expect(state.memories[0].content).toBe('也许偏爱安静的叙事。')
   await page.getByRole('button', { name: '记忆', exact: true }).click()
-  await page.getByRole('button', { name: '原始聊天', exact: true }).click()
-  await page.getByRole('button', { name: '记为记忆', exact: true }).first().click()
-  await expect(page.getByLabel('记忆内容', { exact: true })).toHaveValue('雨天晚上我喜欢读散文，这只是我的个人喜好。')
+  const manual = page.locator('.memory-entry').filter({ hasText: '也许偏爱安静的叙事。' })
+  await expect(manual).toContainText('手动添加')
+  await expect(manual.getByRole('button', { name: '查看来源' })).toHaveCount(0)
+  await page.getByRole('button', { name: '添加记忆', exact: true }).click()
   await page.getByLabel('记忆内容', { exact: true }).fill('个人喜好：雨天读散文。')
-  await page.getByRole('button', { name: '原始聊天', exact: true }).click()
+  await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()
   await expect.poll(() => state.memories.length).toBe(3)
-  expect(state.memories[0].source_message_id).toBe('chat-1')
-  await expect(page.getByText('雨天晚上我喜欢读散文，这只是我的个人喜好。', { exact: true })).toBeVisible()
+  expect(state.memories[0]).toMatchObject({ source_message_id: null, source_task_id: null })
+  await expect(page.getByText('个人喜好：雨天读散文。', { exact: true })).toBeVisible()
+  expect(state.deprecatedRequests).toEqual([])
 })
 
 test('life timeline keeps dreams distinct, displays exact diary source version and saves corrected time without claiming prior sharing', async ({ page }, testInfo) => {
   const state = await stubMemory(page)
   state.memories.push(
-    { ...state.memories[0], id: 'life-dream', kind: 'life', life_kind: 'dream', occurred_at: '2026-10-22T05:00:00Z', shared_at: null, content: '梦见旧书店里长出一棵银杏树。', source_message_id: null, source_chapter_id: 'diary-chapter', source_version: 2 },
-    { ...state.memories[0], id: 'life-event', kind: 'life', life_kind: 'event', occurred_at: '2026-10-23T05:00:00Z', shared_at: stamp, content: '下午在旧书店买了一本诗集。', source_message_id: null },
+    { ...state.memories[0], id: 'life-dream', kind: 'life', life_kind: 'dream', occurred_at: '2026-10-22T05:00:00Z', shared_at: null, content: '梦见旧书店里长出一棵银杏树。', source_message_id: null, source_task_id: null, source_chapter_id: 'diary-chapter', source_version: 2 },
+    { ...state.memories[0], id: 'life-event', kind: 'life', life_kind: 'event', occurred_at: '2026-10-23T05:00:00Z', shared_at: stamp, content: '下午在旧书店买了一本诗集。', source_message_id: null, source_task_id: null },
   )
   await page.getByLabel('类型筛选').selectOption('life')
   await expect(page.getByText('虚拟生活时间线', { exact: false })).toContainText('按发生时间由近到远排列')

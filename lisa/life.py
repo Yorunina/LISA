@@ -51,13 +51,17 @@ def adopt_life_events(
     candidates: list[LifeCandidate],
     adopted_text: str,
     source_message_id: UUID | None = None,
+    source_task_id: UUID | None = None,
     chapter: ChapterVersion | None = None,
 ) -> list[UUID]:
-    """Called in the adoption transaction with its account lock, after saving the source."""
+    """Adopt validated LISA events while retaining task provenance only."""
     from lisa.works import document_text
 
-    if (source_message_id is None) == (chapter is None):
+    if chapter is not None and (source_message_id is not None or source_task_id is not None):
         return []
+    if source_message_id is None and source_task_id is None and chapter is None:
+        return []
+    source_task_ref = source_task_id
     source_task_id = None
     if source_message_id:
         # A deleted life memory must not be recreated from the same generated
@@ -83,7 +87,14 @@ def adopt_life_events(
         if source is None or source.content != adopted_text:
             return []
         source_task_id = source.task_id
-    else:
+    elif source_task_ref:
+        task = db.scalar(
+            select(Task).where(Task.id == source_task_ref, Task.user_id == user_id)
+        )
+        if task is None:
+            return []
+        source_task_id = source_task_ref
+    elif chapter is not None:
         saved = db.scalar(
             select(ChapterVersion)
             .join(
@@ -143,6 +154,7 @@ def adopt_life_events(
                 allow_chat=True,
                 allow_writing=True,
                 source_message_id=source_message_id,
+                source_task_id=source_task_id,
                 source_chapter_id=chapter.chapter_id if chapter else None,
                 source_version=chapter.version if chapter else None,
             )

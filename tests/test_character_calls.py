@@ -14,8 +14,8 @@ from test_works import chapter as chapter
 from test_works import owner as owner
 from test_works import project as project
 
-from lisa.author import execute_author
-from lisa.characters import DEFAULT_CHARACTER_PROMPT
+from lisa.author import _character_choice_context, execute_author
+from lisa.characters import DEFAULT_CHARACTER_PROMPT, CharacterDefinition
 from lisa.model_calls import BudgetExceeded, ModelCallUnknown
 from lisa.models import (
     Account,
@@ -56,6 +56,39 @@ async def forbidden(*args):
 
 
 @pytest.mark.asyncio
+async def test_author_reads_disabled_character_definitions_with_legacy_notes(
+    settings, engine, db, owner, project
+):
+    work = db.get(Project, UUID(project["id"]))
+    work.characters = "旧版人物资料保留。"
+    db.commit()
+    role_id = add_character(
+        db, project["id"], enabled=False,
+        definition={"identity": "调查记者", "motivation": "寻找旧友"},
+    )
+    other = Project(user_id=owner, title="另一部作品", kind="novel", is_current=False)
+    db.add(other)
+    db.commit()
+    add_character(db, other.id, definition={"identity": "其他作品人物"}, enabled=False)
+    task_id = pending_task(db, owner, project)
+
+    async def generate(*args):
+        packet = json.loads(args[-1][0]["content"])
+        assert packet["characters"] == {
+            "legacy_notes": "旧版人物资料保留。",
+            "entries": [{"id": str(role_id), "name": "林舟",
+                         "definition": {"identity": "调查记者", "motivation": "寻找旧友"}}],
+        }
+        return RESULT
+
+    await execute_author(
+        settings, engine, task_id, generate=generate, decide=forbidden, character_generate=forbidden
+    )
+    db.expire_all()
+    assert db.get(Task, task_id).status == "completed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("configured", [False, True])
 async def test_no_enabled_character_keeps_single_author_call(
     settings, engine, db, owner, project, configured
@@ -76,6 +109,36 @@ async def test_no_enabled_character_keeps_single_author_call(
     assert len(calls) == 1 and calls[0][2] == task_id
     assert db.get(Task, task_id).status == "completed"
     assert db.scalar(select(func.count()).select_from(CharacterParticipation)) == 0
+
+
+def test_character_choice_context_drops_detailed_project_material():
+    instructions, messages = _character_choice_context(
+        [
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "title": "作品",
+                        "kind": "novel",
+                        "goal": "写一段站台场景",
+                        "agreement": "保留人物关系。",
+                        "constraints": "不改变结局。",
+                        "summary": "主角到达车站。",
+                        "plot_state": "正在等车。",
+                        "context": "雨水落下。",
+                        "target_text": "",
+                        "worldbook": "世界书秘密。" * 1000,
+                        "characters": "角色秘密。" * 1000,
+                    },
+                    ensure_ascii=False,
+                ),
+            }
+        ]
+    )
+    serialized = instructions + json.dumps(messages, ensure_ascii=False)
+    assert "世界书秘密" not in serialized
+    assert "角色秘密" not in serialized
+    assert "写一段站台场景" in serialized
 
 
 @pytest.mark.asyncio
@@ -102,8 +165,14 @@ async def test_author_can_directly_finish_without_consulting_available_character
 async def test_character_receives_only_own_knowledge_and_suggestion_is_not_persisted(
     settings, engine, client, db, owner, project
 ):
-    character_id = add_character(db, project["id"], current_scene="我看到站台亮起了灯。")
-    add_character(db, project["id"], name="陌生人", known_information="他人角色秘密")
+    definition = CharacterDefinition(identity="调查记者", voice="短句，先问问题").model_dump()
+    character_id = add_character(
+        db, project["id"], current_scene="我看到站台亮起了灯。", definition=definition
+    )
+    add_character(
+        db, project["id"], name="陌生人", known_information="他人角色秘密",
+        definition={"motivation": "他人档案秘密"},
+    )
     work = db.get(Project, UUID(project["id"]))
     work.worldbook = "世界书秘密：城主是寄信人。"
     db.add(Memory(user_id=owner, kind="fact", content="用户私人记忆", allow_writing=True))
@@ -123,11 +192,14 @@ async def test_character_receives_only_own_knowledge_and_suggestion_is_not_persi
         calls.append(("role", args[2], args[3]))
         instructions, messages = args[-2:]
         serialized = instructions + json.dumps(messages, ensure_ascii=False)
-        for secret in ["世界书秘密", "任务秘密", "他人角色秘密", "用户私人记忆", "陌生人"]:
+        for secret in [
+            "世界书秘密", "任务秘密", "他人角色秘密", "他人档案秘密", "用户私人记忆", "陌生人"
+        ]:
             assert secret not in serialized
         assert "说话简短，只给自己的反应。" in instructions
         assert json.loads(messages[0]["content"]) == {
             "name": "林舟",
+            "definition": definition,
             "known_information": "我在车站等车，只知道列车晚点。",
             "current_scene": "我看到站台亮起了灯。",
         }

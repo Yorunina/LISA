@@ -14,7 +14,6 @@ from lisa.auth import DB, current_user
 from lisa.interaction import interaction_view
 from lisa.models import (
     Account,
-    ChatMessage,
     ContactPreference,
     OutboundMessage,
     Persona,
@@ -105,18 +104,8 @@ def contact_snapshot(db: Session, user_id: UUID) -> dict:
     user = db.get(Account, user_id)
     preferences = db.get(ContactPreference, user_id)
     persona_version = db.scalar(select(Persona.version).where(Persona.user_id == user_id))
-    anchor = db.scalar(
-        select(ChatMessage.id)
-        .where(
-            ChatMessage.user_id == user_id,
-            ChatMessage.role == "user",
-        )
-        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
-        .limit(1)
-    )
     return {
         "activity_at": user.last_active_at.isoformat() if user and user.last_active_at else None,
-        "anchor_message_id": str(anchor) if anchor else None,
         "memory_revision": user.memory_revision if user else None,
         "preferences_revision": preferences.revision if preferences else 0,
         "persona_version": persona_version,
@@ -151,14 +140,6 @@ def contact_block_reason(
     if has_unprocessed_chat(db, user_id):
         return "unprocessed_chat"
     snapshot = contact_snapshot(db, user_id)
-    if snapshot["anchor_message_id"] is None:
-        return "no_feedback"
-    anchor = db.get(ChatMessage, UUID(snapshot["anchor_message_id"]))
-    if anchor.deleted_at is not None or anchor.context_excluded:
-        return "no_feedback"
-    conversation = db.get(Task, anchor.task_id) if anchor.task_id else None
-    if conversation is None or conversation.status != "completed" or conversation.error:
-        return "unprocessed_chat"
     if db.scalar(
         select(OutboundMessage.id)
         .join(Task, Task.id == OutboundMessage.task_id)
@@ -225,7 +206,7 @@ def contact_block_reason(
         select(Task.id)
         .where(
             *others,
-            Task.request["anchor_message_id"].astext == snapshot["anchor_message_id"],
+            Task.request["activity_at"].astext == snapshot["activity_at"],
         )
         .limit(1)
     ):

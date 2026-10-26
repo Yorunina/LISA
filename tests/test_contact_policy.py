@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -56,11 +55,11 @@ def block(db, context, **kwargs):
     return contact_block_reason(db, settings, user.id, now=now, **kwargs)
 
 
-def attempt(db, context, *, hours=5, status="failed", same_anchor=False):
+def attempt(db, context, *, hours=5, status="failed", same_activity=False):
     user, _, _, now, _ = context
     snapshot = contact_snapshot(db, user.id)
-    if not same_anchor:
-        snapshot["anchor_message_id"] = str(uuid4())
+    if not same_activity:
+        snapshot["activity_at"] = (user.last_active_at - timedelta(days=1)).isoformat()
     task = Task(
         user_id=user.id,
         kind="contact",
@@ -152,11 +151,10 @@ def test_invalid_contact_settings_rejected(client, owner, values):
 
 def test_eligible_snapshot_excludes_own_attempt(db, contact_context):
     assert block(db, contact_context) is None
-    current = attempt(db, contact_context, hours=0, same_anchor=True, status="running")
+    current = attempt(db, contact_context, hours=0, same_activity=True, status="running")
     assert block(db, contact_context, task=current) is None
     assert set(current.request) == {
         "activity_at",
-        "anchor_message_id",
         "memory_revision",
         "preferences_revision",
         "persona_version",
@@ -171,10 +169,9 @@ def test_eligible_snapshot_excludes_own_attempt(db, contact_context):
         ("binding", "account_unavailable"),
         ("persona", "account_unavailable"),
         ("inactive", "inactive"),
-        ("anchor", "no_feedback"),
+        ("no_activity", "inactive"),
         ("pending", "unprocessed_chat"),
-        ("failed", "unprocessed_chat"),
-        ("unknown", "unprocessed_chat"),
+        ("running", "unprocessed_chat"),
         ("outbound", "unprocessed_chat"),
     ],
 )
@@ -190,12 +187,10 @@ def test_ineligible_accounts(db, contact_context, change, reason):
         db.delete(db.scalar(select(Persona).where(Persona.user_id == user.id)))
     elif change == "inactive":
         user.last_active_at = now - timedelta(hours=24)
-    elif change == "anchor":
-        db.delete(message)
-    elif change in ("pending", "failed"):
+    elif change == "no_activity":
+        user.last_active_at = None
+    elif change in ("pending", "running"):
         chat.status = change
-    elif change == "unknown":
-        chat.error = "model_unknown"
     else:
         db.add(
             OutboundMessage(
@@ -258,7 +253,7 @@ def test_late_delivery_counts_at_actual_finish_time(db, contact_context, status)
 
 @pytest.mark.parametrize("status", ["failed", "cancelled", "completed"])
 def test_every_attempt_consumes_feedback_opportunity(db, contact_context, status):
-    attempt(db, contact_context, status=status, same_anchor=True)
+    attempt(db, contact_context, status=status, same_activity=True)
     assert block(db, contact_context) == "feedback_used"
 
 
@@ -272,22 +267,11 @@ def test_recent_user_reply_waits_for_minimum_interval(db, contact_context):
     assert block(db, contact_context) is None
 
 
-@pytest.mark.parametrize("change", ["message", "memory", "preferences", "persona", "activity"])
+@pytest.mark.parametrize("change", ["memory", "preferences", "persona", "activity"])
 def test_contact_snapshot_invalidated_by_relevant_changes(db, contact_context, change):
-    user, chat, message, _, _ = contact_context
-    current = attempt(db, contact_context, hours=0, same_anchor=True)
-    if change == "message":
-        db.add(
-            ChatMessage(
-                user_id=user.id,
-                task_id=chat.id,
-                role="user",
-                content="同秒新反馈",
-                sent_at=message.sent_at,
-                created_at=message.created_at + timedelta(microseconds=1),
-            )
-        )
-    elif change == "memory":
+    user, _, _, _, _ = contact_context
+    current = attempt(db, contact_context, hours=0, same_activity=True)
+    if change == "memory":
         user.memory_revision += 1
     elif change == "preferences":
         db.get(ContactPreference, user.id).revision += 1
@@ -320,30 +304,54 @@ def test_non_contact_and_other_accounts_do_not_consume_limits(db, contact_contex
     assert block(db, contact_context) is None
 
 
-def test_anchor_tiebreak_is_stable_message_id(db, contact_context):
+def test_contact_snapshot_does_not_depend_on_legacy_message_bodies(db, contact_context):
     user, chat, message, _, _ = contact_context
-    message.id = UUID(int=1)
-    later = ChatMessage(
-        id=UUID(int=2),
-        user_id=user.id,
-        task_id=chat.id,
-        role="user",
-        content="第二条",
-        sent_at=message.sent_at,
-        created_at=message.created_at,
+    before = contact_snapshot(db, user.id)
+    db.add(
+        ChatMessage(
+            user_id=user.id,
+            task_id=chat.id,
+            role="user",
+            content="私密原文不进入快照",
+            sent_at=message.sent_at,
+            created_at=message.created_at,
+        )
     )
-    db.add(later)
     db.flush()
-    assert contact_snapshot(db, user.id)["anchor_message_id"] == str(later.id)
+    assert contact_snapshot(db, user.id) == before
+    assert set(before) == {
+        "activity_at",
+        "memory_revision",
+        "preferences_revision",
+        "persona_version",
+    }
+    assert before["activity_at"] == user.last_active_at.isoformat()
 
 
 @pytest.mark.parametrize("change", ["deleted", "excluded"])
-def test_removed_feedback_cannot_trigger_new_contact(db, contact_context, change):
-    _, _, message, now, _ = contact_context
+def test_removing_legacy_feedback_does_not_restore_consumed_activity(db, contact_context, change):
+    user, _, message, now, _ = contact_context
+    attempt(db, contact_context, same_activity=True)
+    before = contact_snapshot(db, user.id)
     if change == "deleted":
-        message.deleted_at = now
-        message.content = ""
+        db.delete(message)
     else:
         message.context_excluded = True
     db.flush()
-    assert block(db, contact_context) == "no_feedback"
+    assert contact_snapshot(db, user.id) == before
+    assert block(db, contact_context) == "feedback_used"
+    # Fresh account activity, independent of any raw message, opens a later opportunity.
+    user.last_active_at = now - timedelta(hours=4)
+    db.flush()
+    assert block(db, contact_context) is None
+
+
+@pytest.mark.parametrize("status,error", [("failed", None), ("completed", "model_unknown")])
+def test_terminal_chat_without_pending_delivery_does_not_block_contact(
+    db, contact_context, status, error
+):
+    _, chat, message, _, _ = contact_context
+    chat.status, chat.error = status, error
+    db.delete(message)
+    db.flush()
+    assert block(db, contact_context) is None

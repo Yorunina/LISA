@@ -211,7 +211,7 @@ async def test_omitted_optional_topic_cannot_produce_a_saved_default(
 
 
 @pytest.mark.asyncio
-async def test_optional_observations_do_not_crowd_out_ordinary_chat(
+async def test_optional_memories_do_not_crowd_out_current_chat_input(
     db,
     engine,
     settings,
@@ -219,10 +219,13 @@ async def test_optional_observations_do_not_crowd_out_ordinary_chat(
 ):
     create_user(db)
     task_id = ingest(db, "observation-budget", content="你好，今天聊点轻松的。")
-    monkeypatch.setattr("lisa.chat.interaction_context", lambda *args: "过长的可选观察" * 3000)
+    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
+    monkeypatch.setattr(
+        "lisa.chat.memory_context", lambda *args, **kwargs: "过长的可选记忆" * 3000
+    )
     generate = AsyncMock(return_value="好，我们轻松聊聊。")
     await execute_chat(settings, engine, task_id, generate=generate)
     db.expire_all()
     assert db.get(Task, task_id).status == "completed"
-    assert "过长的可选观察" not in generate.call_args.args[4]
+    assert "过长的可选记忆" not in generate.call_args.args[4]
     assert "你好，今天聊点轻松的。" in generate.call_args.args[5][-1]["content"]

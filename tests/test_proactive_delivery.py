@@ -97,12 +97,13 @@ async def send_once(engine, settings, monkeypatch, *, outcome="sent", before_res
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["sent", "unknown", "failed"])
-async def test_contact_delivery_adopts_history_and_life_only_after_confirmed_send(
+async def test_contact_delivery_adopts_life_without_history_only_after_confirmed_send(
     db, engine, settings, monkeypatch, outcome
 ):
     user_id, task_id, outbound_id, memory_id = seed_contact(db)
     config = settings.model_copy(update={"proactive_enabled": True})
     assert db.scalar(select(ChatMessage.id).where(ChatMessage.task_id == task_id)) is None
+    expected_content = db.get(OutboundMessage, outbound_id).content
     calls = await send_once(engine, config, monkeypatch, outcome=outcome)
     db.expire_all()
     outbound = db.get(OutboundMessage, outbound_id)
@@ -113,25 +114,30 @@ async def test_contact_delivery_adopts_history_and_life_only_after_confirmed_sen
         "send_private_msg",
         {
             "user_id": int(QQ),
-            "message": [{"type": "text", "data": {"text": outbound.content}}],
+            "message": [{"type": "text", "data": {"text": expected_content}}],
         },
     )
     sources = list(db.scalars(select(ChatMessage).where(ChatMessage.task_id == task_id)))
     new_life = db.scalar(select(Memory).where(Memory.content == "今天在窗边读了一篇短诗"))
     mentioned = db.get(Memory, memory_id)
     if outcome == "sent":
-        assert len(sources) == 1 and sources[0].content == outbound.content
-        assert not sources[0].context_excluded
-        assert new_life.source_message_id == sources[0].id
+        assert sources == [] and outbound.content == ""
+        assert new_life.source_message_id is None and new_life.source_task_id == task_id
         assert new_life.shared_at == mentioned.shared_at == outbound.finished_at
         finish_delivery(db, outbound_id, "sent", "duplicate acknowledgement")
         db.commit()
-        assert len(list(db.scalars(select(ChatMessage).where(ChatMessage.task_id == task_id)))) == 1
+        assert db.scalar(select(ChatMessage.id).where(ChatMessage.task_id == task_id)) is None
+        assert list(db.scalars(select(Memory.id).where(Memory.source_task_id == task_id))) == [
+            new_life.id
+        ]
     else:
         assert sources == [] and new_life is None and mentioned.shared_at is None
         if outcome == "unknown":
+            assert outbound.content == ""
             assert claim_outbound(db, QQ, settings=config) is None
         else:
+            # Only the bounded pending retry retains its transient payload.
+            assert outbound.content == expected_content
             # Known transport failure keeps one outbox, but a later opt-out prevents retry.
             outbound.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
             db.get(ContactPreference, user_id).enabled = False
@@ -175,7 +181,8 @@ async def test_memory_edit_while_contact_is_sending_cannot_adopt_stale_life(
     db.expire_all()
     assert db.get(OutboundMessage, outbound_id).status == "sent"
     source = db.scalar(select(ChatMessage).where(ChatMessage.task_id == task_id))
-    assert source.context_excluded
+    assert source is None
+    assert db.get(OutboundMessage, outbound_id).content == ""
     assert db.scalar(select(Memory.id).where(Memory.content == "今天在窗边读了一篇短诗")) is None
 
 

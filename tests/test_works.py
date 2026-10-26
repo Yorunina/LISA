@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from lisa.models import (
@@ -206,6 +206,7 @@ def test_other_user_cannot_read_edit_or_operate_work(client, db, project, chapte
     for path in [
         f"/api/projects/{other_project_id}",
         f"/api/projects/{other_project_id}/chapters",
+        f"/api/projects/{other_project_id}/chapters?summary=true",
         f"/api/projects/{other_project_id}/tasks",
         f"/api/chapters/{other_chapter_id}",
     ]:
@@ -533,3 +534,59 @@ def test_unsupported_rewrite_block_rejected_before_task_creation(client, db, pro
     )
     assert response.status_code == 409
     assert db.scalar(select(func.count()).select_from(Task)) == 0
+
+
+def test_work_summaries_omit_materials_and_body_but_retain_versions(client, project, chapter):
+    projects = client.get("/api/projects?summary=true")
+    assert projects.status_code == 200
+    assert set(projects.json()[0]) == {
+        "id", "title", "kind", "is_current", "completed", "index_revision", "material_revision",
+    }
+    chapters = client.get(f"/api/projects/{project['id']}/chapters?summary=true")
+    assert chapters.status_code == 200
+    assert set(chapters.json()[0]) == {"id", "title", "position", "version"}
+    assert chapters.json()[0]["id"] == str(chapter)
+    assert client.get(f"/api/chapters/{chapter}").json()["content"]
+    revision = projects.json()[0]["material_revision"]
+    client.put(f"/api/projects/{project['id']}", json={"summary": "新资料"}, headers=HEADERS)
+    assert client.get("/api/projects?summary=true").json()[0]["material_revision"] != revision
+
+
+def test_task_list_reads_model_ledger_once(client, db, owner, project):
+    tasks = [Task(user_id=owner, project_id=UUID(project["id"]), kind="scene",
+                  status="failed", source="web") for _ in range(12)]
+    db.add_all(tasks)
+    day = datetime.now(UTC).date()
+    db.add(BudgetDay(day=day, spent_usd=Decimal("0.02"), reserved_usd=Decimal("0.01")))
+    db.flush()
+    db.add_all([
+        ModelCall(task_id=tasks[0].id, user_id=owner, budget_day=day, state="reserved",
+                  reserved_usd=Decimal("0.01")),
+        ModelCall(task_id=tasks[1].id, user_id=owner, budget_day=day, state="succeeded",
+                  reserved_usd=Decimal("0.03"), charged_usd=Decimal("0.02"),
+                  input_tokens=12, output_tokens=8),
+    ])
+    first, second = str(tasks[0].id), str(tasks[1].id)
+    db.commit()
+    queries = []
+
+    def capture(connection, cursor, statement, parameters, context, executemany):
+        if "FROM model_calls" in statement:
+            queries.append(statement)
+
+    engine = client.app.state.engine
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        response = client.get(f"/api/projects/{project['id']}/tasks")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+    assert response.status_code == 200
+    assert len(response.json()) == 12
+    items = {item["id"]: item for item in response.json()}
+    assert not items[first]["can_retry"]
+    assert Decimal(items[first]["reserved_usd"]) == Decimal("0.01")
+    assert items[second]["can_retry"] and items[second]["input_tokens"] == 12
+    assert Decimal(items[second]["charged_usd"]) == Decimal("0.02")
+    assert all(item["can_retry"] and item["input_tokens"] == 0
+               for key, item in items.items() if key not in {first, second})
+    assert len(queries) == 1

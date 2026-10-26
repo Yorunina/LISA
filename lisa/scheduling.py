@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB, current_user
@@ -185,6 +185,7 @@ def discard_pending_plans(db: Session, user_id: UUID) -> None:
         task.status = "cancelled"
         task.finished_at = now
         task.error = "new_user_message"
+        db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
     db.flush()
 
 

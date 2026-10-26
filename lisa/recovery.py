@@ -4,10 +4,10 @@ import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
-from lisa.models import Account, BudgetDay, ModelCall, QQBinding, StyleCorpus, Task
+from lisa.models import Account, BudgetDay, ChatMessage, ModelCall, QQBinding, StyleCorpus, Task
 
 logger = logging.getLogger(__name__)
 WORKER_TIMEOUT_SECONDS = 60
@@ -59,6 +59,7 @@ def _clean_inputs(db, task):
 
     if task.kind == "chat":
         clear_image_inputs(db, task.id)
+        db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
     if task.kind == "style_distill":
         for corpus in db.scalars(select(StyleCorpus).where(StyleCorpus.task_id == task.id)):
             clear_corpus(db, corpus)
@@ -93,7 +94,7 @@ SELECT t.id FROM tasks t
 JOIN procrastinate_jobs j ON j.id = t.queue_job_id
 LEFT JOIN procrastinate_workers w ON w.id = j.worker_id
 WHERE j.task_name IN ('lisa.chat', 'lisa.author', 'lisa.index', 'lisa.style',
-    'lisa.contact', 'lisa.shared')
+    'lisa.contact', 'lisa.life_plan', 'lisa.shared')
 AND (
     (j.status = 'doing' AND
         (w.id IS NULL OR w.last_heartbeat < now() - make_interval(secs => :timeout)))

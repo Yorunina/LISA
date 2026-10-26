@@ -194,7 +194,11 @@ async def test_generation_and_confirmed_delivery_preserve_progress_reference(
         db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == contact.id)).status
         == "sent"
     )
-    assert db.scalar(select(ChatMessage).where(ChatMessage.task_id == contact.id))
+    assert not db.scalar(select(ChatMessage).where(ChatMessage.task_id == contact.id))
+    assert db.scalar(select(OutboundMessage).where(
+        OutboundMessage.task_id == contact.id
+    )).content == ""
+    assert db.get(Task, contact.id).input_snapshot["progress"] == reference
     assert progress_context(db, contact_user) == (None, "")
 
 
@@ -240,7 +244,13 @@ async def test_editing_result_prevents_stale_progress_or_excludes_it_after_infli
         await send_once(engine, contact_settings, monkeypatch, before_result=edit)
         db.expire_all()
         source = db.scalar(select(ChatMessage).where(ChatMessage.task_id == contact.id))
-        assert source.context_excluded
+        assert source is None
+        delivered = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == contact.id))
+        assert delivered.status == "sent" and delivered.content == ""
+        assert not progress_is_current(
+            db, contact_user, db.get(Task, contact.id).input_snapshot["progress"]
+        )
+        assert not list(db.scalars(select(Memory)))
 
 
 @pytest.mark.asyncio
@@ -261,10 +271,15 @@ async def test_progress_claim_must_match_actually_provided_result_and_reply(
     elif invalid == "false_evidence":
         reply["progress_mention"]["evidence"] = "没有出现在回复里的引用。"
     else:
-        monkeypatch.setattr("lisa.proactive.interaction_context", lambda *args: "过长观察" * 3000)
-    await execute_contact(
-        contact_settings, engine, contact.id, generate=AsyncMock(return_value=reply)
-    )
+        contact_settings = contact_settings.model_copy(update={"model_max_input_bytes": 16_000})
+        monkeypatch.setattr(
+            "lisa.proactive.memory_context", lambda *args, **kwargs: "过长记忆" * 5000
+        )
+    generate = AsyncMock(return_value=reply)
+    await execute_contact(contact_settings, engine, contact.id, generate=generate)
+    if invalid == "omitted_context":
+        generate.assert_awaited_once()
+        assert str(author.id) not in generate.call_args.args[4]
     db.expire_all()
     assert db.get(Task, contact.id).status == "failed"
     assert not db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == contact.id))

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { ApiError, request } from './api';
+import { ApiError, request, resumeSession, SESSION_EXPIRED_EVENT } from './api';
 import type { User } from './api';
 import { AuthForm } from './auth';
 import { Study } from './setup';
@@ -12,6 +12,9 @@ function App() {
   const [checking, setChecking] = useState(true);
   const [sessionError, setSessionError] = useState('');
   const [accountDeleted, setAccountDeleted] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [renewing, setRenewing] = useState(false);
+  const [renewError, setRenewError] = useState('');
 
   async function checkSession() {
     setChecking(true);
@@ -27,6 +30,22 @@ function App() {
   }
 
   useEffect(() => { void checkSession(); }, []);
+  useEffect(() => {
+    const expired = () => setSessionExpired(true);
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
+  }, []);
+
+  async function confirmSession() {
+    setRenewing(true); setRenewError('');
+    try {
+      const current = await request<User>('/auth/me');
+      if (current.id !== user?.id) { setRenewError('请在新标签页登录原账号，再返回这里确认。'); return; }
+      resumeSession();
+      setSessionExpired(false);
+    } catch { setRenewError('尚未恢复登录，请在新标签页登录原账号后再试。'); }
+    finally { setRenewing(false); }
+  }
 
   async function logout() {
     try {
@@ -35,6 +54,8 @@ function App() {
       if (!(cause instanceof ApiError && cause.status === 401)) throw cause;
     }
     setUser(null);
+    resumeSession();
+    setSessionExpired(false);
   }
 
   return <div className="shell">
@@ -45,6 +66,11 @@ function App() {
       <p className="sidebar-footer">你的私人书房</p>
     </aside>
     <div className="workspace">
+      {user && sessionExpired && <section className="setup-note" aria-label="登录状态" role="status">
+        <p>登录已失效，当前未保存内容仍保留。请在新标签页登录原账号，然后返回继续。</p>
+        <div className="button-row"><a className="text-button" href="/" target="_blank" rel="noopener noreferrer">在新标签页登录</a><button className="secondary" disabled={renewing} onClick={() => void confirmSession()}>{renewing ? '正在确认…' : '我已重新登录'}</button></div>
+        {renewError && <p>{renewError}</p>}
+      </section>}
       {user && !checking && !sessionError ? <Study key={user.id} user={user} onLogout={logout} onDeleted={() => { setUser(null); setAccountDeleted(true); }} /> : <>
       <header className="topbar">
         <span>私人书房 <span className="breadcrumb-divider" aria-hidden="true">/</span> 欢迎</span>
@@ -60,7 +86,7 @@ function App() {
               <div className="book-art" aria-hidden="true"><div className="book-cover"><span>故事的起点</span><div className="book-window"><i className="sun" /><i className="hill" /><i className="hill front" /></div><small>LISA</small></div><div className="book-caption">一页未写完的故事，<br />一种缓缓生长的陪伴。</div></div>
               <p className="invitation-note">邀请制开放 · 为每一段故事留出空间</p>
             </section>
-            <AuthForm notice={accountDeleted ? '账号及全部关联个人数据已删除。' : ''} onLogin={value => { setUser(value); setAccountDeleted(false); }} />
+            <AuthForm notice={accountDeleted ? '账号及全部关联个人数据已删除。' : ''} onLogin={value => { resumeSession(); setSessionExpired(false); setUser(value); setAccountDeleted(false); }} />
           </div>}
       </main>
       </>}

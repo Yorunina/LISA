@@ -78,8 +78,9 @@ async def test_chat_adopts_grounded_memory_without_a_project(settings, engine, d
     memories = db.scalars(select(Memory)).all()
     assert len(memories) == 1
     assert memories[0].kind == "preference" and memories[0].project_id is None
-    source = db.get(ChatMessage, memories[0].source_message_id)
-    assert source.task_id == task_id
+    assert memories[0].source_message_id is None
+    assert memories[0].source_task_id == task_id
+    assert db.scalar(select(ChatMessage)) is None
 
     async def followup(*args):
         assert "用户喜欢缓慢而具体的回复。" in args[-2]
@@ -131,10 +132,10 @@ async def test_corrected_memory_excludes_raw_source_and_echo(
         return Conversation(reply="山城最近怎么样？")
 
     await execute_chat(settings, engine, message(db, 3, "聊聊我的住处"), generate=corrected)
-    assert (
-        client.get(f"/api/memories/{item['id']}/source").json()["message"]["content"]
-        == "我住在海边"
-    )
+    assert client.get(f"/api/memories/{item['id']}/source").json() == {
+        "status": "agent", "message": None,
+    }
+    assert db.scalar(select(ChatMessage)) is None
 
 
 @pytest.mark.asyncio
@@ -178,18 +179,18 @@ async def test_deleted_memory_is_absent_from_both_history_and_recall(
 
 
 @pytest.mark.asyncio
-async def test_source_deleted_inflight_does_not_reappear_as_reply_or_memory(
+async def test_memory_deleted_inflight_does_not_reappear_as_reply_or_new_memory(
     settings,
     engine,
     db,
     client,
     owner,
 ):
+    protected = remember(client, "旧的私人信息")
     task_id = message(db, 1, "旧的私人信息")
-    source = db.scalar(select(ChatMessage).where(ChatMessage.task_id == task_id))
 
     async def generate(*args):
-        assert client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS).status_code == 204
+        assert client.delete(f"/api/memories/{protected['id']}", headers=HEADERS).status_code == 204
         return Conversation(
             reply="重复旧的私人信息",
             memories=[
@@ -204,17 +205,19 @@ async def test_source_deleted_inflight_does_not_reappear_as_reply_or_memory(
     await execute_chat(settings, engine, task_id, generate=generate)
     db.expire_all()
     assert db.get(Task, task_id).error == "context_changed"
-    assert db.scalar(select(Memory)) is None
-    assert db.scalar(select(ChatMessage).where(ChatMessage.role == "assistant")) is None
+    assert db.scalar(select(Memory).where(Memory.active.is_(True))) is None
+    assert db.scalar(select(ChatMessage)) is None
     outgoing = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == task_id))
     assert "旧的私人信息" not in outgoing.content
 
 
 @pytest.mark.asyncio
-async def test_cleared_pending_batch_never_calls_model(settings, engine, db, client, owner):
+async def test_invalidated_pending_batch_never_calls_model(settings, engine, db, owner):
     task_id = message(db, 1, "清理后不再处理")
     source = db.scalar(select(ChatMessage).where(ChatMessage.task_id == task_id))
-    client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS)
+    # Inbox invalidation is internal; raw-history management is no longer a user API.
+    db.delete(source)
+    db.commit()
 
     async def must_not_call(*args):
         pytest.fail("Deleted input reached model")
@@ -282,7 +285,7 @@ async def test_author_discards_late_result_after_memory_restriction(
 
 
 @pytest.mark.asyncio
-async def test_unchanged_memory_save_and_empty_cleanup_do_not_discard_writing(
+async def test_unchanged_memory_save_and_retired_cleanup_do_not_discard_writing(
     settings,
     engine,
     db,
@@ -312,7 +315,7 @@ async def test_unchanged_memory_save_and_empty_cleanup_do_not_discard_writing(
             },
             headers=HEADERS,
         )
-        assert response.json() == {"deleted_count": 0}
+        assert response.status_code == 410
         return RESULT
 
     await execute_author(settings, engine, task_id, generate=generate)

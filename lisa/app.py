@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Request
@@ -16,6 +17,7 @@ from lisa import (
     characters,
     contact_policy,
     group_records,
+    life_plans,
     memory,
     onboarding,
     retrieval_config,
@@ -50,24 +52,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def request_context(request: Request, call_next):
         request.state.request_id = uuid4().hex
-        if (
-            request.url.path.startswith("/api/")
-            and request.method not in {"GET", "HEAD", "OPTIONS"}
-            and request.headers.get("X-LISA-Request") != "1"
-        ):
-            response = JSONResponse({"detail": "请通过 LISA 页面提交操作。"}, status_code=403)
-        else:
-            response = await call_next(request)
+        started = perf_counter()
+        status = 500
+        try:
+            if (
+                request.url.path.startswith("/api/")
+                and request.method not in {"GET", "HEAD", "OPTIONS"}
+                and request.headers.get("X-LISA-Request") != "1"
+            ):
+                response = JSONResponse({"detail": "请通过 LISA 页面提交操作。"}, status_code=403)
+            else:
+                response = await call_next(request)
+            status = response.status_code
+        finally:
+            # Only a registered route template, never URL values, tokens or private bodies.
+            route = getattr(request.scope.get("route"), "path", "unmatched")
+            logger.info(
+                "request=%s method=%s route=%s status=%s duration_ms=%.1f",
+                request.state.request_id, request.method, route, status,
+                (perf_counter() - started) * 1000,
+            )
         response.headers["X-Request-ID"] = request.state.request_id
         if request.url.path.startswith("/api/"):
             response.headers["Cache-Control"] = "no-store"
-        # No URL query, credentials, usernames or request/response bodies in logs.
-        logger.info(
-            "request=%s method=%s status=%s",
-            request.state.request_id,
-            request.method,
-            response.status_code,
-        )
         return response
 
     @app.exception_handler(SQLAlchemyError)
@@ -93,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(works.router)
     app.include_router(sharing.router)
     app.include_router(memory.router)
+    app.include_router(life_plans.router)
     app.include_router(shared.router)
     app.include_router(scheduling.router)
     app.include_router(contact_policy.router)

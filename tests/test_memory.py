@@ -2,16 +2,15 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from lisa.memory import (
     MemoryCandidate,
     adopt_candidates,
     memory_context,
     record_chat_references,
-    usable_chat_clause,
 )
-from lisa.models import Account, ChatMessage, Memory, OutboundMessage, Project, Task
+from lisa.models import Account, ChatMessage, Memory, MemoryUse, OutboundMessage, Project, Task
 
 HEADERS = {"X-LISA-Request": "1"}
 
@@ -187,22 +186,29 @@ def test_memories_and_sources_are_account_isolated(client, db, owner, conversati
     assert client.get("/api/memories").json() == []
     assert client.get(f"/api/memories/{memory.id}/source").status_code == 404
     assert client.delete(f"/api/memories/{memory.id}", headers=HEADERS).status_code == 404
-    assert client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS).status_code == 404
-    for payload in ({"source_message_id": str(source.id)}, {"project_id": str(project.id)}):
-        assert (
-            client.post(
-                "/api/memories", headers=HEADERS, json={"content": "跨用户引用", **payload}
-            ).status_code
-            == 404
-        )
-    assert [item["content"] for item in client.get("/api/chat-messages").json()] != ["私密原话"]
-    assert memory_context(db, owner) == ""
+    assert client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS).status_code == 410
+    assert client.post(
+        "/api/memories", headers=HEADERS,
+        json={"content": "跨用户引用", "project_id": str(project.id)},
+    ).status_code == 404
+    # Removed source fields cannot attach another account's raw message.
+    manual = client.post(
+        "/api/memories", headers=HEADERS,
+        json={"content": "用户自行填写", "source_message_id": str(source.id)},
+    )
+    assert manual.status_code == 201 and manual.json()["source_message_id"] is None
+    assert client.get(f"/api/memories/{manual.json()['id']}/source").json() == {
+        "status": "manual", "message": None,
+    }
+    assert client.get("/api/chat-messages").status_code == 410
+    assert "私密" not in memory_context(db, owner)
 
 
 @pytest.mark.parametrize("operation", ["correction", "deletion", "restriction"])
 def test_source_task_excluded_and_never_reextracted(client, db, owner, conversation, operation):
     source, answer = conversation
     adopt_candidates(db, owner, None, [candidate(allow_writing=True)], [source.id])
+    db.execute(delete(ChatMessage).where(ChatMessage.task_id == source.task_id))
     db.commit()
     item = client.get("/api/memories").json()[0]
     if operation == "deletion":
@@ -219,8 +225,7 @@ def test_source_task_excluded_and_never_reextracted(client, db, owner, conversat
         )
     assert response.status_code in (200, 204)
     db.expire_all()
-    assert list(db.scalars(select(ChatMessage).where(usable_chat_clause()))) == []
-    assert db.get(ChatMessage, answer.id).content
+    assert db.scalar(select(ChatMessage)) is None
     adopt_candidates(db, owner, None, [candidate()], [source.id])
     db.commit()
     entries = client.get("/api/memories").json()
@@ -231,54 +236,49 @@ def test_source_task_excluded_and_never_reextracted(client, db, owner, conversat
         assert "雨天" not in memory_context(db, owner)
     else:
         assert len(entries) == 1 and memory_context(db, owner, purpose="writing") == ""
-    assert len(client.get("/api/chat-messages").json()) == 2
+    assert client.get("/api/chat-messages").status_code == 410
 
 
-def test_deleted_chat_source_keeps_memory_and_cannot_be_adopted(client, db, owner, conversation):
+def test_terminal_chat_source_is_erased_but_promoted_memory_keeps_task_provenance(
+    client, db, owner, conversation,
+):
     source = conversation[0]
-    adopt_candidates(db, owner, None, [candidate()], [source.id])
+    source_id, task_id = source.id, source.task_id
+    adopt_candidates(db, owner, None, [candidate()], [source_id])
+    db.execute(delete(ChatMessage).where(ChatMessage.task_id == task_id))
     db.commit()
     item = client.get("/api/memories").json()[0]
-    assert client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS).status_code == 204
-    db.expire_all()
-    assert db.get(ChatMessage, source.id).content == ""
+    assert item["source_message_id"] is None and item["source_task_id"] == str(task_id)
+    assert db.get(ChatMessage, source_id) is None
     assert client.get(f"/api/memories/{item['id']}/source").json() == {
-        "status": "deleted",
-        "message": None,
+        "status": "agent", "message": None,
     }
-    assert client.get("/api/memories").json()[0]["source_deleted"]
     assert "雨天" in memory_context(db, owner)
-    adopt_candidates(db, owner, None, [candidate(content="迟到的新记忆")], [source.id])
+    adopt_candidates(db, owner, None, [candidate(content="迟到的新记忆")], [source_id])
     db.commit()
     assert len(client.get("/api/memories").json()) == 1
 
 
-def test_time_cleanup_is_bounded_and_clears_outbound_copy(client, db, owner, conversation):
+def test_removed_history_routes_expose_no_legacy_content_or_mutation(
+    client, db, owner, conversation,
+):
     source, answer = conversation
-    adopt_candidates(db, owner, None, [candidate()], [source.id])
-    db.add(
-        ChatMessage(
-            user_id=owner,
-            role="user",
-            content="保留旧消息",
-            sent_at=source.sent_at - timedelta(days=2),
-        )
-    )
-    db.commit()
+    response = client.get("/api/chat-messages", params={"query": "雨天"})
+    assert response.status_code == 410 and source.content not in response.text
+    assert client.delete(f"/api/chat-messages/{source.id}", headers=HEADERS).status_code == 410
     response = client.post(
-        "/api/chat-messages/clear",
-        headers=HEADERS,
+        "/api/chat-messages/clear", headers=HEADERS,
         json={
             "start": (source.sent_at - timedelta(minutes=1)).isoformat(),
             "end": (source.sent_at + timedelta(minutes=1)).isoformat(),
         },
     )
-    assert response.json() == {"deleted_count": 2}
+    assert response.status_code == 410
     db.expire_all()
+    # Removed UI routes do not mutate an active inbox or delivery payload.
+    assert db.get(ChatMessage, source.id).content == "我喜欢雨天散步。"
     outbound = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == answer.task_id))
-    assert outbound.content == "" and outbound.status == "deleted"
-    assert [m["content"] for m in client.get("/api/chat-messages").json()] == ["保留旧消息"]
-    assert len(client.get("/api/memories").json()) == 1
+    assert outbound.content == answer.content and outbound.status == "pending"
 
 
 @pytest.mark.parametrize(
@@ -288,12 +288,12 @@ def test_time_cleanup_is_bounded_and_clears_outbound_copy(client, db, owner, con
         ("2026-10-02T00:00:00Z", "2026-10-01T00:00:00Z"),
     ],
 )
-def test_clear_rejects_naive_or_reversed_time(client, owner, start, end):
+def test_removed_clear_endpoint_rejects_any_time_range(client, owner, start, end):
     assert (
         client.post(
             "/api/chat-messages/clear", headers=HEADERS, json={"start": start, "end": end}
         ).status_code
-        == 422
+        == 410
     )
 
 
@@ -353,81 +353,58 @@ def test_candidates_require_user_evidence_and_deduplicate(db, owner, conversatio
     )
     db.commit()
     items = list(db.scalars(select(Memory)))
-    assert len(items) == 1 and items[0].source_message_id == source.id
+    assert len(items) == 1 and items[0].source_message_id is None
+    assert items[0].source_task_id == source.task_id
     assert db.get(Account, owner).memory_revision == before_epoch
 
 
-def test_duplicate_sources_and_later_echoes_are_excluded(client, db, owner, conversation):
+def test_deleted_promoted_memory_cannot_be_recreated_from_erased_turns(
+    client, db, owner, conversation,
+):
     source = conversation[0]
-    adopt_candidates(db, owner, None, [candidate()], [source.id])
-    repeated_task, recall_task, echo_task, unrelated_task = [
-        Task(user_id=owner, kind="chat", status="completed") for _ in range(4)
-    ]
-    db.add_all([repeated_task, recall_task, echo_task, unrelated_task])
+    source_id = source.id
+    adopt_candidates(db, owner, None, [candidate()], [source_id])
+    repeated_task = Task(user_id=owner, kind="chat", status="completed")
+    db.add(repeated_task)
     db.flush()
     repeated = ChatMessage(
-        user_id=owner,
-        task_id=repeated_task.id,
-        role="user",
-        content=source.content,
+        user_id=owner, task_id=repeated_task.id, role="user", content=source.content,
         sent_at=datetime.now(UTC),
     )
-    recalled = ChatMessage(
-        user_id=owner,
-        task_id=recall_task.id,
-        role="assistant",
-        content="你喜欢雨天散步。",
-        sent_at=datetime.now(UTC),
-    )
-    echoed = ChatMessage(
-        user_id=owner,
-        task_id=echo_task.id,
-        role="assistant",
-        content="继续聊聊你喜欢的雨天散步。",
-        sent_at=datetime.now(UTC),
-    )
-    unrelated = ChatMessage(
-        user_id=owner,
-        task_id=unrelated_task.id,
-        role="user",
-        content="这是一条无关消息。",
-        sent_at=datetime.now(UTC),
-    )
-    db.add_all([repeated, recalled, echoed, unrelated])
+    db.add(repeated)
     db.flush()
-    adopt_candidates(db, owner, None, [candidate()], [repeated.id])
-    references = []
-    memory_context(db, owner, references=references)
-    record_chat_references(db, recall_task.id, references, [])
-    record_chat_references(db, echo_task.id, [], [recalled.id])
+    repeated_id = repeated.id
+    adopt_candidates(db, owner, None, [candidate()], [repeated_id])
+    assert len(list(db.scalars(select(Memory)))) == 1
+    db.execute(delete(ChatMessage).where(ChatMessage.user_id == owner))
     db.commit()
-    item = client.get("/api/memories").json()[0]
+    unrelated = create_memory(client, content="无关偏好继续保留")
+    item = next(item for item in client.get("/api/memories").json() if "雨天" in item["content"])
     assert client.delete(f"/api/memories/{item['id']}", headers=HEADERS).status_code == 204
     db.expire_all()
-    usable = list(db.scalars(select(ChatMessage.id).where(usable_chat_clause())))
-    assert usable == [unrelated.id]
-    adopt_candidates(db, owner, None, [candidate()], [source.id, repeated.id])
+    assert db.scalar(select(ChatMessage)) is None
+    adopt_candidates(db, owner, None, [candidate()], [source_id, repeated_id])
     db.commit()
-    assert client.get("/api/memories").json() == []
+    assert [entry["id"] for entry in client.get("/api/memories").json()] == [unrelated["id"]]
+    assert "雨天" not in memory_context(db, owner)
 
 
-def test_raw_source_history_usage_is_recorded(client, db, owner, conversation):
-    source, original_answer = conversation
+def test_only_explicit_memory_uses_are_recorded_without_raw_history_references(
+    client, db, owner, conversation,
+):
+    source, answer = conversation
     adopt_candidates(db, owner, None, [candidate()], [source.id])
     later_task = Task(user_id=owner, kind="chat", status="completed")
     db.add(later_task)
     db.flush()
-    answer = ChatMessage(
-        user_id=owner,
-        task_id=later_task.id,
-        role="assistant",
-        content="这段原始聊天提到雨天散步。",
-        sent_at=datetime.now(UTC),
-    )
-    db.add(answer)
-    record_chat_references(db, later_task.id, [], [original_answer.id])
+    memory = db.scalar(select(Memory))
+    record_chat_references(db, later_task.id, [], [answer.id])
+    assert db.scalar(select(MemoryUse).where(MemoryUse.task_id == later_task.id)) is None
+    record_chat_references(db, later_task.id, [memory.id], [answer.id])
+    record_chat_references(db, later_task.id, [memory.id], [answer.id])
     db.commit()
-    item = client.get("/api/memories").json()[0]
-    assert client.delete(f"/api/memories/{item['id']}", headers=HEADERS).status_code == 204
-    db.expire_all()
-    assert db.get(ChatMessage, answer.id).context_excluded
+    uses = list(db.scalars(select(MemoryUse).where(MemoryUse.task_id == later_task.id)))
+    assert len(uses) == 1 and uses[0].memory_id == memory.id
+    assert client.get(f"/api/memories/{memory.id}/source").json() == {
+        "status": "agent", "message": None,
+    }

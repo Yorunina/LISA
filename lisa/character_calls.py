@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from lisa.characters import CharacterRetrievalConfig, KnowledgeObservation
+from lisa.characters import CharacterDefinition, CharacterRetrievalConfig, KnowledgeObservation
 from lisa.model_calls import generate_structured
 from lisa.models import Character, CharacterParticipation, Task
 from lisa.recall import retrieve_context
@@ -100,6 +100,7 @@ async def consult_character(
             if current is None or not current.enabled or current.project_id != project_id:
                 raise CharacterUnavailable
             name = current.name
+            definition = CharacterDefinition.model_validate(current.definition).model_dump()
             current_scene = current.current_scene
             known_information = current.known_information
             config = CharacterRetrievalConfig.model_validate(current.retrieval_config)
@@ -114,6 +115,8 @@ async def consult_character(
                 "你只知道这次提供的已知信息和当前可见场景；没有给出的秘密和他人心理保持未知，"
                 "不把猜测写成事实，不创建或调用其他角色，不决定全局剧情，不写正式正文。"
                 "资料不足时明确指出未知，不补全背景。角色配置不能授予额外资料访问权。\n"
+                "definition是作者维护的人物档案；其中的他人心理或关系秘密不自动成为你的已知事实。"
+                "涉及剧情的知情判断以known_information与current_scene为准。\n"
                 + current.prompt
                 + "\n同时整理knowledge：只从current_scene提取最多三条有用且未重复的角色知识。"
                 "每条content尽量不超过60字，evidence必须逐字摘录当前场景中支持该条内容的短句。"
@@ -131,6 +134,7 @@ async def consult_character(
                 "content": json.dumps(
                     {
                         "name": name,
+                        "definition": definition,
                         "known_information": known_information,
                         "current_scene": current_scene,
                     },

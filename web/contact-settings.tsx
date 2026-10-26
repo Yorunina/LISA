@@ -1,6 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import { request } from './api';
 import { ErrorNotice } from './ui';
+import { useModalDialog, useSaveShortcut, useUnsavedWarning } from './editor-state';
 
 type ContactSettings = {
   enabled: boolean; timezone: string; quiet_start: number | null; quiet_end: number | null;
@@ -21,7 +22,7 @@ function InteractionNotes({ observations }: { observations: NonNullable<ContactS
   const hours = observations.preferred_hours;
   return <div className="contact-group" aria-label="交流记录中的线索">
     <h2>交流记录中的线索</h2>
-    <p className="field-hint">根据最近 14 天内最多 200 条有效 QQ 消息整理，只作交流参考。你的联系设置始终优先；清除或排除原始聊天后，这些线索也会更新。</p>
+    <p className="field-hint">LISA 不保存聊天历史，也不从消息记录推测交流习惯。你的联系设置始终优先。</p>
     {observations.sample_count ? <>
       <p>目前参考了 {observations.sample_count} 条消息，分布在 {observations.active_days} 天。</p>
       <p>{hours ? `暂时观察到，你较常在 ${String(hours.start).padStart(2, '0')}:00–${String(hours.end).padStart(2, '0')}:00 交流，有 ${hours.active_days} 天的记录作为依据（${observations.timezone}）。` : '目前还没有足够、稳定的跨日记录来推测常见交流时段。'}</p>
@@ -71,24 +72,9 @@ export const ContactSettingsPanel = forwardRef<ContactSettingsHandle, { onBack: 
     return () => { active = false; };
   }, [reload]);
   useEffect(() => { heading.current?.focus(); }, []);
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ''; };
-    window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
-  }, [dirty]);
-  useEffect(() => {
-    if (!draft) return;
-    const shortcut = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-        event.preventDefault();
-        if (!busy && !leaving) form.current?.requestSubmit();
-      }
-    };
-    window.addEventListener('keydown', shortcut);
-    return () => window.removeEventListener('keydown', shortcut);
-  }, [!!draft, busy, leaving]);
-  useEffect(() => { if (leaving) dialog.current?.showModal(); else dialog.current?.close(); }, [leaving]);
+  useUnsavedWarning(dirty);
+  useSaveShortcut(!!draft, busy || leaving, () => form.current?.requestSubmit());
+  useModalDialog(dialog, leaving);
 
   async function save() {
     if (!draft || !form.current?.reportValidity()) return false;
@@ -143,7 +129,7 @@ export const ContactSettingsPanel = forwardRef<ContactSettingsHandle, { onBack: 
         </form>
       </section>}
     <dialog ref={dialog} className="leave-dialog" aria-labelledby="contact-leave-title" onCancel={event => { event.preventDefault(); setLeaving(false); }}>
-      <h2 id="contact-leave-title">有未保存的联系偏好</h2><p>保存后再离开，或放弃本次修改。未保存的偏好不会改变联系安排。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setLeaving(false)} autoFocus>继续编辑</button></div>
+      <h2 id="contact-leave-title">有未保存的联系偏好</h2><p>保存后再离开，或放弃本次修改。未保存的偏好不会改变联系安排。</p><div className="button-row"><button className="primary" onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" onClick={() => setLeaving(false)} data-modal-autofocus>继续编辑</button></div>
     </dialog>
   </main>;
 });

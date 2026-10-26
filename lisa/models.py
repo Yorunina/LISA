@@ -292,6 +292,7 @@ class Character(Base):
     )
     name: Mapped[str] = mapped_column(String(60))
     prompt: Mapped[str] = mapped_column(Text)
+    definition: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
     known_information: Mapped[str] = mapped_column(Text, default="", server_default="")
     current_scene: Mapped[str] = mapped_column(Text, default="", server_default="")
     retrieval_config: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
@@ -335,6 +336,23 @@ class ActivityPlan(Base):
     memory_revision: Mapped[int] = mapped_column(default=1, server_default="1")
     status: Mapped[str] = mapped_column(String(16), default="pending", server_default="pending")
     task_id: Mapped[UUID | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"))
+
+
+class LifeWeekPlan(Base):
+    __tablename__ = "life_week_plans"
+    __table_args__ = (UniqueConstraint("user_id", "week_start"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    week_start: Mapped[date] = mapped_column(Date)
+    week_end: Mapped[date] = mapped_column(Date)
+    state: Mapped[str] = mapped_column(String(16), default="active", server_default="active")
+    items: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+    revision: Mapped[int] = mapped_column(default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class Chapter(Base):
@@ -431,6 +449,11 @@ class Memory(Base):
     )
     source_message_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("chat_messages.id", ondelete="SET NULL"), index=True
+    )
+    # Chat messages are transient processing input.  Agent-promoted memories
+    # retain the task provenance without retaining the original message text.
+    source_task_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), index=True
     )
     source_chapter_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("chapters.id", ondelete="SET NULL", name="fk_memories_source_chapter"),

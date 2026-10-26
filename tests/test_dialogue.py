@@ -85,7 +85,8 @@ async def test_explicit_qq_commission_is_atomic_and_keeps_original_project(
     db.commit()
 
     async def generate(*args):
-        assert "车站收到信" in args[-2]
+        assert "合成作品测试" in args[-2]
+        assert "车站收到信" not in args[-2]
         with Session(engine) as session, session.begin():
             session.get(Project, work_id).is_current = False
             session.add(Project(user_id=owner, title="另一个作品", is_current=True, kind="novel"))
@@ -203,7 +204,7 @@ async def test_busy_chat_keeps_original_project_after_switch(settings, engine, d
 
 
 @pytest.mark.asyncio
-async def test_oversized_project_keeps_plain_chat_without_saving_decisions(
+async def test_large_project_constraints_do_not_expand_chat_context(
     settings, engine, db, owner, project
 ):
     work = db.get(Project, UUID(project["id"]))
@@ -219,10 +220,10 @@ async def test_oversized_project_keeps_plain_chat_without_saving_decisions(
     db.commit()
 
     async def generate(*args):
-        assert "只聊天" in args[-2]
         assert "合成作品测试。" in args[-2]
+        assert "必须保留的规则。" not in args[-2]
         assert args[-1][-1]["content"].endswith("今天好累，想聊会天。")
-        return "今天先休息一会。"
+        return decide()
 
     await execute_chat(settings, engine, task_id, generate=generate)
     db.expire_all()
@@ -230,4 +231,4 @@ async def test_oversized_project_keeps_plain_chat_without_saving_decisions(
     assert db.get(Project, work.id).constraints == "必须保留的规则。" * 2000
     assert db.scalar(select(Task.id).where(Task.kind == "scene")) is None
     notice = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == task_id))
-    assert "网页操作" in notice.content and "今天先休息一会" in notice.content
+    assert "网页操作" not in notice.content and "我们先把这个场景确定下来" in notice.content

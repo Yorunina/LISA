@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import update
+from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from websockets.asyncio.client import connect
@@ -428,10 +428,18 @@ async def serve_connection(
         if chat_enabled:
             # A previous connection/process may have sent without recording the outcome.
             with Session(engine) as db, db.begin():
-                pending = update(OutboundMessage).where(OutboundMessage.status == "sending")
+                pending = (
+                    select(OutboundMessage.id)
+                    .where(OutboundMessage.status == "sending")
+                    .order_by(OutboundMessage.user_id, OutboundMessage.created_at,
+                              OutboundMessage.sequence)
+                )
                 if allow_qq is not None:
                     pending = pending.where(OutboundMessage.qq_id == allow_qq)
-                db.execute(pending.values(status="unknown", finished_at=datetime.now(UTC)))
+                # Use the same terminal path as a live unknown acknowledgement:
+                # never resend it, cancel its unsent tail, and remove raw bodies.
+                for message_id in list(db.scalars(pending)):
+                    finish_delivery(db, message_id, "unknown")
             sender = asyncio.create_task(
                 deliver_outbox(connection, engine, allow_qq, settings=settings)
             )

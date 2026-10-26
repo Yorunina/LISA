@@ -65,8 +65,8 @@ async def generate_conversation(settings, engine, task_id, user_id, instructions
 
 
 MEMORY_INSTRUCTIONS = (
-    "\nmemories只整理本批用户原话中值得长期保留的事实、明确相处偏好或有依据的推测，"
-    "没有则返回[]。每条evidence必须逐字引用本批用户原话；content简述记忆，"
+    "\nmemories只整理本轮当前用户输入中值得长期保留的事实、明确相处偏好或有依据的推测，"
+    "没有则返回[]。每条evidence必须逐字引用本轮当前用户输入；content简述记忆，"
     "不要把小说人物、假设、计划当作用户真实经历。kind=fact明确事实、preference明确偏好、"
     "inference推测、fiction文学想象；推测须在basis写简短推理依据。"
     "scope=relationship用于跨作品关系记忆，project仅用于当前作品；"
@@ -136,6 +136,45 @@ def creative_context(project: Project, *, autonomy_enabled: bool = False) -> str
             "计划实际保存和执行仍由系统检查，不在reply承诺准确开始时间。"
             if autonomy_enabled
             else "\n延后自主创作尚未开启，scene_plan必须为null。"
+        )
+    )
+
+
+def chat_project_context(project: Project, *, autonomy_enabled: bool = False) -> str:
+    """Keep the main agent aware of the current work without loading author data."""
+    def bounded(value: str, limit: int = 800) -> str:
+        value = value or ""
+        return value[-limit:] if len(value) > limit else value
+
+    identity = json.dumps(
+        {
+            "title": project.title,
+            "kind": project.kind,
+            "completed": project.completed,
+            "is_current": project.is_current,
+            "summary": bounded(project.summary),
+            "open_discussion": bounded(project.tentative),
+        },
+        ensure_ascii=False,
+    )
+    return (
+        "\n当前对话关联的作品身份：" + identity
+        + "。完整作品资料、创作约束、世界书、角色和正文由作者 Agent 读取；"
+        "主 Agent 不应凭空补全未提供的作品细节。"
+        "opinions和commission的evidence须逐字来自本批用户消息。"
+        "opinions只记录用户本轮明确提出的长期作品意见；普通闲聊、模糊赞同、"
+        "一般题材兴趣和推测偏好不记录。"
+        "open_discussion只是未决讨论，不是用户确认，不能据此直接写作。"
+        "feedback_evidence只引用用户对当前作品已有内容的明确评价、纠正、方向调整、"
+        "续写或重写要求；没有则为空字符串。"
+        "commission只在用户明确要求有限场景或重写时返回；rewrite必须引用用户指定的原文，"
+        "无法定位片段时引导网页操作，不宣称已保存或已完成。"
+        "已完结作品只接受明确局部重写；继续新增正文引导用户在网页明确操作。"
+        + (
+            "scene_plan可在已有明确共识内安排一次有限的延后短场景，"
+            "存在关键未决内容、用户要求暂停或commission非空时返回null。"
+            if autonomy_enabled
+            else "scene_plan必须为null。"
         )
     )
 

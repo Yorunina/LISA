@@ -13,7 +13,7 @@ from test_works import chapter as chapter
 from test_works import owner as owner
 from test_works import project as project
 
-from lisa.author import execute_author
+from lisa.author import _pack_author_messages, execute_author
 from lisa.chat import ingest_message
 from lisa.dialogue import Dialogue
 from lisa.model_calls import BudgetExceeded, ModelBusy, ModelCallFailed, ModelCallUnknown
@@ -40,6 +40,41 @@ def pending_task(db, owner, project, *, kind="scene", chapter_id=None, source="w
     task_id = task.id
     db.commit()
     return task_id
+
+
+def test_author_packet_omits_large_optional_material_after_required_state(
+    settings,
+):
+    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
+    messages = [
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "title": "作品",
+                    "kind": "novel",
+                    "goal": "写一个短场景",
+                    "agreement": "保留当前人物关系。",
+                    "constraints": "不要改变结局。",
+                    "worldbook": "核心世界规则。",
+                    "summary": "主角抵达车站。",
+                    "plot_state": "正在等车。",
+                    "context": "雨水落在站台边。",
+                    "target_text": "",
+                    "characters": "详细角色资料。" * 5000,
+                    "preferences": "偏好。" * 500,
+                    "tentative": "暂定。" * 500,
+                },
+                ensure_ascii=False,
+            ),
+        }
+    ]
+    packed, stats = _pack_author_messages(settings, "作者指令", messages)
+    payload = json.loads(packed[0]["content"])
+    assert payload["goal"] == "写一个短场景"
+    assert "characters" not in payload
+    assert "characters" in stats["omitted"]
+    assert stats["request_bytes"] <= settings.model_max_input_bytes
 
 
 @pytest.mark.asyncio

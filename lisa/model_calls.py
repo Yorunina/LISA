@@ -19,7 +19,9 @@ from sqlalchemy.orm import Session
 from lisa.models import Account, BudgetDay, ModelCall, Task
 from lisa.settings import Settings
 
-MAX_INPUT_BYTES = 11_000
+# Conservative application default, separate from the provider model context window.
+MAX_INPUT_BYTES = 64_000
+MAX_INPUT_BYTES_HARD_LIMIT = 4_194_304
 MAX_EMBEDDING_INPUT_BYTES = 32_000
 MAX_EMBEDDING_TEXTS = 32
 MAX_TASK_CALLS = 3
@@ -232,6 +234,11 @@ def _request_size(request: dict) -> int:
     return len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
+def request_size(request: dict) -> int:
+    """Return the serialized request size used by the application input guard."""
+    return _request_size(request)
+
+
 def trim_history(
     settings: Settings,
     instructions: str,
@@ -244,7 +251,7 @@ def trim_history(
         selected = messages[start:]
         if (
             _request_size(_reply_request(settings, instructions, selected, schema))
-            <= MAX_INPUT_BYTES
+            <= settings.model_max_input_bytes
         ):
             return selected
     raise ModelInputTooLarge("Persona and current messages exceed development input limit")
@@ -332,7 +339,7 @@ async def generate_structured(
     *,
     schema: type[BaseModel] = Reply,
     output_tokens: int | None = None,
-    input_byte_limit: int = MAX_INPUT_BYTES,
+    input_byte_limit: int | None = None,
 ) -> BaseModel:
     """One model attempt; callers must not automatically retry unknown outcomes."""
     if not settings.model_api_key.get_secret_value() or not settings.model_name:
@@ -341,11 +348,27 @@ async def generate_structured(
         settings = settings.model_copy(update={"model_max_output_tokens": output_tokens})
     request = _reply_request(settings, instructions, messages, schema)
     input_bytes = _request_size(request)
-    if not 1 <= input_byte_limit <= 128_000 or input_bytes > input_byte_limit:
+    limit = settings.model_max_input_bytes if input_byte_limit is None else input_byte_limit
+    if not 1 <= limit <= MAX_INPUT_BYTES_HARD_LIMIT or input_bytes > limit:
         raise ModelInputTooLarge("Model input exceeds development limit")
     # UTF-8 bytes deliberately overestimate input tokens; include protocol overhead.
     amount = _cost(settings, input_bytes + 512, settings.model_max_output_tokens)
-    call_id = _reserve(settings, engine, task_id, user_id, amount)
+    call_id = _reserve(
+        settings,
+        engine,
+        task_id,
+        user_id,
+        amount,
+        configuration={
+            "model": settings.model_name,
+            "base_url": settings.model_base_url,
+            "max_output_tokens": settings.model_max_output_tokens,
+            "input_per_million": str(settings.model_input_per_million),
+            "output_per_million": str(settings.model_output_per_million),
+            "request_bytes": input_bytes,
+            "input_limit_bytes": limit,
+        },
+    )
     response = await _provider_request(settings, engine, call_id, request, endpoint="responses")
 
     # The SDK accepts partially shaped responses from compatible relay services.

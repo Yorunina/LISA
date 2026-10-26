@@ -5,7 +5,7 @@ from uuid import UUID
 
 from procrastinate.exceptions import JobRetry
 from procrastinate.retry import RetryDecision
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.orm import Session, aliased
 
 from lisa.chat_style import expression_guide
@@ -14,12 +14,12 @@ from lisa.dialogue import (
     Conversation,
     Dialogue,
     apply_decision,
-    creative_context,
+    chat_project_context,
     generate_conversation,
     generate_dialogue,
 )
-from lisa.interaction import interaction_context
 from lisa.life import LIFE_INSTRUCTIONS, adopt_life_events, mark_life_shared, queue_life_shares
+from lisa.life_plans import apply_explicit_plan_text, enqueue_agent_plan, ensure_current_plan
 from lisa.memory import (
     adopt_candidates,
     memory_context,
@@ -50,6 +50,8 @@ from lisa.retrieval import Context, record_references
 from lisa.scheduling import discard_pending_plans, plan_after_chat, record_creative_feedback
 from lisa.settings import Settings
 from lisa.sharing import chapter_link, sharing_context
+from lisa.style_profiles import resolve_personality_style
+from lisa.style_runtime import chat_scene
 from lisa.vision import (
     MAX_IMAGES,
     clear_image_inputs,
@@ -135,11 +137,23 @@ def ingest_message(
         select(ChatMessage.id).where(ChatMessage.event_key == key)
     ):
         return None
+    # Keep only the gateway event identity needed for deduplication; the
+    # message body itself is transient and is removed after task completion.
+    db.add(
+        ServiceEvent(
+            id=key,
+            bot_id=bot_id,
+            message_id=message_id,
+            qq_id=qq_id,
+            sent_at=sent_at,
+            status="chat",
+        )
+    )
     discard_pending_plans(db, user.id)
     # A new user turn interrupts ordinary chat parts that have not reached QQ.
     # In-flight transport calls finish with their real gateway result; they are
     # never blindly replayed or folded into the new turn.
-    db.execute(
+    interrupted_tasks = set(db.scalars(
         update(OutboundMessage)
         .where(
             OutboundMessage.user_id == user.id,
@@ -148,8 +162,10 @@ def ingest_message(
                 select(Task.id).where(Task.user_id == user.id, Task.kind == "chat")
             ),
         )
-        .values(status="cancelled", finished_at=now)
-    )
+        .values(status="cancelled", content="", finished_at=now)
+        .returning(OutboundMessage.task_id)
+    ))
+    _clear_terminal_outbound(db, interrupted_tasks)
     user.last_active_at = max(user.last_active_at, sent_at) if user.last_active_at else sent_at
     received_at = datetime.now(UTC)
     task = db.scalar(
@@ -197,6 +213,37 @@ def ingest_message(
     return task.id
 
 
+def _clear_terminal_outbound(db: Session, task_ids) -> None:
+    """Cancellation and delivery share one terminal reply-body cleanup rule."""
+    if not task_ids:
+        return
+    active = aliased(OutboundMessage)
+    db.execute(
+        update(OutboundMessage).where(
+            OutboundMessage.task_id.in_(task_ids),
+            ~exists(select(1).where(
+                active.task_id == OutboundMessage.task_id,
+                active.status.in_(["pending", "sending"]),
+            )),
+        ).values(content="")
+    )
+
+
+def _chat_interrupted(db: Session, task: Task) -> bool:
+    """New input can arrive before this turn has any outbox rows to cancel."""
+    return bool(
+        task.kind == "chat"
+        and task.queue_job_id is not None
+        and db.scalar(
+            select(Task.id).where(
+                Task.user_id == task.user_id,
+                Task.kind == "chat",
+                Task.queue_job_id > task.queue_job_id,
+            ).limit(1)
+        )
+    )
+
+
 def _outbound(
     db: Session,
     task: Task,
@@ -217,11 +264,8 @@ def _outbound(
         # Apply the same policy to callers other than the chat model path.
         intervals = _normalize_message_intervals(intervals, len(values))
     created = datetime.now(UTC)
-    task.result = {
-        **(task.result or {}),
-        "outbound_parts": values,
-        "outbound_intervals": intervals,
-    }
+    interrupted = _chat_interrupted(db, task)
+    task.result = {**(task.result or {}), "outbound_count": len(values)}
     for sequence, value in enumerate(values):
         db.add(
             OutboundMessage(
@@ -230,11 +274,12 @@ def _outbound(
                 sequence=sequence,
                 chat_message_id=(chat_message_ids or [None] * len(values))[sequence],
                 qq_id=qq_id,
-                content=value,
+                content="" if interrupted else value,
                 interval_seconds=intervals[sequence],
                 meme_id=meme.id if meme and sequence == 0 else None,
                 meme_revision=meme.revision if meme and sequence == 0 else None,
-                status="pending",
+                status="cancelled" if interrupted else "pending",
+                finished_at=created if interrupted else None,
                 # Only the first part is immediately eligible. Each later
                 # part is released by finish_delivery after the prior part is
                 # confirmed sent, so slow transports never catch up in a burst.
@@ -243,11 +288,129 @@ def _outbound(
         )
 
 
+def _chat_instructions(db, user_id, task, persona, current_texts) -> str:
+    """Freeze the selected persona/style for this attempt without retaining raw history."""
+    snapshot = dict(task.input_snapshot or {})
+    if "persona" not in snapshot:
+        snapshot["persona"] = {
+            "name": persona.name, "prompt": persona.prompt, "version": persona.version
+        }
+        task.input_snapshot = snapshot
+    persona_snapshot = snapshot["persona"]
+    if "style_card" not in snapshot:
+        scene = chat_scene("\n".join(current_texts))
+        snapshot["style_card"] = {
+            "scene": scene,
+            **resolve_personality_style(
+                db,
+                user_id,
+                scene=scene,
+                fallback=persona_snapshot["prompt"],
+            ),
+        }
+        task.input_snapshot = snapshot
+    style_card = snapshot["style_card"]
+    instructions = (
+        "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
+        "reply是本轮完整回复；messages是按语义顺序发送的分条列表，通常一到三条，允许一条。"
+        "不要机械切碎或新增reply之外的事实，控制本轮总量，先接住用户重点。"
+        "message_intervals与messages等长，首项填0，后续各项填上一条确认发送成功后等待的秒数，"
+        "按自然节奏自行选择；系统会限制每项0.5至8秒及整轮等待30秒。"
+        "你及虚拟生活是虚构设定。不声称已完成尚未保存的作品或任务。"
+        "用户消息可能延迟送达，以标注的消息时间理解旧消息，不假装刚刚发生。"
+        "标注无法读取的非文本消息只代表用户发来了消息，不能推断图片或语音内容；请对方用文字说明。"
+        f"当前 UTC 时间：{datetime.now(UTC).isoformat()}。\n"
+        f"用户选定的性格名称：{persona_snapshot['name']}\n"
+        f"本轮交流风格卡（按当前场景取用）：\n{style_card['prompt']}"
+    )
+    instructions += (
+        "\n" + expression_guide() + MEMORY_INSTRUCTIONS
+        + LIFE_INSTRUCTIONS
+        + "\nlife_events的evidence逐字来自你本次reply。life_mentions只列本次回复明确提到的"
+        "已有生活事件：memory_id用已提供的生活记忆id，evidence逐字来自reply；无则[]。"
+    )
+    instructions += (
+        "\nmeme_id只选本轮提供的共有表情素材id或null；没有候选时必须null。"
+        "用户明确要求少发、停用或恢复表情时，meme_preference分别填reduced/off/normal，"
+        "meme_preference_evidence逐字引用本批用户该要求；普通交流均为null和空字符串。"
+    )
+    return instructions
+
+
+def _adopt_chat_decision(
+    db, settings, user, task, decision, reply, reply_parts, *,
+    project_id, source_ids, current_texts, memory_ids, share_ids, context_limited,
+) -> str:
+    """Apply a successful turn in the caller's transaction before clearing its inbox."""
+    user_id, task_id = user.id, task.id
+    ensure_current_plan(db, user.id)
+    if context_limited:
+        reply += "\n\n本轮聊天上下文超过应用输入预算，创作修改或写作任务请在网页操作。"
+        reply_parts[-1] += (
+            "\n\n本轮聊天上下文超过应用输入预算，创作修改或写作任务请在网页操作。"
+        )
+    if isinstance(decision, Dialogue):
+        record_creative_feedback(db, task, source_ids, decision.feedback_evidence)
+        notice = apply_decision(db, user, project_id, current_texts, decision)
+        if notice:
+            reply += "\n\n" + notice
+            reply_parts[-1] += "\n\n" + notice
+        plan_after_chat(
+            db,
+            settings,
+            task,
+            decision.scene_plan if decision.commission is None else None,
+        )
+    if decision:
+        apply_explicit_plan_text(db, user.id, source_ids, current_texts)
+        if settings.model_api_key.get_secret_value():
+            enqueue_agent_plan(db, user.id)
+        from lisa.models import SharedPreference
+        evidence = decision.meme_preference_evidence
+        if decision.meme_preference and evidence and any(
+            evidence in text for text in current_texts
+        ) and any(word in evidence for word in ("表情", "发图")):
+            preference = db.get(SharedPreference, user_id)
+            if preference:
+                preference.meme_mode = decision.meme_preference
+            else:
+                db.add(SharedPreference(
+                    user_id=user_id, meme_mode=decision.meme_preference
+                ))
+            db.flush()
+        if decision.share_chapter_id in share_ids:
+            link = chapter_link(db, settings, user_id, decision.share_chapter_id)
+            if link:
+                reply += "\n\n" + link
+                reply_parts[-1] += "\n\n" + link
+        record_chat_references(db, task_id, memory_ids)
+        adopt_candidates(
+            db, user_id, project_id, decision.memories, source_ids, source_task_id=task_id
+        )
+    if decision:
+        life_ids = adopt_life_events(
+            db,
+            user_id,
+            decision.life_events,
+            reply,
+            source_task_id=task.id,
+        )
+        mentioned_ids = [
+            item.memory_id
+            for item in decision.life_mentions
+            if item.memory_id in memory_ids and item.evidence in reply
+        ]
+        queue_life_shares(db, user_id, task_id, life_ids + mentioned_ids)
+    return reply
+
+
 async def execute_chat(settings: Settings, engine, task_id: str, *, generate=None) -> None:
     task_id = UUID(str(task_id))
     with Session(engine) as db, db.begin():
         task = db.get(Task, task_id)
         if task is None or task.status != "pending":
+            if task is not None and task.status in {"cancelled", "failed", "completed"}:
+                db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
             return  # Persisted running/finished attempts are never blindly regenerated.
         user = db.scalar(select(Account).where(Account.id == task.user_id).with_for_update())
         task = db.scalar(
@@ -264,6 +427,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             task.status, task.error = "failed", "account_unavailable"
             task.finished_at = datetime.now(UTC)
             clear_image_inputs(db, task_id)
+            db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
             return
         prior = db.scalar(
             select(Task.id).where(
@@ -288,20 +452,12 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             task.status, task.error = "failed", "empty_input"
             task.finished_at = datetime.now(UTC)
             clear_image_inputs(db, task_id)
+            db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
             return
-        history = db.scalars(
-            select(ChatMessage)
-            .join(Task, ChatMessage.task_id == Task.id)
-            .where(
-                ChatMessage.user_id == user.id,
-                usable_chat_clause(),
-                Task.queue_job_id < task.queue_job_id,
-                Task.status.in_(["completed", "failed"]),
-            )
-            .order_by(ChatMessage.created_at.desc())
-            .limit(12)
-        ).all()
-        history.reverse()
+        # Raw chat history is intentionally not retained or replayed.  The
+        # current batch is the only message context supplied to the model;
+        # durable continuity comes from explicit memories and saved project data.
+        history = []
         project = (
             (db.get(Project, task.project_id) if task.project_id else None)
             if task.started_at
@@ -315,50 +471,20 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         has_images = any(message.kind == "image" or message.image_urls for message in batch)
         memory_revision = user.memory_revision
         current_texts = [message.content for message in batch]
-        snapshot = dict(task.input_snapshot or {})
-        if "persona" not in snapshot:
-            snapshot["persona"] = {
-                "name": persona.name, "prompt": persona.prompt, "version": persona.version
-            }
-            task.input_snapshot = snapshot
-        persona_snapshot = snapshot["persona"]
-        instructions = (
-            "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
-            "reply是本轮完整回复；messages是按语义顺序发送的分条列表，通常一到三条，允许一条。"
-            "不要机械切碎或新增reply之外的事实，控制本轮总量，先接住用户重点。"
-            "message_intervals与messages等长，首项填0，后续各项填上一条确认发送成功后等待的秒数，"
-            "按自然节奏自行选择；系统会限制每项0.5至8秒及整轮等待30秒。"
-            "你及虚拟生活是虚构设定。不声称已完成尚未保存的作品或任务。"
-            "用户消息可能延迟送达，以标注的消息时间理解旧消息，不假装刚刚发生。"
-            "标注无法读取的非文本消息只代表用户发来了消息，不能推断图片或语音内容；请对方用文字说明。"
-            f"当前 UTC 时间：{datetime.now(UTC).isoformat()}。\n"
-            f"用户选定的性格名称：{persona_snapshot['name']}\n"
-            f"性格设定：\n{persona_snapshot['prompt']}"
-        )
-        instructions += (
-            "\n" + expression_guide() + MEMORY_INSTRUCTIONS
-            + LIFE_INSTRUCTIONS
-            + "\nlife_events的evidence逐字来自你本次reply。life_mentions只列本次回复明确提到的"
-            "已有生活事件：memory_id用已提供的生活记忆id，evidence逐字来自reply；无则[]。"
-        )
-        instructions += (
-            "\nmeme_id只选本轮提供的共有表情素材id或null；没有候选时必须null。"
-            "用户明确要求少发、停用或恢复表情时，meme_preference分别填reduced/off/normal，"
-            "meme_preference_evidence逐字引用本批用户该要求；普通交流均为null和空字符串。"
-        )
+        instructions = _chat_instructions(db, user.id, task, persona, current_texts)
         base_instructions = instructions
         if project:
-            instructions += creative_context(project, autonomy_enabled=settings.autonomy_enabled)
+            instructions += chat_project_context(
+                project, autonomy_enabled=settings.autonomy_enabled
+            )
         instructions_without_optional = instructions
         share_ids, share_context = sharing_context(db, user.id)
         instructions += share_context
-        instructions += interaction_context(db, user.id)
         instructions_without_memories = instructions
         memory_ids = []
         instructions += memory_context(
             db, user.id, project_id, purpose="chat", max_chars=1200, references=memory_ids
         )
-        history_ids = [message.id for message in history]
         from lisa.shared_retrieval import sent_meme_context
         messages = [
             {
@@ -430,20 +556,23 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     raise
                 instructions = (
                     base_instructions
-                    + "\n本轮作品资料超过对话预算，只聊天，不保存创作意见或委托写作；"
+                    + "\n本轮聊天上下文超过应用预算，只聊天，不保存创作意见或委托写作；"
                     "可引导网页操作。"
                 )
                 messages = trim_history(
-                    settings, instructions, messages, len(history), schema=Conversation
+                    settings,
+                    instructions,
+                    messages,
+                    len(history),
+                    schema=Conversation,
                 )
                 creative, context_limited = False, True
-        used_history_ids = history_ids[len(history) + len(batch) - len(messages) :]
         with Session(engine) as db, db.begin():
             record_references(db, task_id, recalled)
         generator = generate or (generate_dialogue if creative else generate_conversation)
         result = await generator(settings, engine, task_id, user_id, instructions, messages)
         if creative:
-            decision = Dialogue.model_validate(result)
+            decision = result if isinstance(result, Dialogue) else Dialogue.model_validate(result)
             reply = decision.reply
         else:
             decision = (
@@ -456,7 +585,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         reply_intervals = _message_intervals(decision, len(reply_parts))
     except ContextChanged:
         reply, error = (
-            "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。",
+            "记忆已更新，这次回复未采用。请重新发送消息继续。",
             "context_changed",
         )
     except ModelBusy:
@@ -472,6 +601,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 task.finished_at = datetime.now(UTC)
                 clear_image_inputs(db, task_id)
                 _outbound(db, task, qq_id, "对话服务暂时繁忙，请稍后再发消息。")
+                db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
                 retry = False
         if retry:
             raise JobRetry(RetryDecision(retry_in={"seconds": 3})) from None
@@ -493,6 +623,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             if task and task.status == "running":
                 task.status, task.error = "failed", "account_unavailable"
                 task.finished_at = datetime.now(UTC)
+            if task and task.status in {"cancelled", "failed", "completed"}:
+                db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
             return
         from lisa.shared_retrieval import select_meme, shared_references_current
         if error is None and (
@@ -500,88 +632,16 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             or not shared_references_current(db, recalled, user_id)
         ):
             error = "context_changed"
-            reply = "记忆或聊天记录已更新，这次回复未采用。请重新发送消息继续。"
+            reply = "记忆已更新，这次回复未采用。请重新发送消息继续。"
             reply_parts = [reply]
         task.status, task.error = ("failed" if error else "completed"), error
         task.finished_at = datetime.now(UTC)
         if error is None:
-            if context_limited:
-                reply += "\n\n作品资料超过本轮对话的开发输入上限，创作修改或写作任务请在网页操作。"
-                reply_parts[-1] += (
-                    "\n\n作品资料超过本轮对话的开发输入上限，创作修改或写作任务请在网页操作。"
-                )
-            if isinstance(decision, Dialogue):
-                record_creative_feedback(db, task, source_ids, decision.feedback_evidence)
-                notice = apply_decision(db, user, project_id, current_texts, decision)
-                if notice:
-                    reply += "\n\n" + notice
-                    reply_parts[-1] += "\n\n" + notice
-                plan_after_chat(
-                    db,
-                    settings,
-                    task,
-                    decision.scene_plan if decision.commission is None else None,
-                )
-            if decision:
-                from lisa.models import SharedPreference
-                evidence = decision.meme_preference_evidence
-                if decision.meme_preference and evidence and any(
-                    evidence in text for text in current_texts
-                ) and any(word in evidence for word in ("表情", "发图")):
-                    preference = db.get(SharedPreference, user_id)
-                    if preference:
-                        preference.meme_mode = decision.meme_preference
-                    else:
-                        db.add(SharedPreference(
-                            user_id=user_id, meme_mode=decision.meme_preference
-                        ))
-                    db.flush()
-                if decision.share_chapter_id in share_ids:
-                    link = chapter_link(db, settings, user_id, decision.share_chapter_id)
-                    if link:
-                        reply += "\n\n" + link
-                        reply_parts[-1] += "\n\n" + link
-                record_chat_references(db, task_id, memory_ids, used_history_ids)
-                adopt_candidates(db, user_id, project_id, decision.memories, source_ids)
-            assistant_message = ChatMessage(
-                user_id=user_id,
-                task_id=task.id,
-                role="assistant",
-                content=reply,
-                sent_at=datetime.now(UTC),
-                context_excluded=len(reply_parts) > 1,
+            reply = _adopt_chat_decision(
+                db, settings, user, task, decision, reply, reply_parts,
+                project_id=project_id, source_ids=source_ids, current_texts=current_texts,
+                memory_ids=memory_ids, share_ids=share_ids, context_limited=context_limited,
             )
-            db.add(assistant_message)
-            db.flush()
-            part_messages = []
-            if len(reply_parts) > 1:
-                part_messages = [
-                    ChatMessage(
-                        user_id=user_id,
-                        task_id=task.id,
-                        role="assistant",
-                        content=part,
-                        sent_at=assistant_message.sent_at,
-                        context_excluded=True,
-                    )
-                    for part in reply_parts
-                ]
-                db.add_all(part_messages)
-                db.flush()
-            if decision:
-                life_ids = adopt_life_events(
-                    db,
-                    user_id,
-                    decision.life_events,
-                    reply,
-                    source_message_id=assistant_message.id,
-                )
-                mentioned_ids = [
-                    item.memory_id
-                    for item in decision.life_mentions
-                    if item.memory_id in memory_ids and item.evidence in reply
-                ]
-                queue_life_shares(db, user_id, task_id, life_ids + mentioned_ids)
         meme = (
             select_meme(db, user_id, decision.meme_id, recalled) if decision and not error else None
         )
@@ -595,12 +655,12 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             meme,
             parts=outbound_parts,
             intervals=outbound_intervals,
-            chat_message_ids=(
-                [message.id for message in part_messages]
-                if error is None and len(reply_parts) > 1
-                else None
-            ),
+            chat_message_ids=None,
         )
+        # The rows above are only a transactional inbox for debounce, retries,
+        # and image processing.  Once this task has produced its result, remove
+        # every raw user input so LISA cannot maintain a parallel chat archive.
+        db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
     logger.info("task=%s status=%s", task_id, "failed" if error else "completed")
 
 
@@ -653,7 +713,7 @@ def claim_outbound(
         return None
     binding = db.get(QQBinding, message.user_id)
     if not user.active or binding is None or binding.qq_id != message.qq_id:
-        message.status = "cancelled"
+        message.status, message.content = "cancelled", ""
         message.finished_at = datetime.now(UTC)
         return None
     task = db.get(Task, message.task_id)
@@ -671,7 +731,8 @@ def claim_outbound(
         ):
             reason = "progress_changed"
         if reason:
-            message.status, message.finished_at = "cancelled", datetime.now(UTC)
+            message.status, message.content = "cancelled", ""
+            message.finished_at = datetime.now(UTC)
             task.status, task.error = "cancelled", reason
             return None
     message.status = "sending"
@@ -691,7 +752,7 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
     if message.status != "sending":
         return
     task = db.get(Task, message.task_id)
-    if status == "failed" and message.attempts < 3:
+    if status == "failed" and message.attempts < 3 and not _chat_interrupted(db, task):
         message.status = "pending"
         message.next_attempt_at = datetime.now(UTC) + timedelta(seconds=5)
     else:
@@ -705,7 +766,7 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
                     OutboundMessage.sequence > message.sequence,
                     OutboundMessage.status == "pending",
                 )
-                .values(status="cancelled", finished_at=message.finished_at)
+                .values(status="cancelled", content="", finished_at=message.finished_at)
             )
         if status == "sent":
             next_message = db.scalar(
@@ -735,10 +796,13 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
             elif not db.scalar(
                 select(OutboundMessage.id).where(
                     OutboundMessage.task_id == message.task_id,
-                    OutboundMessage.status.in_(["pending", "sending", "unknown"]),
+                    OutboundMessage.status != "sent",
                 )
             ):
                 # A multi-part chat turn is shared only after every part is
                 # confirmed, so a cancelled or unknown tail cannot be claimed
                 # as already shown to the user.
                 mark_life_shared(db, message.task_id, message.finished_at)
+        # Keep delivery status for retry/order diagnostics, but remove message
+        # bodies once the logical turn is terminal.
+        _clear_terminal_outbound(db, [message.task_id])

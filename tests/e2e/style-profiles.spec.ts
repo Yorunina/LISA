@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs';
 
 type Version = { id: string; version: number; prompt: string; summary: string; report: Record<string, unknown>; created_at: string; source_task_id?: string | null };
 type Profile = { id: string; name: string; kind: string; latest_version: number; versions: Version[] };
-type Task = { id: string; kind: string; mode?: string; status: string; error: string | null; model_http_status?: number | null; result: Record<string, unknown> | null; cleanup_state: string; corpus_id: string | null };
+type Task = { id: string; kind: string; mode?: string; status: string; error: string | null; model_http_status?: number | null; result: Record<string, unknown> | null; candidate_discarded?: boolean; cleanup_state: string; corpus_id: string | null };
 const timestamp = '2026-10-23T04:00:00Z';
 
 async function study(page: Page, initialized = true) {
   const state = {
-    initialized, kind: 'personality', failSave: false, failUpload: false, holdTask: false,
+    initialized, kind: 'personality', failSave: false, failUpload: false, failDiscard: false, holdTask: false,
     uploads: [] as Record<string, unknown>[], starts: [] as Record<string, unknown>[], trials: [] as Record<string, unknown>[],
     profiles: [] as Profile[], applications: { personality: null as string | null, writing: null as string | null },
     override: null as string | null, cleaned: [] as string[], mutations: [] as string[],
@@ -42,6 +42,14 @@ async function study(page: Page, initialized = true) {
       const profile = { id, name: body.name, kind: body.kind, latest_version: 1, versions: [{ id: `${id}-v1`, version: 1, prompt: body.prompt, summary: body.summary, report: body.report, source_task_id: body.source_task_id, created_at: timestamp }] };
       state.profiles.push(profile); return route.fulfill({ json: profile });
     }
+    const removed = path.match(/^\/style\/profiles\/([^/]+)$/);
+    if (removed && method === 'DELETE') {
+      const profile = state.profiles.find(item => item.id === removed[1])!;
+      if (profile.versions.some(version => Object.values(state.applications).includes(version.id) || state.override === version.id)) return route.fulfill({ status: 409, json: { detail: '该方案仍在使用，请先切换。' } });
+      for (const task of state.tasks) if (profile.versions.some(version => version.source_task_id === task.id)) { task.candidate_discarded = true; task.result = null; }
+      state.profiles = state.profiles.filter(item => item.id !== profile.id);
+      return route.fulfill({ status: 204 });
+    }
     const update = path.match(/^\/style\/profiles\/([^/]+)\/(versions|restore)$/);
     if (update) {
       const profile = state.profiles.find(item => item.id === update[1])!; const body = data();
@@ -72,10 +80,14 @@ async function study(page: Page, initialized = true) {
       state.trials.push(data()); const task = { id: `trial-${state.tasks.length + 1}`, kind: 'style_trial', mode: data().mode ?? 'reply', status: 'pending', error: null, result: null, cleanup_state: 'not_applicable', corpus_id: null };
       state.tasks.unshift(task); return route.fulfill({ json: task });
     }
-    const taskMatch = path.match(/^\/style\/tasks\/([^/]+)(\/cancel)?$/);
+    const taskMatch = path.match(/^\/style\/tasks\/([^/]+)(\/cancel|\/discard)?$/);
     if (taskMatch) {
       const task = state.tasks.find(item => item.id === taskMatch[1])!;
-      if (taskMatch[2]) { task.status = 'cancelled'; task.cleanup_state = 'cleaned'; }
+      if (taskMatch[2] === '/discard') {
+        if (state.failDiscard) return route.fulfill({ status: 503, json: { detail: '丢弃失败，请重试；当前输入保留。' } });
+        task.candidate_discarded = true; task.result = null;
+      }
+      else if (taskMatch[2]) { task.status = 'cancelled'; task.cleanup_state = 'cleaned'; }
       else if (!state.holdTask && task.status === 'pending') { task.status = 'succeeded'; task.cleanup_state = task.kind === 'style_distill' ? 'cleaned' : 'not_applicable'; task.result = task.kind === 'style_distill' ? result() : task.mode === 'refine' ? { ...result(), prompt: '修订候选：按当前话头回应，说完就停；求助时再展开。' } : { text: '这是一段隔离合成试用文字。', isolated: true }; }
       return route.fulfill({ json: task });
     }
@@ -263,9 +275,98 @@ test('mobile save failure retains edits, leave has three choices, and abandon cl
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('mobile-style-editor.png'), fullPage: true });
   await page.getByRole('button', { name: '返回账号设置', exact: true }).click();
-  await dialog.getByRole('button', { name: '放弃修改', exact: true }).click();
+  await dialog.getByRole('button', { name: '丢弃候选', exact: true }).click();
   await expect(page.getByRole('button', { name: '管理风格方案', exact: true })).toBeVisible();
   expect(state.cleaned).toContain('corpus-1'); expect(state.profiles).toHaveLength(0);
+});
+
+test('discard survives reentry and reload, and failures retain the candidate', async ({ page }) => {
+  const state = await study(page);
+  await uploadQQ(page);
+  await page.getByLabel('小雨 · 4 条消息 · 文件 1（QQ.txt）').check();
+  await page.getByRole('button', { name: '开始有限蒸馏', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/合成风格/);
+  state.failDiscard = true;
+  await page.getByRole('button', { name: '丢弃候选', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '丢弃候选', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('丢弃失败');
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/合成风格/);
+  state.failDiscard = false;
+  await page.getByRole('button', { name: '返回账号设置', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '丢弃候选', exact: true }).click();
+  await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('');
+  await page.reload();
+  await page.getByRole('button', { name: '个人设置', exact: true }).click();
+  await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('');
+  await page.getByText('恢复历史候选', { exact: true }).click();
+  await expect(page.getByRole('button', { name: /^恢复交流性格候选/ })).toHaveCount(0);
+  expect(state.tasks[0].candidate_discarded).toBe(true);
+  expect(state.profiles).toHaveLength(0);
+});
+
+test('history requires explicit recovery, saved edits undo independently, and deletion is confirmed', async ({ page }, info) => {
+  const state = await study(page);
+  await uploadQQ(page);
+  await page.getByLabel('小雨 · 4 条消息 · 文件 1（QQ.txt）').check();
+  await page.getByRole('button', { name: '开始有限蒸馏', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/合成风格/);
+  // Reopening the browser loses local edits but leaves the server result available.
+  page.once('dialog', dialog => dialog.accept());
+  await page.reload();
+  await page.getByRole('button', { name: '个人设置', exact: true }).click();
+  await page.getByRole('button', { name: '管理风格方案', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('');
+  await page.getByLabel('方案名称', { exact: true }).fill('临时手写');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('当前编辑不能被刷新覆盖');
+  await page.getByRole('button', { name: '刷新方案列表', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('当前编辑不能被刷新覆盖');
+  await page.getByText('恢复历史候选', { exact: true }).click();
+  await page.getByRole('button', { name: /^恢复交流性格候选/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '丢弃候选', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/合成风格/);
+  await page.getByLabel('方案名称', { exact: true }).fill('可删除性格');
+  await page.getByRole('button', { name: '保存方案', exact: true }).click();
+  await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 1');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('尚未保存的新修改');
+  await page.getByRole('button', { name: '撤销本次修改', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '撤销本次修改', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue(/合成风格/);
+  expect(state.profiles[0].versions).toHaveLength(1);
+  await page.getByRole('button', { name: '删除方案', exact: true }).click();
+  const confirmation = page.getByRole('dialog', { name: '删除方案', exact: true });
+  await expect(confirmation.getByRole('button', { name: '保留方案', exact: true })).toBeFocused();
+  await page.keyboard.press('Control+s');
+  expect(state.profiles[0].versions).toHaveLength(1);
+  await confirmation.getByRole('button', { name: '保留方案', exact: true }).click();
+  expect(state.profiles).toHaveLength(1);
+  await page.getByRole('button', { name: '删除方案', exact: true }).click();
+  await page.screenshot({ path: info.outputPath('desktop-style-delete.png'), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: info.outputPath('mobile-style-delete.png'), fullPage: true });
+  await confirmation.getByRole('button', { name: '确认删除', exact: true }).click();
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('');
+  await expect(page.getByRole('button', { name: /可删除性格/ })).toHaveCount(0);
+  expect(state.profiles).toHaveLength(0);
+  await page.getByText('恢复历史候选', { exact: true }).click();
+  await expect(page.getByRole('button', { name: /^恢复交流性格候选/ })).toHaveCount(0);
+});
+
+test('deleting a profile in use keeps the library, application and unsaved input', async ({ page }) => {
+  const state = await study(page);
+  await page.getByLabel('方案名称', { exact: true }).fill('正在使用的性格');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('已保存性格');
+  await page.getByRole('button', { name: '保存方案', exact: true }).click();
+  await page.getByRole('button', { name: '应用为 LISA 性格', exact: true }).click();
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('删除失败要保留的输入');
+  await page.getByRole('button', { name: '删除方案', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '确认删除', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('仍在使用');
+  await expect(page.getByLabel('交流性格 prompt', { exact: true })).toHaveValue('删除失败要保留的输入');
+  expect(state.profiles).toHaveLength(1);
+  expect(state.applications.personality).toBe('profile-1-v1');
 });
 
 test('cancellation never invents a result and refresh recovers in-progress tasks', async ({ page }) => {
@@ -425,7 +526,9 @@ test('real isolated API parses QQ bytes, cancels and cleans, then persists expli
   await page.getByRole('button', { name: '创作资料', exact: true }).click();
   await page.getByRole('button', { name: '写作风格', exact: true }).click();
   await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('跟随 LISA 默认');
-  await page.getByLabel('本作品补充写法（可选）').fill('本作品用第三人称限知视角，保留已选风格的句式。');
+  const legacyNotes = page.getByLabel('本作品补充写法（可选）');
+  if (!(await legacyNotes.isVisible())) await page.locator('.material-legacy').filter({ has: legacyNotes }).locator('summary').click();
+  await legacyNotes.fill('本作品用第三人称限知视角，保留已选风格的句式。');
   await page.getByLabel('风格方案', { exact: true }).selectOption(override.override_version_id);
   await page.getByRole('button', { name: '保存写作设置' }).click();
   await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('本作品单独使用');

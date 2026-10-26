@@ -315,3 +315,88 @@ def test_editing_a_candidate_does_not_claim_its_previous_validation(client, db, 
         headers=HEADERS,
     ).json()
     assert updated["versions"][0]["report"]["validation"]["status"] == "edited_not_evaluated"
+
+
+def test_discard_is_persistent_isolated_and_preserves_saved_versions(client, db, invites):
+    user_id = UUID(signup(client, invites[0])["id"])
+    task = Task(
+        user_id=user_id, kind="style_distill", source="web", status="completed",
+        request={"kind": "writing"},
+        result={"kind": "writing", "prompt": "合成候选", "summary": "概括", "report": {}},
+    )
+    running = Task(user_id=user_id, kind="style_distill", source="web", status="running")
+    db.add_all([task, running])
+    db.commit()
+    candidate_id, running_id = str(task.id), str(running.id)
+    saved = client.post("/api/style/profiles", json={
+        "kind": "writing", "name": "已保存副本", "prompt": "合成候选",
+        "source_task_id": candidate_id,
+    }, headers=HEADERS).json()
+    response = client.post(f"/api/style/tasks/{running_id}/discard", json={}, headers=HEADERS)
+    assert response.status_code == 409
+    for _ in range(2):
+        response = client.post(f"/api/style/tasks/{candidate_id}/discard", json={}, headers=HEADERS)
+        assert response.status_code == 200, response.text
+        assert response.json()["candidate_discarded"] is True
+        assert response.json()["result"] is None
+    assert client.get(f"/api/style/tasks/{candidate_id}").json()["result"] is None
+    listed = next(t for t in client.get("/api/style/tasks").json() if t["id"] == candidate_id)
+    assert listed["candidate_discarded"]
+    versions = client.get("/api/style/profiles").json()["profiles"][0]["versions"]
+    assert versions[0]["prompt"] == "合成候选"
+    assert client.post("/api/style/profiles", json={
+        "kind": "writing", "name": "过期候选", "prompt": "合成候选",
+        "source_task_id": candidate_id,
+    }, headers=HEADERS).status_code == 422
+    client.post("/api/auth/logout", headers=HEADERS)
+    signup(client, invites[1], "other_reader")
+    response = client.post(f"/api/style/tasks/{candidate_id}/discard", json={}, headers=HEADERS)
+    assert response.status_code == 404
+    assert client.delete(f"/api/style/profiles/{saved['id']}", headers=HEADERS).status_code == 404
+
+
+def test_deleting_profile_checks_all_versions_and_work_overrides(client, db, invites):
+    signup(client, invites[0])
+    bind(client, db)
+    save_persona(client)
+    saved = profile(client)
+    first = saved["versions"][0]["id"]
+    apply(client, first)
+    client.post(
+        f"/api/style/profiles/{saved['id']}/versions", json={"prompt": "新版本"}, headers=HEADERS
+    )
+    url = f"/api/style/profiles/{saved['id']}"
+    assert client.delete(url, headers=HEADERS).status_code == 409
+    replacement = profile(client, "替代方案")
+    apply(client, replacement["versions"][0]["id"])
+    work = client.post(
+        "/api/projects", json={"title": "合成作品", "kind": "novel"}, headers=HEADERS
+    ).json()
+    style_url = f"/api/projects/{work['id']}/writing-style"
+    client.put(style_url, json={"version_id": first}, headers=HEADERS)
+    assert client.delete(url, headers=HEADERS).status_code == 409
+    assert client.get(style_url).json()["effective_version_id"] == first
+    client.put(style_url, json={"version_id": None}, headers=HEADERS)
+    assert client.delete(url, headers=HEADERS).status_code == 204
+    db.expire_all()
+    assert db.get(StyleProfile, UUID(saved["id"])) is None
+    assert db.scalar(select(func.count()).select_from(StyleProfileVersion).where(
+        StyleProfileVersion.profile_id == UUID(saved["id"])
+    )) == 0
+    application = client.get("/api/style/profiles").json()["applications"]["writing"]
+    assert application == replacement["versions"][0]["id"]
+
+
+def test_deleted_profile_source_never_becomes_a_candidate_again(client, db, invites):
+    user_id = UUID(signup(client, invites[0])["id"])
+    task = Task(user_id=user_id, kind="style_distill", source="web", status="completed",
+                request={"kind": "writing"}, result={"prompt": "候选", "report": {}})
+    db.add(task)
+    db.commit()
+    task_id = str(task.id)
+    saved = client.post("/api/style/profiles", json={"kind": "writing", "name": "删除测试",
+                        "prompt": "候选", "source_task_id": task_id}, headers=HEADERS).json()
+    assert client.delete(f"/api/style/profiles/{saved['id']}", headers=HEADERS).status_code == 204
+    restored = client.get(f"/api/style/tasks/{task_id}").json()
+    assert restored["candidate_discarded"] is True
+    assert restored["result"] is None
