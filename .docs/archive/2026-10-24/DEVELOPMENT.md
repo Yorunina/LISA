@@ -697,3 +697,41 @@ TypeScript 与正式构建通过。复用 `scripts/test_app.py --browser` 的临
 从站点实际前端资源发现 /monitor 页面及 /channel-monitors API；未登录请求 /api/v1/channel-monitors 返回401。公开模型目录同时列出openai和codebuddy来源，但本次响应未揭示实际选用的通道，不能据目录认定请求走了哪条线路。客户端已定位到中转处理/上游请求环节，具体账号、通道、限流或内部错误仍需站点凭上述请求号查日志。状态不是全站离线，也不能因短链路成功就认定已恢复稳定。
 
 脱敏观测文件：runtime/reports/probes/relay-status-20261024-181729.json、relay-live-20261024-181847.json；脚本位于忽略的runtime/check_relay_live.py。生产源码、模型配置及服务未改动或重启。
+
+## 2026-10-28 参考图输入实测通过
+
+用户本轮明确要求取消 D25 既有消费额度限制，提供 [参考图](https://s3.bmp.ovh/2026/04/30/JFipVWmO.png)试验带图生成，并说明只需基础画风锚定、不要求严格一致。按该授权，使用本地独立 `LISA_IMAGE_*` 配置直接请求当前中转；此记录追加于历史归档，现行需求查 [D25](../../PROJECT_PLAN.md#小说插图需求草案)，运行摘要查 [图片预研](../../DEVELOPMENT.md#小说插图模型预研)。
+
+| 项目 | 实际证据 |
+| --- | --- |
+| 时间 | 北京时间 2026 年 10 月 28 日 18:59:19—18:59:44；耗时 24.895 秒 |
+| 输入 | 用户给定 PNG 下载 HTTP 200，1,158,135 字节，1020×1809；SHA-256 `62c010e9c697dd695e74ed8fe8aabcc94be7884b8d5a9f4b13d82e1f6fc54e8a`；已目视查看 |
+| 实际请求 | `POST https://drc.totokens.cc/v1/images/edits`，multipart 上传 `image` 文件；`model=gpt-image-2`、`n=1`、`size=1024x1024`、`quality=medium`、`output_format=png`；不是先识图再纯文本生图 |
+| 提示要求 | 参考输入图的人物与基础画风，生成微笑挥手、身体略转的半身像，浅色简单背景；沿用主要发型、眼睛颜色、服饰配色和头饰，动作/细节可自然变化，无文字水印，不要求严格身份或像素一致 |
+| 返回 | HTTP 200，回显模型 `gpt-image-2`，一张 base64 PNG，解码后 1,220,783 字节、1024×1024；SHA-256 `e99aa6499e81f9222ba2ee449992e35771646e956f9ac19a455a9085298ab106` |
+| 请求号 | `edf9ed22-eee9-4682-bba6-f2197a0327b9, req_97e2c3a5d12a27e30d020e8a3efdb28f` |
+| 目视结果 | 生成图保留黑色短发、红眼、主要头饰及红/黄/蓝/白服饰，变为微笑挥手半身构图；基础画风相近，未进行严格身份/服饰一致性评分 |
+| 用量与次数 | 单次请求，自动重试 0；usage 的 input/output/total tokens 及 image/text 明细全为 0，不能据此断定免费。未接 LISA 预算拦截，符合本轮图片需求豁免方向 |
+| 本机文件（Git 忽略） | `runtime/reports/image-reference-probe-20261028/reference.png`、`reference-result.png`、`result.json`；完整实际提示词在 JSON，未保存密钥 |
+
+只证明当前端点/模型在上述单参考图及参数下成功返回并实际绘制参考内容，不扩展为纯文本端点、全部参数、连续运行或 QQ/网页业务通过。没有业务实现、修改正式配置、重载、数据库写入或 QQ 投递。测试图不自动成为全体账号正式人设参考素材。此前旧站/旧模型的 503 属于历史。
+
+
+## 2026-10-28 小说插图模型连通性预研
+
+本节为后续追加的历史探针证据；现行需求/接续见 [小说插图草案](../../PROJECT_PLAN.md#小说插图需求草案)及 [模型预研摘要](../../DEVELOPMENT.md#小说插图模型预研)。本次用户只要求需求与连通性测试，不包含功能实现。
+
+授权与方式：用户提供目标模型 `gpt-image-2.5-sunburst` 和测试密钥，自动审批首次因密钥目标地址授权不明而阻止执行，未发请求；用户随后明确授权 `https://test.mcii.cc/v1`，允许查询模型并最多生成一张低质量合成图。通过独立临时 httpx 探针执行，保留正常网络环境，不修改代理，不改正式配置、数据库或进程；密钥经标准输入传入，不落文件、不回显、不进入请求报告。没有调用 LISA 生图接口，因为当前还不存在该功能。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 时间 | 北京时间 2026 年 10 月 28 日 02:41:16—02:41:27（原始报告保存 UTC） |
+| 模型清单 | `GET /v1/models`，HTTP 200，0.791 秒，含精确 ID `gpt-image-2.5-sunburst`；请求号 `431ed80d-6bb3-417d-8612-2527d5ac2df5` |
+| 唯一生图请求 | `POST /v1/images/generations`，模型同上，`n=1`、`size=1024x1024`、`quality=low`、`output_format=png`；无参考图、无私人材料 |
+| 合成提示内容 | 蓝衣成年旅者与白色小车置于月光下的盐原，远山、两颗小月亮、蓝银色水彩科幻小说插图，无文字或水印；不是用户小说情节 |
+| 生图返回 | HTTP 503，0.789 秒；JSON 错误 `{"error":{"message":"No available compatible accounts","type":"api_error"}}`；请求号 `c11cc691-7c1c-4c21-bd6c-bc2d25d2fdad` |
+| 图片与费用 | 无图片、无 usage，无可展示样张；独立探针未接 LISA 预算账本，不能由 503 推断免费或已退款，需供应商核账 |
+| 重试与影响 | 生图仅一次，自动重试为 0；没有替换模型、改协议、启用功能、修改正式密钥/模型配置、重载服务或发送 QQ |
+| 本机证据（Git 忽略） | `runtime/reports/illustration-probe-20261028/models.json`、`runtime/reports/illustration-probe-20261028/generate.json`；临时探针 `runtime/tmp/probe_illustration_connectivity.py` 不含密钥，不纳入源码交付 |
+
+协议核对依据为 [OpenAI Create image](https://developers.openai.com/api/reference/resources/images/methods/generate?site_locale=en)及 [Sunburst 模型页](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)：指定模型可通过 Images API 请求；官方格式不能证明该中转的参数实现、后端版本或价格。当前 503 需要供应商核对路由/兼容账号资源，不能凭报错独立锁定根因，也不能把清单成功当成生成成功。本次未继续发付费请求，真实图像、参考图编辑、人物一致性、参数、账单与 QQ/网页链路均未验收。

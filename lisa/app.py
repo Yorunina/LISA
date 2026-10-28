@@ -17,6 +17,7 @@ from lisa import (
     characters,
     contact_policy,
     group_records,
+    images,
     life_plans,
     memory,
     onboarding,
@@ -98,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(account_deletion.router)
     app.include_router(onboarding.router)
     app.include_router(works.router)
+    app.include_router(images.router)
     app.include_router(sharing.router)
     app.include_router(memory.router)
     app.include_router(life_plans.router)
@@ -126,7 +128,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if day and day.spent_usd + day.reserved_usd + minimum > settings.model_daily_usd:
                 return {
                     "status": "budget_exhausted",
-                    "message": "今日服务额度已用尽，阅读和手动保存仍可使用。",
+                    "message": "今日文字服务额度已用尽，阅读、手动保存与图片委托仍可使用。"
+                    if images.image_enabled(settings)
+                    else "今日服务额度已用尽，阅读和手动保存仍可使用。",
                 }
         return {
             "status": "ready",

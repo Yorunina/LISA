@@ -346,6 +346,7 @@ class ProjectUpdate(BaseModel):
 
 class ProjectSummary(BaseModel):
     material_revision: str
+    cover_image_id: UUID | None = None
     id: UUID
     title: str
     kind: str
@@ -356,6 +357,7 @@ class ProjectSummary(BaseModel):
 
 class ProjectView(ProjectUpdate):
     model_config = ConfigDict(from_attributes=True)
+    cover_image_id: UUID | None = None
     id: UUID
     kind: str
     is_current: bool
@@ -491,7 +493,7 @@ def task_view(db: Session, task: Task, *, calls=None) -> TaskView:
         goal=task.request.get("goal", ""),
         target_text=task.request.get("target_text"),
         can_cancel=task.status in {"pending", "running"} and not task.adopted_at,
-        can_retry=task.status == "failed"
+        can_retry=task.kind in {"scene", "rewrite"} and task.status == "failed"
         and not task.adopted_at
         and not unresolved
         and task.error != "model_unknown",
@@ -521,6 +523,7 @@ def list_projects(user: User, db: DB, summary: bool = False):
         rows = db.execute(select(
             Project.id, Project.title, Project.kind, Project.is_current,
             Project.completed, Project.index_revision,
+            Project.cover_image_id,
             # Search revision deliberately excludes fixed author context. This read-only
             # fingerprint covers every material field without invalidating search indexes.
             func.md5(cast(func.jsonb_build_array(*[
@@ -765,7 +768,7 @@ def list_tasks(project_id: UUID, user: User, db: DB):
     project = require_project(db, user, project_id)
     tasks = db.scalars(
         select(Task)
-        .where(Task.project_id == project.id, Task.kind.in_(["scene", "rewrite"]))
+        .where(Task.project_id == project.id, Task.kind.in_(["scene", "rewrite", "image"]))
         .order_by(Task.created_at.desc())
         .limit(50)
     )
@@ -797,6 +800,15 @@ def require_writing_task(
 @router.post("/api/tasks/{task_id}/cancel", response_model=TaskView)
 def cancel_task(task_id: UUID, user: User, db: DB):
     require_initialized(db, lock_account(db, user.id))
+    image_task = db.scalar(select(Task).where(
+        Task.id == task_id, Task.user_id == user.id, Task.kind == "image"
+    ).with_for_update())
+    if image_task:
+        if image_task.status in {"pending", "running"} and image_task.adopted_at is None:
+            image_task.status, image_task.error = "cancelled", "user_cancelled"
+            image_task.finished_at, image_task.input_snapshot = datetime.now(UTC), None
+            db.commit()
+        return task_view(db, image_task)
     task = require_writing_task(db, user, task_id, for_update=True)
     if task.status in {"pending", "running"} and task.adopted_at is None:
         task.status, task.error, task.finished_at = "cancelled", "user_cancelled", datetime.now(UTC)

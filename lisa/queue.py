@@ -90,6 +90,12 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
     async def chat_task(task_id: str):
         await _execute_task(settings, task_id, execute_chat)
 
+    @app.task(name="lisa.image", queue="lisa_image", retry=ExplicitRetry())
+    async def image_task(task_id: str):
+        from lisa.images import execute_image
+
+        await _execute_task(settings, task_id, execute_image)
+
     @app.task(name="lisa.author", queue="lisa_author", retry=ExplicitRetry())
     async def author_task(task_id: str):
         from lisa.author import execute_author
@@ -115,6 +121,9 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
         # No static queue lock: a dead sweep cannot block its own successor.
         with _execution_engine(settings, f"lisa.recovery_sweep:{timestamp}") as engine:
             recover_tasks(engine)
+            from lisa.images import cleanup_images
+            with Session(engine) as db, db.begin():
+                cleanup_images(db)
 
     # Recovery is operational cleanup, independent of autonomous/model features.
     app.periodic(cron="* * * * *")(recovery_sweep)
@@ -236,6 +245,10 @@ def enqueue_author(db: Session, task_id, user_id) -> int:
 
 def enqueue_style(db: Session, task_id, user_id) -> int:
     return _enqueue(db, task_id, "lisa.style", "lisa_style", f"style:{user_id}")
+
+
+def enqueue_image(db: Session, task_id, user_id) -> int:
+    return _enqueue(db, task_id, "lisa.image", "lisa_image", f"image:{user_id}")
 
 
 def _enqueue(db, task_id, task_name, queue_name, lock, *, delay=0) -> int:

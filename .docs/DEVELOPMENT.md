@@ -209,6 +209,32 @@ D19迁移 `d8193f6a20b4` 保留原worldbook为固定核心，JSONB详细条目�
 
 旧环境的 `scripts/dev_env.py privacy-cleanup` 会不可恢复清除历史诊断，须明确授权且相关服务停止；不是日常启动或账号删除步骤。数据范围以主方案和Git协作为准。
 
+## 小说插图模型预研
+
+B15 当前工程入口：[`lisa/images.py`](../lisa/images.py) 复用现有 `Task`、队列及 OneBot 出站，迁移为 `b15e8a102810`；`PrivateImage` 二进制随账号级联清理，和共有表情 `SharedAsset` 分开。独立 `LISA_IMAGE_MODEL/BASE_URL/API_KEY` 沿用本地配置；`LISA_IMAGE_TIMEOUT_SECONDS=180`，medium/1024×1024/n=1/PNG，无 SDK 自动重试。没有参考用 `/images/generations`，明确参考用 multipart `/images/edits`。上传支持 PNG/JPEG/WebP，最多 12 MB、8192px 单边与 3200 万像素，解码后去除元数据并存 PNG；这些是文件有效性限制，不是图片消费额度。
+
+明确绘图话题用专用 `ImagePreparation` 准备有限绘图描述，不经过普通聊天/检索额度；正常聊天可选择一张契合语境的小图。生图和描述台账均标记 `budget_exempt`，不增加文本日账；生图有独立执行槽。LISA 出镜必须先由该账号明确指定参考，测试参考不自动设给正式账号。新消息不取消独立成图；QQ 失败只重发已有图片，unknown 不自动重画；聊天图片约 24 小时后由现有 recovery sweep 清理，已替换且无需投递的作品旧图不作历史保留。
+
+接口：`GET/PUT /api/projects/{id}/cover`、`GET/PUT /api/chapters/{id}/illustration`，上传 JSON 含 `content_base64`；`GET /api/private-images/{id}` 要求本人登录，公开阅读页不引用它。取消复用 `/api/tasks/{id}/cancel` 或对话明确取消，作品任务列表显示图片状态，不提供网页生图面板。
+
+2026-10-28 新业务在临时库中实际完成合成封面/章节及指定参考人设图，耗时 99.147 / 34.012 / 99.837 秒（含描述与生成），保存/出站段正确；文字日账预置 999 元仍为 999 元。usage 全零仅记价格未知。脱敏参数/台账及输出在 `runtime/reports/b15-images-20261028/{result.json,recheck.json,cover.png,illustration.png,chat.png}`；章节首次被解释成仅保存画风，修正操作优先级后复验成功。图片版网页构建保留于该目录的 `dist/`，当前 `runtime/dist/` 恢复为接入图片前的作品页，避免未重载 API 显示不可用入口；源码保留完整新界面。
+
+本轮没有迁移个人库、重启正式进程、启用对话 skill 或连接真实 QQ。正式接入时在合适空闲窗口运行 `runtime/venv/Scripts/python.exe -m lisa migrate`，使用包含 `lisa_image` consumer 的 worker/网关并重新构建网页；不能只复制新网页。全部源码仍含其他任务未提交改动，加载前需核对这些任务的生效范围。测试/限制详见 [B15](DEVELOPMENT_TASKS.md#b15-小说插图预研)。以下早期预研记录仅表示当时结果。
+
+当前模型为 `gpt-image-2`，独立密钥/端点保存在 `runtime/.env` 的 `LISA_IMAGE_*`。按用户本轮提供参考图的明确授权，已向 `https://drc.totokens.cc/v1/images/edits` 实际上传 PNG，medium、1024×1024、n=1、PNG 输出，HTTP 200，24.895 秒，返回模型 `gpt-image-2`，得到一张挥手半身插画。已目视检查，主要发型、红眼、头饰及服装主配色与参考图相近，构图和动作变化；符合用户仅锚定基础风格的目标，不做严格身份一致性判定。usage 所有字段为 0，不能据此判定免费。
+
+输出为本机忽略目录 `runtime/reports/image-reference-probe-20261028/reference-result.png`；`reference.png` 为用户指定测试输入，`result.json` 保存脱敏参数、完整提示词、请求号、时间及文件哈希。本轮只发一次 multipart 请求，自动重试 0，密钥仅由本地配置进入请求、不输出；无业务代码、配置、数据库、QQ 或进程重载动作。完整证据见 [参考图实测](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-参考图输入实测通过)。
+
+用户已取消 D25 生图及提示准备的全部应用内消费额度，不再要求日额/任务金额/调用次数封顶、费用预留或价格配置作为启用门槛；统计与额度拦截分离，其他文本功能限额保持原状。当前正式图片业务尚未实现，需在后续接入中落实此豁免，不能把配置或独立探针当成业务已启用。此前配置切换证据见 [历史记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-totokens文本与生图配置切换)。
+
+以下为旧站、旧模型的历史预研，不代表新配置的可用性：
+
+2026 年 10 月 28 日，用户指定 `gpt-image-2.5-sunburst` 并明确授权本轮密钥发送至项目现有 `https://test.mcii.cc/v1`，查询模型及最多生成一张低质量合成测试图。独立探针的 `GET /models` 返回 HTTP 200、0.791 秒，精确模型名存在；唯一一次 `POST /images/generations` 使用 `n=1`、`size=1024x1024`、`quality=low`、`output_format=png`，0.789 秒返回 HTTP 503、`No available compatible accounts`，没有图片或 usage，未重试。
+
+结论是“鉴权与清单可见，实际生图尚不可用”，不能据此确认尺寸/质量参数兼容、后端身份、图像质量、计费或长期稳定性。先请中转供应商核对该密钥/分组的模型路由与兼容账号资源；没有自动切换其他模型或协议。此次独立供应商探针未接 LISA 任务账本，实际费用未知，生产接入必须另按统一预算及真实计价实施。
+
+密钥只经探针进程标准输入使用，没有写入文件、正式环境配置或文档；仅合成场景出站，不含私人小说/聊天。没有启用功能或重载服务。详细脱敏记录及本地证据路径见 [探针记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-小说插图模型连通性预研)，需求见 [D25 草案](PROJECT_PLAN.md#小说插图需求草案)。
+
 ## 正式应用检查
 
 ### 隔离回归与构建

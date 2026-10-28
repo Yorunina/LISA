@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     model_max_output_tokens: int = Field(default=600, ge=64, le=4096)
     model_concurrency: int = Field(default=1, ge=1, le=8)
     model_timeout_seconds: float = Field(default=120, gt=0, le=180)
+    # Independent image provider. Consumption is recorded separately from text quotas.
+    image_model: str = ""
+    image_base_url: str = ""
+    image_api_key: SecretStr = SecretStr("")
+    image_timeout_seconds: float = Field(default=180, gt=0, le=600)
     embedding_model: str = ""
     embedding_base_url: str = ""
     embedding_api_key: SecretStr = SecretStr("")

@@ -541,6 +541,7 @@ def test_work_summaries_omit_materials_and_body_but_retain_versions(client, proj
     assert projects.status_code == 200
     assert set(projects.json()[0]) == {
         "id", "title", "kind", "is_current", "completed", "index_revision", "material_revision",
+        "cover_image_id",
     }
     chapters = client.get(f"/api/projects/{project['id']}/chapters?summary=true")
     assert chapters.status_code == 200

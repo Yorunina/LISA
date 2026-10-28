@@ -49,8 +49,9 @@ def delete_account(
         select(ModelCall).where(ModelCall.user_id == user.id, ModelCall.state == "reserved")
     ):
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == call.budget_day).with_for_update())
-        day.reserved_usd -= call.reserved_usd
-        day.spent_usd += call.reserved_usd
+        if not call.budget_exempt:
+            day.reserved_usd -= call.reserved_usd
+            day.spent_usd += call.reserved_usd
 
     # Let a running worker acknowledge its job, without retaining the account/task linkage.
     # Aborting also prevents an already-prepared retry from reviving that job.

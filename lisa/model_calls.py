@@ -81,6 +81,7 @@ def _reserve(
     amount: Decimal,
     *,
     configuration: dict | None = None,
+    budget_exempt: bool = False,
 ) -> UUID:
     with Session(engine) as db, db.begin():
         # Daily rows alone cannot serialize the global in-flight limit across UTC midnight.
@@ -99,16 +100,21 @@ def _reserve(
             or (not platform and (user is None or not user.active))
         ):
             raise ModelCallFailed("Task or account unavailable")
+        if budget_exempt and (configuration or {}).get("purpose") not in {
+            "image_generation", "image_description"
+        }:
+            raise ModelCallFailed("Unsupported budget exemption")
         now = datetime.now(UTC)
         db.execute(insert(BudgetDay).values(day=now.date()).on_conflict_do_nothing())
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == now.date()).with_for_update())
         calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task_id)).all()
         if any(call.state == "unknown" for call in calls):
             raise ModelCallUnknown("An earlier attempt of this task has an unknown outcome")
+        budgeted_calls = [call for call in calls if not call.budget_exempt]
         task_cost = sum(
             (
                 call.charged_usd if call.charged_usd is not None else call.reserved_usd
-                for call in calls
+                for call in budgeted_calls
             ),
             Decimal(0),
         )
@@ -121,11 +127,13 @@ def _reserve(
             if task.kind in {"scene", "rewrite"}
             else MAX_TASK_CALLS
         )
-        if len(calls) >= max_calls or (
+        if not budget_exempt and (len(budgeted_calls) >= max_calls or (
             task.kind != "style_distill" and task_cost + amount > settings.model_task_usd
-        ):
+        )):
             raise BudgetExceeded("Task model allowance exhausted")
-        if day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd:
+        if not budget_exempt and (
+            day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd
+        ):
             raise BudgetExceeded("Daily model allowance exhausted")
         if platform:
             maintenance = db.scalars(select(ModelCall).where(
@@ -137,17 +145,24 @@ def _reserve(
             ), Decimal(0))
             if used + amount > settings.shared_daily_usd:
                 raise BudgetExceeded("Daily shared maintenance allowance exhausted")
+        image_call = (configuration or {}).get("purpose") == "image_generation"
         inflight = db.scalar(
-            select(func.count()).select_from(ModelCall).where(ModelCall.state == "reserved")
+            select(func.count()).select_from(ModelCall).where(
+                ModelCall.state == "reserved",
+                (ModelCall.configuration["purpose"].astext == "image_generation")
+                if image_call else func.coalesce(ModelCall.configuration["purpose"].astext, "")
+                != "image_generation",
+            )
         )
-        if inflight >= settings.model_concurrency:
+        if inflight >= (1 if image_call else settings.model_concurrency):
             raise ModelBusy("Model slot occupied")
         call = ModelCall(
             task_id=task_id,
             user_id=user_id,
             budget_day=day.day,
             state="reserved",
-            reserved_usd=amount,
+            budget_exempt=budget_exempt,
+            reserved_usd=Decimal(0) if budget_exempt else amount,
             started_at=now,
             configuration=configuration
             if configuration is not None
@@ -160,7 +175,8 @@ def _reserve(
             },
         )
         db.add(call)
-        day.reserved_usd += amount
+        if not budget_exempt:
+            day.reserved_usd += amount
         db.flush()
         return call.id
 
@@ -184,8 +200,9 @@ def _finish(
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == call.budget_day).with_for_update())
         # No retry releases an unknown provider outcome back into available budget.
         amount = charged if charged is not None else call.reserved_usd
-        day.reserved_usd -= call.reserved_usd
-        day.spent_usd += amount
+        if not call.budget_exempt:
+            day.reserved_usd -= call.reserved_usd
+            day.spent_usd += amount
         call.state, call.charged_usd = state, amount
         call.input_tokens, call.output_tokens = input_tokens, output_tokens
         call.finished_at, call.error = datetime.now(UTC), error
@@ -340,6 +357,7 @@ async def generate_structured(
     schema: type[BaseModel] = Reply,
     output_tokens: int | None = None,
     input_byte_limit: int | None = None,
+    image_description: bool = False,
 ) -> BaseModel:
     """One model attempt; callers must not automatically retry unknown outcomes."""
     if not settings.model_api_key.get_secret_value() or not settings.model_name:
@@ -359,7 +377,9 @@ async def generate_structured(
         task_id,
         user_id,
         amount,
+        budget_exempt=image_description,
         configuration={
+            **({"purpose": "image_description"} if image_description else {}),
             "model": settings.model_name,
             "base_url": settings.model_base_url,
             "max_output_tokens": settings.model_max_output_tokens,

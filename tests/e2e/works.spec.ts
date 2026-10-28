@@ -7,15 +7,84 @@ import { readFile } from 'node:fs/promises'
 import { plotFields, writingFields, readSections, readItems } from '../../web/material-text'
 
 const doc = (text: string) => ({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text }] }] })
-const work = () => ({ id: 'work-1', title: '雨夜来信', kind: 'novel', is_current: true, completed: false, worldbook: '', worldbook_entries: [] as WorldbookEntry[], constraints: '', characters: '', author_prompt: '', summary: '', plot_state: '', agreement: '', preferences: '', tentative: '' })
+const work = () => ({ cover_image_id: null as string | null, id: 'work-1', title: '雨夜来信', kind: 'novel', is_current: true, completed: false, worldbook: '', worldbook_entries: [] as WorldbookEntry[], constraints: '', characters: '', author_prompt: '', summary: '', plot_state: '', agreement: '', preferences: '', tentative: '' })
 const chapter = () => ({ id: 'chapter-1', title: '第一章 重逢', position: 1, content: doc('她站在雨里的车站。'), text: '她站在雨里的车站。', version: 1 })
 const task = () => ({ id: 'task-1', kind: 'scene', goal: '描写雨夜重逢的一个场景。', status: 'pending', error: null as string | null, can_cancel: true, can_retry: false, input_tokens: 0, output_tokens: 0, charged_usd: '0', reserved_usd: '0.02', adopted_at: null as string | null })
 const schedule = () => ({ enabled: true, status: 'no_plan', pause_reason: null as string | null, due_at: null as string | null, goal: null as string | null, project_id: null as string | null, remaining_scenes: 0 })
 const characterRetrievalConfig = () => ({ enabled: false, limit: 3, max_chars: 1500 })
 const retrievalConfig = () => ({ sources: ['memory', 'project', 'chapter'], limit: 5, max_chars: 1500 })
 
+for (const width of [1440, 1024, 390]) {
+  test(`private cover and chapter upload remain simple at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const state = await stubStudy(page, true);
+    const fixture = await readFile('tests/fixtures/work-picture.png');
+    await page.route('**/api/private-images/*', route => route.fulfill({ body: fixture, contentType: 'image/png' }));
+    const illustration = page.getByRole('region', { name: '章节插图', exact: true });
+    await illustration.locator('input[type=file]').setInputFiles({ name: 'scene.png', mimeType: 'image/png', buffer: fixture });
+    await expect(illustration.getByRole('img', { name: '章节插图' })).toBeVisible();
+    await expect(illustration.getByRole('status')).toHaveText('章节插图已保存。');
+    expect(await page.evaluate(() => document.body.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`illustration-${width}.png`), fullPage: true });
+    await page.getByRole('navigation', { name: '作品页面' }).getByRole('button', { name: '书架', exact: true }).click();
+    const cover = page.getByRole('region', { name: '《雨夜来信》封面' });
+    await cover.locator('input[type=file]').setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: fixture });
+    await expect(page.locator('.library-cover img')).toBeVisible();
+    expect(await page.evaluate(() => document.body.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`cover-${width}.png`), fullPage: true });
+    state.pictureFails = true;
+    await cover.locator('input[type=file]').setInputFiles({ name: 'replacement.png', mimeType: 'image/png', buffer: fixture });
+    await expect(cover).toContainText('图片保存失败，原图保留。');
+    await expect(page.locator('.library-cover img')).toBeVisible();
+    state.pictureFails = false;
+    await cover.getByRole('button', { name: '重新上传这张图' }).click();
+    await expect(cover.getByRole('status')).toHaveText('《雨夜来信》封面已保存。');
+    await expect(cover).not.toContainText('图片保存失败');
+    expect(state.requests.filter(item => item.path.endsWith('/tasks') && Object.keys(item.body).length)).toHaveLength(0);
+  });
+}
+
+test('picture polling clears only recovered read errors', async ({ page }) => {
+  const state = await stubStudy(page, true);
+  state.pictureReadFails = true;
+  const picture = page.getByRole('region', { name: '章节插图', exact: true });
+  await expect(picture).toContainText('章节插图暂时无法读取', { timeout: 12_000 });
+  state.pictureReadFails = false;
+  await expect(picture).not.toContainText('章节插图暂时无法读取', { timeout: 12_000 });
+});
+
+test('a late library refresh cannot hide a newly uploaded cover', async ({ page }) => {
+  const state = await stubStudy(page, true);
+  await page.getByRole('navigation', { name: '作品页面' }).getByRole('button', { name: '书架', exact: true }).click();
+  const oldSummary = { ...state.project!, index_revision: 1, material_revision: JSON.stringify(state.project) };
+  let release!: () => void;
+  let pending!: () => void;
+  const started = new Promise<void>(resolve => { pending = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let hold = true;
+  await page.route('**/api/projects?summary=true', async route => {
+    if (!hold) { await route.fallback(); return; }
+    hold = false; pending(); await gate;
+    await route.fulfill({ json: [oldSummary] });
+  });
+  await started;
+  const fixture = await readFile('tests/fixtures/work-picture.png');
+  await page.route('**/api/private-images/*', route => route.fulfill({ body: fixture, contentType: 'image/png' }));
+  const cover = page.getByRole('region', { name: '《雨夜来信》封面' });
+  await cover.locator('input[type=file]').setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: fixture });
+  await expect(page.locator('.library-cover img')).toHaveAttribute('src', '/api/private-images/synthetic-picture');
+  const response = page.waitForResponse('**/api/projects?summary=true');
+  release(); await response;
+  // Let React process the released, stale polling response before inspecting the cover.
+  await page.waitForTimeout(200);
+  await expect(page.locator('.library-cover img')).toHaveAttribute('src', '/api/private-images/synthetic-picture');
+});
+
 async function stubStudy(page: Page, seeded = false) {
   const state = {
+    pictureReadFails: false,
+    pictures: {} as Record<string, string | null>,
+    pictureFails: false,
     project: seeded ? { ...work(), agreement: '现代都市小说，叙述克制。' } : null as ReturnType<typeof work> | null,
     others: [] as ReturnType<typeof work>[],
     handoff: [] as (ReturnType<typeof task> & { project_id: string; project_title: string })[],
@@ -51,6 +120,15 @@ async function stubStudy(page: Page, seeded = false) {
     const body = req.method() === 'GET' ? {} : req.postDataJSON()
     const summary = new URL(req.url()).searchParams.get('summary') === 'true'
     state.requests.push({ path, body, summary })
+    if (path.endsWith('/cover') || path.endsWith('/illustration')) {
+      if (req.method() === 'GET' && state.pictureReadFails) return route.fulfill({ status: 503, json: { detail: '图片读取失败' } });
+      if (req.method() === 'PUT') {
+        if (state.pictureFails) return route.fulfill({ status: 503, json: { detail: '图片保存失败，原图保留。' } })
+        state.pictures[path] = 'synthetic-picture'
+        if (path.endsWith('/cover') && state.project) state.project.cover_image_id = 'synthetic-picture'
+      }
+      return route.fulfill({ json: { image_id: state.pictures[path] ?? null } })
+    }
     if (path === '/auth/me') return route.fulfill({ json: { id: 'synthetic-reader', username: '合成读者' } })
     if (path === '/setup') return route.fulfill({ json: { qq_id: '700000099', initialized: true, persona: { name: '测试小莎', prompt: '只用于合成浏览器测试。', version: 1 }, presets: [] } })
     if (path === '/service-status') return route.fulfill({ json: { status: 'ready', message: '合成服务已就绪。' } })
@@ -142,7 +220,7 @@ async function stubStudy(page: Page, seeded = false) {
     }
     if (path === '/projects') {
       const items = state.project ? [state.project, ...state.others] : []
-      return route.fulfill({ json: items.map(item => summary ? { id: item.id, title: item.title, kind: item.kind, is_current: item.is_current, completed: item.completed, index_revision: 1, material_revision: JSON.stringify(item) } : item) })
+      return route.fulfill({ json: items.map(item => summary ? { id: item.id, title: item.title, kind: item.kind, is_current: item.is_current, completed: item.completed, cover_image_id: item.cover_image_id, index_revision: 1, material_revision: JSON.stringify(item) } : item) })
     }
     if (path === '/projects/work-1' && req.method() === 'GET') return route.fulfill({ json: { ...state.project, index_revision: 1 } })
     if (path === '/projects/work-1' && req.method() === 'PUT') {

@@ -343,6 +343,15 @@ def _adopt_chat_decision(
 ) -> str:
     """Apply a successful turn in the caller's transaction before clearing its inbox."""
     user_id, task_id = user.id, task.id
+    if decision and decision.image_action:
+        from lisa.images import apply_image_action
+
+        notice = apply_image_action(
+            db, settings, user, task, decision.image_action, current_texts
+        )
+        if notice:
+            reply += "\n\n" + notice
+            reply_parts[-1] += "\n\n" + notice
     ensure_current_plan(db, user.id)
     if context_limited:
         reply += "\n\n本轮聊天上下文超过应用输入预算，创作修改或写作任务请在网页操作。"
@@ -478,6 +487,9 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 project, autonomy_enabled=settings.autonomy_enabled
             )
         instructions_without_optional = instructions
+        from lisa.images import image_context, image_enabled
+        if image_enabled(settings):
+            instructions += image_context(db, user.id)
         share_ids, share_context = sharing_context(db, user.id)
         instructions += share_context
         instructions_without_memories = instructions
@@ -500,6 +512,18 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         task.status = "running"
         task.started_at = task.started_at or datetime.now(UTC)
         user_id, qq_id = user.id, binding.qq_id
+        reference_urls = [url for message in batch for url in message.image_urls]
+    # A drawing commission has its own unmetered description path. It remains
+    # usable when ordinary chat/retrieval has exhausted its text allowance.
+    from lisa.images import execute_image_turn, image_intent
+    if (
+        generate is None and image_intent(current_texts)
+        and settings.model_api_key.get_secret_value()
+    ):
+        if await execute_image_turn(
+            settings, engine, task_id, user_id, current_texts, reference_urls, qq_id
+        ):
+            return
     error = None
     decision = None
     creative = bool(project_id)
@@ -607,6 +631,16 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             raise JobRetry(RetryDecision(retry_in={"seconds": 3})) from None
         return
     except BudgetExceeded:
+        # A drawing may be phrased without the common routing words (an avatar,
+        # for example). Text credit must not prevent recognizing that commission.
+        if (
+            generate is None and not image_intent(current_texts)
+            and settings.model_api_key.get_secret_value()
+        ):
+            if await execute_image_turn(
+                settings, engine, task_id, user_id, current_texts, reference_urls, qq_id
+            ):
+                return
         reply, error = "今日服务额度或本次对话额度已用尽，暂时无法生成回复。", "budget_exhausted"
     except ModelCallUnknown:
         reply, error = "这次对话请求的结果暂时无法确认，已停止自动重试。", "model_unknown"
@@ -634,6 +668,13 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             error = "context_changed"
             reply = "记忆已更新，这次回复未采用。请重新发送消息继续。"
             reply_parts = [reply]
+        # Image actions belong to the binding that supplied this turn. A late
+        # ordinary reply must not send a new drawing to a replacement binding.
+        binding = db.get(QQBinding, user_id)
+        if decision and decision.image_action and (
+            binding is None or binding.qq_id != qq_id
+        ):
+            decision = decision.model_copy(update={"image_action": None})
         task.status, task.error = ("failed" if error else "completed"), error
         task.finished_at = datetime.now(UTC)
         if error is None:
@@ -717,6 +758,10 @@ def claim_outbound(
         message.finished_at = datetime.now(UTC)
         return None
     task = db.get(Task, message.task_id)
+    if task.kind == "image" and task.status == "cancelled":
+        message.status, message.content = "cancelled", ""
+        message.finished_at = datetime.now(UTC)
+        return None
     if task.kind == "contact":
         from lisa.contact_policy import contact_block_reason
         from lisa.progress import progress_is_current

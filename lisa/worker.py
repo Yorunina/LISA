@@ -22,7 +22,8 @@ async def run_worker(*, once: bool = False) -> None:
         # Separate consumers ensure a slow author never occupies the chat worker slots.
         async with asyncio.TaskGroup() as group:
             for queue, concurrency in (
-                ("lisa", 2), ("lisa_author", 1), ("lisa_index", 1), ("lisa_style", 1)
+                ("lisa", 2), ("lisa_author", 1), ("lisa_index", 1), ("lisa_style", 1),
+                ("lisa_image", 1),
             ):
                 group.create_task(
                     app.run_worker_async(

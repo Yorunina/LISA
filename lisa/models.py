@@ -262,6 +262,17 @@ class Project(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(160))
+    cover_image_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_images.id", ondelete="SET NULL")
+    )
+    image_revision: Mapped[int] = mapped_column(default=0, server_default="0")
+    image_style: Mapped[str] = mapped_column(
+        String(24), default="watercolor", server_default="watercolor"
+    )
+    image_notes: Mapped[str] = mapped_column(Text, default="", server_default="")
+    image_reference_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_images.id", ondelete="SET NULL")
+    )
     kind: Mapped[str] = mapped_column(String(16), default="novel")
     share_token: Mapped[str | None] = mapped_column(String(43), unique=True)
     is_current: Mapped[bool] = mapped_column(default=True, server_default="true")
@@ -364,6 +375,10 @@ class Chapter(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     title: Mapped[str] = mapped_column(String(160))
+    illustration_image_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_images.id", ondelete="SET NULL")
+    )
+    image_revision: Mapped[int] = mapped_column(default=0, server_default="0")
     position: Mapped[int]
     content: Mapped[dict] = mapped_column(JSONB)
     version: Mapped[int] = mapped_column(default=1, server_default="1")
@@ -565,6 +580,7 @@ class ModelCall(Base):
     )
     budget_day: Mapped[date] = mapped_column(ForeignKey("budget_days.day"))
     state: Mapped[str] = mapped_column(String(24))
+    budget_exempt: Mapped[bool] = mapped_column(default=False, server_default="false")
     reserved_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6))
     charged_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6))
     input_tokens: Mapped[int | None]
@@ -595,6 +611,9 @@ class OutboundMessage(Base):
         ForeignKey("shared_entries.id", ondelete="SET NULL")
     )
     meme_revision: Mapped[int | None]
+    private_image_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_images.id", ondelete="SET NULL")
+    )
     status: Mapped[str] = mapped_column(String(16), default="pending")
     attempts: Mapped[int] = mapped_column(default=0)
     next_attempt_at: Mapped[datetime] = mapped_column(
@@ -603,6 +622,29 @@ class OutboundMessage(Base):
     message_id: Mapped[str | None] = mapped_column(String(48))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PrivateImage(Base):
+    __tablename__ = "private_images"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), index=True)
+    mime: Mapped[str] = mapped_column(String(32))
+    data: Mapped[bytes] = mapped_column(LargeBinary, deferred=True)
+    origin: Mapped[str] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class ImagePreference(Base):
+    __tablename__ = "image_preferences"
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    lisa_reference_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("private_images.id", ondelete="SET NULL")
+    )
 
 
 class SharedAsset(Base):

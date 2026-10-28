@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from lisa.images import ImageAction
 from lisa.life import LifeCandidate, LifeMention
 from lisa.memory import MemoryCandidate
 from lisa.model_calls import Reply, generate_structured
@@ -43,6 +44,7 @@ class Conversation(Reply):
     # previous part is confirmed by QQ.
     message_intervals: list[float] = Field(default_factory=list, max_length=6)
     meme_id: UUID | None = None
+    image_action: ImageAction | None = None
     meme_preference: Literal["normal", "reduced", "off"] | None = None
     meme_preference_evidence: str = Field(default="", max_length=300)
     share_chapter_id: UUID | None = None

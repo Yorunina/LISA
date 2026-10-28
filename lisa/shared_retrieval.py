@@ -265,6 +265,14 @@ def select_meme(db, user_id, meme_id, context):
 
 def outbound_segments(db, message):
     segments = [{"type": "text", "data": {"text": message.content}}]
+    if message.private_image_id:
+        from lisa.images import owned_image
+
+        asset = owned_image(db, message.user_id, message.private_image_id)
+        if asset:
+            segments.append({"type": "image", "data": {
+                "file": "base64://" + base64.b64encode(asset.data).decode("ascii"),
+            }})
     if not message.meme_id:
         return segments
     item = db.get(SharedEntry, message.meme_id)

@@ -24,6 +24,7 @@
 | 共有表情与用户共建 | [共有记忆](PROJECT_PLAN.md#共有记忆与共同维护) | 决策记录 D20；[B10](DEVELOPMENT_TASKS.md#b10-共有记忆扩展) 工程已接通、真实效果待验；全体用户维护，无管理员审批 |
 | 作品完结、修订、新建与切换 | [作品生命周期](PROJECT_PLAN.md#作品完结与开启新作品)、[工作台](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D13、D14；涉及页面时读前端规范 |
 | 作品与章节公开分享、Agent 分享链接 | [作品网页分享](PROJECT_PLAN.md#作品网页分享) | 决策记录 D18；部署基址与验证查开发环境，页面查前端规范 |
+| 小说插图/封面、基础画风模板、聊天自制图片 | [图片需求](PROJECT_PLAN.md#小说插图需求草案)、[风格模板](PROJECT_PLAN.md#预设风格模板)、[低频聊天发图](PROJECT_PLAN.md#聊天-agent-的自制图片) | [D25 待决](PENDING_DECISIONS.md#d25-小说插图)；[参考图实测](DEVELOPMENT.md#小说插图模型预研)；无消费额度、基础画风锚定；业务已接通并通过真实合成验证，正式加载/QQ/多日效果待验 |
 | 聊天、虚拟生活、偏好 | [生活事实](PROJECT_PLAN.md#虚拟生活与日记的事实同步)、[用户权威](PROJECT_PLAN.md#用户意见与创作权威)、[联系](PROJECT_PLAN.md#作息学习与主动联系)、[每周虚拟生活提案表](PROJECT_PLAN.md#每周虚拟生活提案表) | 决策记录 D02、D03、D06、D23 |
 | 连续消息、回复长度、分条与插话 | [合批与分条](PROJECT_PLAN.md#连续消息合批与自然分条发送) | 决策记录 D21；[B11](DEVELOPMENT_TASKS.md#b11-对话节奏与分条投递) 核心工程已接通，真实 QQ/多日效果与具体参数见待决清单 |
 | 自主创作、暂停、任务 | [暂停](PROJECT_PLAN.md#自主推进与暂停规则)、[主动取消](PROJECT_PLAN.md#主动取消生成任务)、[Agent](PROJECT_PLAN.md#agent-职责与上下文)、[预算](PROJECT_PLAN.md#公众试用与预算)、[架构](PROJECT_PLAN.md#技术架构与工具栈) | 决策记录 D01—D04、D09、D12、D14 |

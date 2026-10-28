@@ -643,6 +643,10 @@ def test_real_queue_job_executes_registered_chat_task(settings, engine, db, user
 def run_chat_worker(settings):
     async def run():
         queue = create_queue(settings)
+        # This helper asserts one chat job's immediate outcome. Recovery sweeps
+        # run in separate tests; a minute-boundary sweep could otherwise settle
+        # the deliberately crashed task before this test can inspect it.
+        queue.periodic_registry.periodic_tasks.clear()
         async with queue.open_async():
             await asyncio.wait_for(
                 queue.run_worker_async(

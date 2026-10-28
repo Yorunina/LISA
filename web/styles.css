@@ -129,6 +129,15 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .work-library li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 20px; padding: 8px 0; }
 .library-title { flex: 1 1 180px; min-width: 0; min-height: 44px; text-align: left; overflow-wrap: anywhere; border: 0; border-left: 3px solid transparent; padding: 8px 12px; background: transparent; color: var(--ink); font: 16px/1.7 var(--serif); }
 .library-title[aria-current="page"] { background: var(--green-light); border-left-color: var(--green); }
+.library-title { display: flex; align-items: center; gap: 18px; }
+.library-cover { position: relative; display: grid; place-items: center; flex: 0 0 76px; height: 108px; overflow: hidden; background: #3e5549; color: #e9e7ce; box-shadow: 3px 3px 0 #d8dacf; border-radius: 1px 3px 3px 1px; }
+.library-cover img { width: 100%; height: 100%; object-fit: cover; }
+.cover-ornament { border: 1px solid #92a08e; padding: 12px; }
+.work-picture { margin-block: 16px 24px; min-width: 0; }
+.chapter-illustration { display: block; width: 100%; max-height: 620px; object-fit: contain; margin-bottom: 16px; }
+.picture-upload label { display: block; font-size: 13px; color: var(--ink); }
+.picture-upload input { display: block; max-width: 100%; width: 100%; margin-top: 8px; font-size: 13px; }
+.picture-upload input::file-selector-button { background: var(--surface); border: 1px solid var(--line); color: var(--green); padding: 8px 12px; margin-right: 10px; border-radius: 3px; cursor: pointer; }
 .library-labels { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--muted); padding-inline: 12px; }
 .current-work-label { color: var(--green); }
 .work-lifecycle { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px 20px; margin-bottom: 18px; font-size: 13px; }

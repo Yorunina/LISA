@@ -47,8 +47,9 @@ def _settle_calls(db, calls):
         if call.state != "reserved":
             continue
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == call.budget_day).with_for_update())
-        day.reserved_usd -= call.reserved_usd
-        day.spent_usd += call.reserved_usd
+        if not call.budget_exempt:
+            day.reserved_usd -= call.reserved_usd
+            day.spent_usd += call.reserved_usd
         call.state, call.charged_usd = "unknown", call.reserved_usd
         call.error, call.finished_at = "worker_interrupted", datetime.now(UTC)
 
@@ -60,6 +61,8 @@ def _clean_inputs(db, task):
     if task.kind == "chat":
         clear_image_inputs(db, task.id)
         db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
+    if task.kind == "image":
+        task.input_snapshot = None
     if task.kind == "style_distill":
         for corpus in db.scalars(select(StyleCorpus).where(StyleCorpus.task_id == task.id)):
             clear_corpus(db, corpus)
@@ -74,14 +77,15 @@ def _interruption_notice(db, task):
     from lisa.author import _notice
     from lisa.chat import _outbound
 
-    if task.kind == "chat":
+    if task.kind in {"chat", "image"}:
         binding = db.get(QQBinding, task.user_id)
         if binding:
             _outbound(
                 db,
                 task,
                 binding.qq_id,
-                "服务中断，这次对话未能完成，已停止自动重试。请重新发送消息继续。",
+                "服务中断，这次绘图已停止自动重试，原图仍保留。" if task.kind == "image"
+                else "服务中断，这次对话未能完成，已停止自动重试。请重新发送消息继续。",
             )
     elif task.kind in {"scene", "rewrite"}:
         _notice(db, task, "服务中断，这次创作未保存新正文，原文仍在。请在网页查看任务状态。")
@@ -94,7 +98,7 @@ SELECT t.id FROM tasks t
 JOIN procrastinate_jobs j ON j.id = t.queue_job_id
 LEFT JOIN procrastinate_workers w ON w.id = j.worker_id
 WHERE j.task_name IN ('lisa.chat', 'lisa.author', 'lisa.index', 'lisa.style',
-    'lisa.contact', 'lisa.life_plan', 'lisa.shared')
+    'lisa.contact', 'lisa.life_plan', 'lisa.shared', 'lisa.image')
 AND (
     (j.status = 'doing' AND
         (w.id IS NULL OR w.last_heartbeat < now() - make_interval(secs => :timeout)))
@@ -211,7 +215,8 @@ def recover_tasks(engine) -> int:
                 else:
                     unknown = any(call.state == "unknown" for call in calls)
                     task.status = (
-                        "outcome_unknown" if unknown and task.kind in {"index", "shared_index"}
+                        "outcome_unknown"
+                        if unknown and task.kind in {"index", "shared_index", "image"}
                         else "failed"
                     )
                     task.error = "model_unknown" if unknown else "worker_interrupted"
