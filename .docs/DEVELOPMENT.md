@@ -1,8 +1,10 @@
 # 本地开发环境
 
-更新：2026 年 10 月 25 日。Windows 原生运行；本机已有 Windows 11 x64 实施证据，Windows 10/Server、正式服务和容量仍待验收。本页维护当前运行方法、配置与验证边界；逐轮测试、故障诊断、模型费用样本和服务重载日志已归入 [环境历史](archive/2026-10-24/DEVELOPMENT.md)，默认不读。功能状态查 [开发任务](DEVELOPMENT_TASKS.md)。
+更新：2026 年 10 月 28 日。Windows 原生运行；本机已有 Windows 11 x64 实施证据，Windows 10/Server、正式服务和容量仍待验收。本页维护当前运行方法、配置与验证边界；逐轮测试、故障诊断、模型费用样本和服务重载日志已归入 [环境历史](archive/2026-10-24/DEVELOPMENT.md)，默认不读。功能状态查 [开发任务](DEVELOPMENT_TASKS.md)。
 
 ## 当前环境
+
+需求与运行差异（2026年10月28日）：D09已取消普通聊天及其他文本生成消费额度，D26首版仪表盘需求已确认，见[B16](DEVELOPMENT_TASKS.md#b16-第一版运行仪表盘与消费额度调整)。本轮仅需求，以下旧额度配置/已验证行为仍描述实际运行基线，尚未移除或重载；需求确认不代表运行态已经无限额。
 
 | 组件 | 本机版本／位置 | 用途 |
 | --- | --- | --- |
@@ -17,7 +19,7 @@
 | NapCat | 4.18.41 Windows Node 包；`runtime/tools/napcat/` | 直接提供 OneBot 11，无需 go-cqhttp |
 | Visual Studio Build Tools | 2022，17.14.42，C++ 工作负载 | 编译 pgvector；不是应用运行进程 |
 
-API、worker 与网关沿用单一 PostgreSQL；关系数据、索引与持久任务共库。版本表是已有本机记录，安装/升级时核对依赖清单、锁文件及工具元数据。正式试用前仍须核实 D09 实际计费与重置口径。
+API、worker 与网关沿用单一 PostgreSQL；关系数据、索引与持久任务共库。版本表是已有本机记录，安装/升级时核对依赖清单、锁文件及工具元数据。正式试用前仍须核实D09实际计费与统计时区；取消额度后不再以日重置恢复文本服务。
 
 ## 正式应用运行
 
@@ -81,20 +83,94 @@ runtime\venv\Scripts\python.exe -m lisa.gateway
 
 绑定/找回码各自专用、15 分钟有效、仅一次；重新取码使同类旧码失效。找回凭据同样15分钟、一次，改密撤销旧会话。真实绑定与自定义人格保存已验；真实找回、正常模式体验及人格效果仍待验收。图片已有下述理解路径，语音等未接通媒体继续保留未读取占位。
 
+## 自然对话 skill 接入
+
+最新修订（2026 年 10 月 28 日）：按用户要求移除公用 skill 的复核章节/资源和正常聊天第二次调用入口，运行模式仅 off/core/examples/corpus。正文原句按五组标题、分段和列表整理；当前 corpus 编译为 3939 UTF-8 字节，SHA-256 `fd1902eb873cc25a71f404f4800e27c05d094dd18acefbc7ff84f5f8bc65f16e`。每个新任务读取新核心，既有冻结任务不变；未修改运行配置或重载服务，当前 corpus 仍为单次生成。73 项相关隔离回归通过，skill 校验和 Ruff 通过；无付费语义评测，旧 ZIP 与旧评分不作为当前版本证据。
+
+本地首次启用记录：2026 年 10 月 28 日北京时间22:42，按用户“请打开实际聊天链路的开关”授权，将 `runtime/.env` 的 `LISA_DIALOGUE_SKILL_MODE` 设为 `corpus`。当时加载共有核心与私人18组接话样本，共1386字符/3984 UTF-8字节，每轮单次生成，不启用review。空闲核对后仅重载API/worker，数据库、网关和QQ会话保留，首页与健康HTTP200。网页普通性格试聊默认也跟随corpus；旧已冻结任务沿用旧快照。未代发QQ或执行付费模型探针，真实语义与多日效果待验。证据见[实施记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#d07-实际聊天启用单次-corpus)。
+
+单次人格试聊：`POST /api/style/trials` 的 personality/reply 可选 `dialogue_skill_mode=off/core/examples/corpus`，不传则跟随宿主当前设置。仅一次生成；显式 review 或宿主为 review 且未指定单次模式时返回422，writing/refine显式传模式同样拒绝，不静默忽略。任务入队冻结已选卡与共有指引，运行时不重读新文件/设置，损坏快照在模型调用前失败；旧入队任务保持旧交流约定。终态清掉指引全文与原输入，只在成功试聊结果保留模式/哈希。无新增前端模式面板，网页默认跟随宿主，当前本地为corpus。工程与隔离验证见[开发任务](DEVELOPMENT_TASKS.md#m03-02-自然对话-skill)，这些单次测试不沿用既有两步自然度分数。
+
+`LISA_DIALOGUE_SKILL_MODE` 默认 `off`，保留原共用交流约定；`core` 加载短核心，`examples` 加载核心与原创回应选择示例；`corpus` 加载短核心和私人真实片段 `runtime/skills/natural-dialogue/references/corpus.md`，该文件不会随Git提供，缺失时报错，不静默切换。源码位于 [natural-dialogue](../lisa/skills/natural-dialogue/SKILL.md)，编译入口为 [dialogue_skill.py](../lisa/dialogue_skill.py)，由 `_chat_instructions` 替换共用交流约定，不替换用户人格、记忆/生活规则或结构化输出协议。外部模型收到实际编译正文，不能自行发现本机 skill 文件；不需要安装 Codex 插件。
+
+复核运行入口已移除：配置/编译不再接受 review，正常聊天不读取复核约束、不发起第二次调用；旧 review 快照明确失败，不静默改成单次结果。历史实验调用器和原始报告仅供冻结版本追溯，已删除的复核文件不能被当前工具重新加载；本次不重建旧实验或导出包。独立研究工具使用的输出容量设置不改变正常聊天输出预算。
+
+初次研发及单次试聊接入阶段未修改正式配置；后续已按本节上方记录获授权启用corpus并重载。新任务首次生成固定指引全文与SHA，已开始任务重试沿用原快照，切换开关只影响尚未固定指引的任务。该机制不恢复 D24 已移除的原始聊天历史。候选选择、质量结果与剩余边界查 [实验报告](CHAT_DIRECT_PROMPT_REPORT.md)，协议查 [skill 验证](benchmarks/CHAT_SKILL_PLAN.md)。
+
+当前离线检查可使用 `runtime/venv/Scripts/python.exe scripts/benchmark_dialogue_skill.py --stage develop --modes core`。旧 review 研究命令已退役，历史结果应读取对应报告及冻结材料，不能用当前单次 skill 冒充同版本复验。真实研究仍须使用隔离研究入口、当前模型配置并遵守并发；执行前明确开发、迁移或新确认用途，已揭盲题不能再称未见确认。
+
+新站8题/16次实际skill结构化调用全部通过严格JSON、全字段和间隔数量检查；140项定向后端隔离回归通过（6.59秒，另有缓存目录权限警告），含最终回复单独采用、重试冻结和并发失败不重放草稿。skill源文件与私人包均通过skill-creator校验。质量评分与跨模型边界见[实验报告](CHAT_DIRECT_PROMPT_REPORT.md#自然对话-skill交付候选与本地协议验证)；这些结果不能替代真实QQ、多日或独立真人验收。
+
+上段为首次新站探针。通用严格解析器更新后再次复验：当前代码8题有7题通过，14次completed均通过递归全字段/严格类型校验；详细求助H09草稿在2400额度明确output_limit，未继续复核，不自动重试。当前私人交付包明确为实验候选，自然度3.250/4未达3.5；评分和已知缺口以报告为准。
+
+2026 年 10 月 28 日最新可用性复查：读取当前本地配置，通过生产 `generate_structured` → Responses / strict JSON Schema 入口完成 `Reply`、正式 `Dialogue` 和完整 `AgentPlan` 三次合成请求；均为 completed，原始 JSON、全部必填/额外字段检查及 Pydantic 严格类型校验通过。周表返回 56 项、覆盖七天，业务归一化通过。耗时分别 1.983 / 13.599 / 39.264 秒，开发估算合计 0.103826 元。发现中转 usage 回报输出 1674 / 8231 tokens，高于对应请求上限 600 / 2800，且无推理 token 明细；输出上限/计量的兼容性仍待确认，不能把这三次成功等同于长请求、QQ 或长期稳定性验收。详见 [结构化复查证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-主模型可用性与结构化返回复查)。
+
+早期 focus-v3 及其两阶段资源属于历史实验；后续已移除复核资源，当前单次 skill 不等同于该冻结版本。早期原生迁移3.250存在评测时钟删减宿主前缀的输入缺口，已在报告勘误，直接probe和线上聊天不受影响。修复后的9题定向结果与当时资源包见[报告](CHAT_DIRECT_PROMPT_REPORT.md)，不是整体自然度确认。旧 `--stage focus` 命令已退役，追溯须使用对应报告及冻结源码；当前单次模式检查见本节上方入口。
+
 ## 开发模型配置与小样本验证
 
-模型字段见 [settings.py](../lisa/settings.py)，占位模板见 [.env.example](../.env.example)，密钥仅存 `runtime/.env`。当前已配置默认 `gpt-6.1-sol`，聊天、作者、角色与蒸馏共用，视觉和向量采用独立百炼连接。SDK 自动重试关闭；每次新调用先预留预算和并发，HTTP 502 等未知结果保守结算且不盲目重跑。
+当前结构化文本协议：`LISA_MODEL_API_PROTOCOL=responses`，按用户要求恢复 `/v1/responses` 和完整 `text.format={type:json_schema, strict:true, schema:...}`，再执行原 Pydantic/业务校验；覆盖聊天、主动联系、写作/角色、周表、蒸馏及共有资料。各任务 Schema 的嵌套定义、类型、枚举、必填和禁止额外字段规则保留，不依赖仅提示模型维护结构。`chat_completions` 仅保留为显式兼容选项，不在失败/未知后自动降级或重发。模型、高推理、费用/并发控制不变；向量与图片理解继续各自的独立接口。恢复后完整 Dialogue 合成请求 5.678 秒通过，53 项模型调用隔离测试通过；17:57 已重载 API/worker、网页健康正常，真实 QQ/长期效果仍待验。见 [恢复证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-恢复正式responses严格schema)。此前旧站 JSON mode 修复及 900 项回归仅为 [历史协议证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-invalid_reply与结构化协议适配)。
+
+通用链路首轮优化已于 18:15 加载：模型原始返回经 [structured_output.py](../lisa/structured_output.py) 严格解析，并递归检查默认字段是否实际提供、禁止额外字段和非有限数值；网页/内部对象默认值保持原用法。完整 Schema 按模型类缓存，最多 128 项，以不可变 JSON 文本保存，每次请求取独立字典。台账增加协议、Schema 名称/指纹和实际推理档位；错误区分 JSON 无效、缺字段、额外字段、类型/约束错误、拒绝、输出额度不足、过滤及供应商终态，未知仍保守结算且不自动重试。934 项完整后端和 25 项评测工具离线检查通过，真实合成 Dialogue 通过；详见 [实施证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-通用模型调用链路首轮优化)。连接池复用和格式提示压缩尚未实施。
+
+新站路径/格式测试：`https://drc.totokens.cc/v1/chat/completions` 和 `/v1/responses` 均已 HTTP 200。`gpt-6.1-sol` / high 的 Responses `text.format=json_schema` / `strict=true` 在仅参数提供的嵌套 Schema 与正式 `Dialogue` 两个合成样例中均通过原始 JSON、严格类型和必填/额外字段校验；该轮完整聊天样例仍出现 messages 与间隔数量不匹配，格式通过不代表业务采用通过。该轮仅探针、当时未切换正式配置；随后用户已明确要求并完成上段的 Responses 恢复，详见 [专项测试证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-totokens文本路径与textformat验证)。
+
+模型字段见 [settings.py](../lisa/settings.py)，占位模板见 [.env.example](../.env.example)，密钥仅存 `runtime/.env`。2026 年 10 月 28 日用户后续指定新文本密钥、`https://drc.totokens.cc` 和 `gpt-6.1-sol` / high：已验证该站 `/v1/models`，实际配置为 `LISA_MODEL_BASE_URL=https://drc.totokens.cc/v1`、`LISA_MODEL_NAME=gpt-6.1-sol`、`LISA_MODEL_REASONING_EFFORT=high`；本地、模型默认值和模板同步，当前协议为上述恢复后的 `responses`。初次切站的 Chat JSON mode 合成请求曾 4.029 秒成功，17:34 首次重载；现已由 17:57 Responses 重载替代，并发 2 保留。视觉/向量继续独立配置；真实 QQ、个人材料效果、长期稳定性及供应商实际计费仍待验证。详见 [初次新站切换证据](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-totokens文本与生图配置切换)。
+
+此前 DeepSeek 切换的 Responses / strict JSON 合成入口曾 2.416 秒成功，属于旧配置证据，见 [DeepSeek 配置与重载记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-deepseek最新模型与新密钥连接验证)。不以短合成请求代替大请求、真实 gold 或长期验收，也不能由同时更换密钥和模型断定旧 503 根因。
+
+此前GPT密钥更换、502对照及原入口成功记录留在 [历史连接验证](archive/2026-10-24/DEVELOPMENT.md#2026-10-27-更换模型密钥与连接验证)、[502排查](archive/2026-10-24/DEVELOPMENT.md#2026-10-27-gpt-502-协议对照排查)；后续旧配置503诊断保留，不混入本次DeepSeek成功结果。
+
+此前恢复 GPT 的模型清单成功及 high 续测 120.43 秒读超时属于旧密钥记录，见 [恢复记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-恢复-gpt-配置)、[high 续测](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-gpt-high-蒸馏续测)；DeepSeek 的连接/协议诊断见 [历史记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-deepseek-密钥与连接验证)。SDK 自动重试关闭；每次新调用先预留预算和并发，HTTP 502 等未知结果保守结算且不盲目重跑。
 
 | 配置 | 当前记录与边界 |
 | --- | --- |
 | 日额度 | 统一人民币数值 10 元，蒸馏共用余额、不设独立单任务金额上限；历史 `*_usd` 字段仅为兼容命名，不做汇率重算 |
 | 任务额度/调用次数 | 聊天、正文和隔离试用每任务 0.15 元；聊天最多3次、含角色写作最多5次；普通风格试用1次，用户纠正及有限回归最多6次；蒸馏另有限次上限 |
-| 并发/超时 | 全局并发1，开发超时120秒；未知调用保留估算费用并阻止同任务继续请求 |
+| 并发/超时 | 本机 `LISA_MODEL_CONCURRENCY=2`（支持1—8；2026年10月28日已重载API/worker），开发超时120秒；既有进程沿用启动配置，未知调用保留估算费用并阻止同任务继续请求 |
 | 重置 | 当前 UTC 零点；正式试用前核对供应商账单、重置时间与部署时区 |
-| 主模型估算参数 | 输入2元/输出10元每百万 Token，low 推理；仅预算预留，未核实实际账单 |
+| 主模型估算参数 | 输入2元/输出10元每百万 Token，当前 GPT-6.1 Sol 配置 high；价格沿用原开发估算，不等于供应商实际价格 |
 | 输出/上下文 | 聊天600 tokens；正文每次最多600字符、输出1200 tokens；聊天/作者应用上限默认64000 UTF-8字节，可按已验证中转限制调整，蒸馏另配 |
 
 作者调用直接提供共识、稳定人格、有效约束及作品资料；主 Agent 只提供稳定人格、近期聊天、记忆、生活状态和当前作品短摘要，完整作品资料由作者读取。可选召回/观察超预算可舍弃。核心内容超限时按现有固定提示或普通聊天回退，不截断约束后写作。真实合成对话、有限写作/新约束重写及图片文字记忆链路已有证据；个人作品、人格自然度、完整蒸馏和供应商故障仍待验收。历史502对照只支持间歇上游失败，未证明根治；详细请求号与费用样本只在归档追溯。
+
+### 直接聊天prompt合成测试
+
+用户要求先不采用蒸馏后，新增 `scripts/benchmark_chat_prompt.py`：`--stage develop` 开发筛选，`--stage confirm --prompt .docs/benchmarks/prompts/chat_direct_selected_v1.txt` 使用冻结候选确认；不加 `--live` 只做离线核验。真实调用复用当前模型、高推理档、共享日预算与并发，不应用人格配置或发送QQ。固定协议、费用上限、命令和完整结果维护在 [直接聊天prompt实验](CHAT_DIRECT_PROMPT_REPORT.md)。本轮156次调用全部成功，估算0.945022元，无临时账号/预留残留；这不能证明先前间歇502已根治或完整生产链路通过。
+
+真实群聊使用 `prepare_real_chat_gold.py` 本地抽取与 `benchmark_real_chat_prompt.py` 有界对照，私人数据位于runtime忽略目录。用户已授权该批片段发送至当前端点；当前统一 `deepseek-v4.1-flash / high`，完成12题开发、唯一一次R2修订及24题确认，不混用旧GPT分数。命令及历史故障见 [完整报告](CHAT_DIRECT_PROMPT_REPORT.md)，最新判定见 [最终确认](CHAT_DIRECT_PROMPT_REPORT.md#2026-10-28-deepseek真实群聊最终确认)。R1未通过相对C的增量门槛，建议保留此前C，候选均未应用。
+
+隔离生成兼容当前中转：`generate_for_benchmark` 仅对TrialOutput用Responses纯文本传输，原样保留非空且长度合规的正文，所有臂追加相同正文约定；仍复用预算、并发、未知结算，其他Schema沿用生产结构化生成，评审保持严格结构化。原严格JSON试跑失败留档，不作风格筛选，不修改生产模型调用。开发阶段可用 `--reuse-baseline` 复用模型/数据/线上prompt/协议哈希一致的冻结C输出，确认三臂全部新生成。运行前快照数据、prompt和源码，变化阻止未发送请求；本轮独立源码变化拦下3批交换评分，用启动时原实现快照仅补齐6题，主评分不改。最终52个主比较、24个交换比较齐全，119次请求均成功；离线检查13项及Ruff通过。
+
+复现实验入口为 `runtime\venv\Scripts\python.exe scripts\benchmark_real_chat_prompt.py --stage confirm --prompt .docs/benchmarks/prompts/chat_real_selected_v1.txt --model deepseek-v4.1-flash`；缺少 `--live` 仅离线核验。确认数据已用于本次判断，不得重跑调参后再称为未见确认；新优化需另建确认集。冻结输入、最终结果和保守AI事实复核均见报告链接。模型评审遗漏无依据“没停电”，故不能将自动guard4/4当成事实保证，也不能将本轮纯文本风格结论当成正式完整JSON或真实QQ已验收。
+
+## 小说插图模型预研
+
+B15 当前工程入口：[`lisa/images.py`](../lisa/images.py) 复用现有 `Task`、队列及 OneBot 出站，迁移为 `b15e8a102810`；`PrivateImage` 二进制随账号级联清理，和共有表情 `SharedAsset` 分开。独立 `LISA_IMAGE_MODEL/BASE_URL/API_KEY` 沿用本地配置；`LISA_IMAGE_TIMEOUT_SECONDS=180`，medium/1024×1024/n=1/PNG，无 SDK 自动重试。没有参考用 `/images/generations`，明确参考用 multipart `/images/edits`。上传支持 PNG/JPEG/WebP，最多 12 MB、8192px 单边与 3200 万像素，解码后去除元数据并存 PNG；这些是文件有效性限制，不是图片消费额度。
+
+纯图片回复：`ImageAction.send_text_reply=false` 可省略本轮额外文字确认，`caption` 独立决定图片配文；send_text_reply=false 且 caption 为空时只交付裸图，也允许不先确认、只发图片加短配文，默认不附完成套话。配文只在图片任务临时快照及待投递消息中保存，终态清理；不写入永久回复历史。OneBot 出站省略空文本段，图片缺失时取消空投递；纯图轮的未发送文字不提升为已分享生活事实。2026-10-28 已通过 219 项相关隔离回归及两条真实合成描述验证，空闲重载 worker/网关后已加载；网关 normal 连接和 API 健康已核对，现有 corpus 模式不变，无需迁移。提交前独立纯图快照完整后端 855 项通过，补齐参考失效的文字反馈；该最终修复未再次重载。本轮未实际生图/QQ 实发，交互实效继续验收。
+
+明确绘图话题用专用 `ImagePreparation` 准备有限绘图描述，不经过普通聊天/检索额度；正常聊天可选择一张契合语境的小图。生图和描述台账均标记 `budget_exempt`，不增加文本日账；生图有独立执行槽。LISA 出镜必须先由该账号明确指定参考，测试参考不自动设给正式账号。新消息不取消独立成图；QQ 失败只重发已有图片，unknown 不自动重画；聊天图片约 24 小时后由现有 recovery sweep 清理，已替换且无需投递的作品旧图不作历史保留。
+
+接口：`GET/PUT /api/projects/{id}/cover`、`GET/PUT /api/chapters/{id}/illustration`，上传 JSON 含 `content_base64`；`GET /api/private-images/{id}` 要求本人登录，公开阅读页不引用它。取消复用 `/api/tasks/{id}/cancel` 或对话明确取消，作品任务列表显示图片状态，不提供网页生图面板。
+
+2026-10-28 新业务在临时库中实际完成合成封面/章节及指定参考人设图，耗时 99.147 / 34.012 / 99.837 秒（含描述与生成），保存/出站段正确；文字日账预置 999 元仍为 999 元。usage 全零仅记价格未知。脱敏参数/台账及输出在 `runtime/reports/b15-images-20261028/{result.json,recheck.json,cover.png,illustration.png,chat.png}`；章节首次被解释成仅保存画风，修正操作优先级后复验成功。图片版网页构建保留于该目录的 `dist/`，当前 `runtime/dist/` 恢复为接入图片前的作品页，避免未重载 API 显示不可用入口；源码保留完整新界面。
+
+首轮业务交付时没有迁移个人库、重启正式进程或发送真实 QQ；本轮纯图加载记录见上方。新环境接入时在合适空闲窗口运行 `runtime/venv/Scripts/python.exe -m lisa migrate`，使用包含 `lisa_image` consumer 的 worker/网关并重新构建网页；不能只复制新网页。全部源码仍含其他任务未提交改动，加载前需核对这些任务的生效范围。测试/限制详见 [B15](DEVELOPMENT_TASKS.md#b15-小说插图预研)。以下早期预研记录仅表示当时结果。
+
+当前模型为 `gpt-image-2`，独立密钥/端点保存在 `runtime/.env` 的 `LISA_IMAGE_*`。按用户本轮提供参考图的明确授权，已向 `https://drc.totokens.cc/v1/images/edits` 实际上传 PNG，medium、1024×1024、n=1、PNG 输出，HTTP 200，24.895 秒，返回模型 `gpt-image-2`，得到一张挥手半身插画。已目视检查，主要发型、红眼、头饰及服装主配色与参考图相近，构图和动作变化；符合用户仅锚定基础风格的目标，不做严格身份一致性判定。usage 所有字段为 0，不能据此判定免费。
+
+输出为本机忽略目录 `runtime/reports/image-reference-probe-20261028/reference-result.png`；`reference.png` 为用户指定测试输入，`result.json` 保存脱敏参数、完整提示词、请求号、时间及文件哈希。本轮只发一次 multipart 请求，自动重试 0，密钥仅由本地配置进入请求、不输出；无业务代码、配置、数据库、QQ 或进程重载动作。完整证据见 [参考图实测](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-参考图输入实测通过)。
+
+用户已取消 D25 生图及提示准备的全部应用内消费额度，不再要求日额/任务金额/调用次数封顶、费用预留或价格配置作为启用门槛；统计与额度拦截分离，其他文本功能限额保持原状。当前正式图片业务尚未实现，需在后续接入中落实此豁免，不能把配置或独立探针当成业务已启用。此前配置切换证据见 [历史记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-totokens文本与生图配置切换)。
+
+以下为旧站、旧模型的历史预研，不代表新配置的可用性：
+
+2026 年 10 月 28 日，用户指定 `gpt-image-2.5-sunburst` 并明确授权本轮密钥发送至项目现有 `https://test.mcii.cc/v1`，查询模型及最多生成一张低质量合成测试图。独立探针的 `GET /models` 返回 HTTP 200、0.791 秒，精确模型名存在；唯一一次 `POST /images/generations` 使用 `n=1`、`size=1024x1024`、`quality=low`、`output_format=png`，0.789 秒返回 HTTP 503、`No available compatible accounts`，没有图片或 usage，未重试。
+
+结论是“鉴权与清单可见，实际生图尚不可用”，不能据此确认尺寸/质量参数兼容、后端身份、图像质量、计费或长期稳定性。先请中转供应商核对该密钥/分组的模型路由与兼容账号资源；没有自动切换其他模型或协议。此次独立供应商探针未接 LISA 任务账本，实际费用未知，生产接入必须另按统一预算及真实计价实施。
+
+密钥只经探针进程标准输入使用，没有写入文件、正式环境配置或文档；仅合成场景出站，不含私人小说/聊天。没有启用功能或重载服务。详细脱敏记录及本地证据路径见 [探针记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-小说插图模型连通性预研)，需求见 [D25 草案](PROJECT_PLAN.md#小说插图需求草案)。
 
 ## 百炼文本向量配置与验证
 
@@ -110,6 +186,14 @@ runtime\venv\Scripts\python.exe -m lisa index
 worker 每分钟扫描变更并投递 `lisa_index`。索引为派生数据，保存即排除旧修订，生成不阻塞保存；账号、作品、用途、角色和当前版本先过滤再排名。更换模型空间/地址/维度排除旧向量。原始聊天和历史正文不进入本轮向量索引；当前世界书详细条目复用既有索引，摘要/剧情状态直接提供。每批至多32片段、32000 UTF-8字节，默认召回5片段/1500字符，完整请求仍有输入上限；作者和角色可通过网页配置并查看实际引用。
 
 所有索引/查询共用预算和调用台账；每日额度不足延期原索引任务至下个UTC日，失败或未知不自动重建同修订任务。真实中文小样本召回/跨用户过滤已验；长期语义质量和实际账单仍待核对。
+
+## B17 短期聊天上下文与图片委托
+
+已实现迁移 `b17a8c102801`（接 `b15e8a102810`），增加一张 `chat_turns` 临时表；普通聊天共用 6 轮、6000 UTF-8 正文字节、整轮最多 30 分钟窗口。入站收件箱仍在任务终态清理，成功输入以短期轮次保留；助手内容只在明确发送成功时加入，分条不延长整轮期限。记忆编辑/删除、账号删除及绑定更换清理窗口，既有分钟清理回收过期数据；无新服务、原文检索或历史网页。
+
+正常聊天不再按图片关键词提前分流，单次结构化调用直接返回图片动作；跨轮补全须同时引用近期用户来源及当前补充，后台依来源任务防重复。图片仍通过独立 `lisa_image` 队列生成/投递，取消与 unknown 不盲重放。chat 类型按 D09 取消旧消费金额/次数拦截，普通调用继续正常预留、计账及并发控制，不伪装成图片描述或免计费调用；其他任务和仪表盘接续 B16。
+
+正式加载必须先升级迁移，再一起重载 API/worker（以及需要加载当前 chat 模块的 gateway）；未升级个人库前不要只加载新代码。当前加载与验证证据以 [B17](DEVELOPMENT_TASKS.md#b17-短期对话连续性与图片委托补全)为准，隔离代码验证不等于真实 QQ 或多日验收。
 
 ## QQ 图片理解与文字记忆
 
@@ -140,6 +224,12 @@ worker 每分钟扫描变更并投递 `lisa_index`。索引为派生数据，保
 `LISA_WEB_URL` 为公开链接基址，只允许无认证/查询/片段的绝对HTTP(S)地址。默认本机 `http://127.0.0.1:8000` 不具外部可达性；部署时把 `/read/` 与 `/api/` 转发到API。分享随机令牌只读已保存正文，用户可复制/收回，账号停用/删除即失效；Agent可按系统校验后的本人章节自主分享，不加逐次审批。网页与隔离工程已验，真实QQ点击/模型分享和外部可达性仍待验收。
 
 ## B09 风格蒸馏实现与验证
+
+最新合成评测入口为 `runtime\venv\Scripts\python.exe scripts\benchmark_chat_distillation.py --check`（离线）；用户修订版使用 `--live --reference-priority`，默认最多72次/估算3元并沿用共享额度。2026 年 10 月 27 日复评实际44次/估算0.416800元：一份完整蒸馏成功、另一份首次观察502，7/14对可评。参考优先主评审偏好3胜/2负/2平，自然度2.714→2.857，差值区间跨零，未显示稳定AI感降低。发现两处场景选卡错位，未改生产机制。数据、分母、评分解释和实际样例统一见 [用户修订版复评](CHAT_DISTILLATION_BENCHMARK.md#2026-10-27-用户修订版复评)。
+
+2026 年 10 月 27 日收缩首轮已由一个开发 subagent 实施并经主 agent 审查。首轮方法为聊天 v3.2 / `lisa-writing-v2.1-runtime-card-alignment`，最终风格卡进入评测与隔离试用，55 项后端定向和 15 项风格页 Chromium 回归通过，见 [首轮记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-蒸馏质量优化首轮)。后续咨询腔定向修正的当前聊天方法为 `lisa-chat-v3.3-peer-conversation`；工程回归通过、真实复验遇未知 502，不能据此认定自然度已改善，见 [修正记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-咨询腔定向修正)。
+
+后续用户要求效果评测，已通过现有 `generate_structured` 与共享预算执行 22 次合成材料真实调用，应用估算合计 0.176632 元；临时无登录测试账号及任务已清理，共享日额度扣账保留。不发送 QQ、不应用方案、不改个人资料或重载服务。单次脚本、合成输出及匿名评审在忽略的 `runtime/reports/probes/style_effect_evaluation_20261027.py` / `.json`，结果和测试范围见 [真实模型小样本评测](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-27-蒸馏真实模型小样本评测)；聊天未证实改善，不能以调用成功代表语义验收。
 
 常驻“性格与风格”导航，性格页可直达QQ蒸馏，创作资料可直达所选作品写作风格；书架与完整任务分页，未保存保护仍生效。QQ TXT提炼交流性格，作品TXT/Markdown提炼写作风格；多个方案/固定版本、隔离试用、明确应用及默认/作品覆盖均已接通。
 
@@ -208,34 +298,6 @@ D19迁移 `d8193f6a20b4` 保留原worldbook为固定核心，JSONB详细条目�
 当前密码确认后同事务停用并清理关联个人数据，成功才退出；在途结果和重试不得恢复内容。已发送QQ不可撤回，匿名已消耗预算及邀请占用保留。初始化完成默认进入“我的作品”。工程和隔离页面已验，不用真实账号删除作为普通测试。数据库/NapCat个人原文日志已关闭持久化，应用保留匿名诊断；不可用删除runtime代替账号清理。
 
 旧环境的 `scripts/dev_env.py privacy-cleanup` 会不可恢复清除历史诊断，须明确授权且相关服务停止；不是日常启动或账号删除步骤。数据范围以主方案和Git协作为准。
-
-## 小说插图模型预研
-
-B15 当前工程入口：[`lisa/images.py`](../lisa/images.py) 复用现有 `Task`、队列及 OneBot 出站，迁移为 `b15e8a102810`；`PrivateImage` 二进制随账号级联清理，和共有表情 `SharedAsset` 分开。独立 `LISA_IMAGE_MODEL/BASE_URL/API_KEY` 沿用本地配置；`LISA_IMAGE_TIMEOUT_SECONDS=180`，medium/1024×1024/n=1/PNG，无 SDK 自动重试。没有参考用 `/images/generations`，明确参考用 multipart `/images/edits`。上传支持 PNG/JPEG/WebP，最多 12 MB、8192px 单边与 3200 万像素，解码后去除元数据并存 PNG；这些是文件有效性限制，不是图片消费额度。
-
-纯图片回复：`ImageAction.send_text_reply=false` 可省略本轮额外文字确认，`caption` 独立决定图片配文；send_text_reply=false 且 caption 为空时只交付裸图，也允许不先确认、只发图片加短配文，默认不附完成套话。配文只在图片任务临时快照及待投递消息中保存，终态清理；不写入永久回复历史。OneBot 出站省略空文本段，图片缺失时取消空投递；纯图轮的未发送文字不提升为已分享生活事实。2026-10-28 已通过 219 项相关隔离回归及两条真实合成描述验证，空闲重载 worker/网关后已加载；网关 normal 连接和 API 健康已核对，现有 corpus 模式不变，无需迁移。提交前独立纯图快照完整后端 855 项通过，补齐参考失效的文字反馈；该最终修复未再次重载。本轮未实际生图/QQ 实发，交互实效继续验收。
-
-明确绘图话题用专用 `ImagePreparation` 准备有限绘图描述，不经过普通聊天/检索额度；正常聊天可选择一张契合语境的小图。生图和描述台账均标记 `budget_exempt`，不增加文本日账；生图有独立执行槽。LISA 出镜必须先由该账号明确指定参考，测试参考不自动设给正式账号。新消息不取消独立成图；QQ 失败只重发已有图片，unknown 不自动重画；聊天图片约 24 小时后由现有 recovery sweep 清理，已替换且无需投递的作品旧图不作历史保留。
-
-接口：`GET/PUT /api/projects/{id}/cover`、`GET/PUT /api/chapters/{id}/illustration`，上传 JSON 含 `content_base64`；`GET /api/private-images/{id}` 要求本人登录，公开阅读页不引用它。取消复用 `/api/tasks/{id}/cancel` 或对话明确取消，作品任务列表显示图片状态，不提供网页生图面板。
-
-2026-10-28 新业务在临时库中实际完成合成封面/章节及指定参考人设图，耗时 99.147 / 34.012 / 99.837 秒（含描述与生成），保存/出站段正确；文字日账预置 999 元仍为 999 元。usage 全零仅记价格未知。脱敏参数/台账及输出在 `runtime/reports/b15-images-20261028/{result.json,recheck.json,cover.png,illustration.png,chat.png}`；章节首次被解释成仅保存画风，修正操作优先级后复验成功。图片版网页构建保留于该目录的 `dist/`，当前 `runtime/dist/` 恢复为接入图片前的作品页，避免未重载 API 显示不可用入口；源码保留完整新界面。
-
-首轮业务交付时没有迁移个人库、重启正式进程或发送真实 QQ；本轮纯图加载记录见上方。新环境接入时在合适空闲窗口运行 `runtime/venv/Scripts/python.exe -m lisa migrate`，使用包含 `lisa_image` consumer 的 worker/网关并重新构建网页；不能只复制新网页。全部源码仍含其他任务未提交改动，加载前需核对这些任务的生效范围。测试/限制详见 [B15](DEVELOPMENT_TASKS.md#b15-小说插图预研)。以下早期预研记录仅表示当时结果。
-
-当前模型为 `gpt-image-2`，独立密钥/端点保存在 `runtime/.env` 的 `LISA_IMAGE_*`。按用户本轮提供参考图的明确授权，已向 `https://drc.totokens.cc/v1/images/edits` 实际上传 PNG，medium、1024×1024、n=1、PNG 输出，HTTP 200，24.895 秒，返回模型 `gpt-image-2`，得到一张挥手半身插画。已目视检查，主要发型、红眼、头饰及服装主配色与参考图相近，构图和动作变化；符合用户仅锚定基础风格的目标，不做严格身份一致性判定。usage 所有字段为 0，不能据此判定免费。
-
-输出为本机忽略目录 `runtime/reports/image-reference-probe-20261028/reference-result.png`；`reference.png` 为用户指定测试输入，`result.json` 保存脱敏参数、完整提示词、请求号、时间及文件哈希。本轮只发一次 multipart 请求，自动重试 0，密钥仅由本地配置进入请求、不输出；无业务代码、配置、数据库、QQ 或进程重载动作。完整证据见 [参考图实测](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-参考图输入实测通过)。
-
-用户已取消 D25 生图及提示准备的全部应用内消费额度，不再要求日额/任务金额/调用次数封顶、费用预留或价格配置作为启用门槛；统计与额度拦截分离，其他文本功能限额保持原状。当前正式图片业务尚未实现，需在后续接入中落实此豁免，不能把配置或独立探针当成业务已启用。此前配置切换证据见 [历史记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-totokens文本与生图配置切换)。
-
-以下为旧站、旧模型的历史预研，不代表新配置的可用性：
-
-2026 年 10 月 28 日，用户指定 `gpt-image-2.5-sunburst` 并明确授权本轮密钥发送至项目现有 `https://test.mcii.cc/v1`，查询模型及最多生成一张低质量合成测试图。独立探针的 `GET /models` 返回 HTTP 200、0.791 秒，精确模型名存在；唯一一次 `POST /images/generations` 使用 `n=1`、`size=1024x1024`、`quality=low`、`output_format=png`，0.789 秒返回 HTTP 503、`No available compatible accounts`，没有图片或 usage，未重试。
-
-结论是“鉴权与清单可见，实际生图尚不可用”，不能据此确认尺寸/质量参数兼容、后端身份、图像质量、计费或长期稳定性。先请中转供应商核对该密钥/分组的模型路由与兼容账号资源；没有自动切换其他模型或协议。此次独立供应商探针未接 LISA 任务账本，实际费用未知，生产接入必须另按统一预算及真实计价实施。
-
-密钥只经探针进程标准输入使用，没有写入文件、正式环境配置或文档；仅合成场景出站，不含私人小说/聊天。没有启用功能或重载服务。详细脱敏记录及本地证据路径见 [探针记录](archive/2026-10-24/DEVELOPMENT.md#2026-10-28-小说插图模型连通性预研)，需求见 [D25 草案](PROJECT_PLAN.md#小说插图需求草案)。
 
 ## 正式应用检查
 

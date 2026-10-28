@@ -4,6 +4,43 @@
 
 更新：2026 年 10 月 24 日。部署方向按 D08、D12：以 Windows 10／11 与 Windows Server 原生运行为主。当前实测机器为 Windows 11 x64；其他 Windows 版本、生产服务管理和容量尚未验收。已建立 API、独立聊天/作者队列、QQ 初始化与受限对话、小说资料/正文工作台及有限生成路径；真实个人作品与 QQ 创作委托仍待验收。下文分别说明运行方法、环境与真实验证边界。
 
+## 2026-10-28 参考图输入实测通过
+
+用户本轮明确要求取消 D25 既有消费额度限制，提供 [参考图](https://s3.bmp.ovh/2026/04/30/JFipVWmO.png)试验带图生成，并说明只需基础画风锚定、不要求严格一致。按该授权，使用本地独立 `LISA_IMAGE_*` 配置直接请求当前中转；此记录追加于历史归档，现行需求查 [D25](../../PROJECT_PLAN.md#小说插图需求草案)，运行摘要查 [图片预研](../../DEVELOPMENT.md#小说插图模型预研)。
+
+| 项目 | 实际证据 |
+| --- | --- |
+| 时间 | 北京时间 2026 年 10 月 28 日 18:59:19—18:59:44；耗时 24.895 秒 |
+| 输入 | 用户给定 PNG 下载 HTTP 200，1,158,135 字节，1020×1809；SHA-256 `62c010e9c697dd695e74ed8fe8aabcc94be7884b8d5a9f4b13d82e1f6fc54e8a`；已目视查看 |
+| 实际请求 | `POST https://drc.totokens.cc/v1/images/edits`，multipart 上传 `image` 文件；`model=gpt-image-2`、`n=1`、`size=1024x1024`、`quality=medium`、`output_format=png`；不是先识图再纯文本生图 |
+| 提示要求 | 参考输入图的人物与基础画风，生成微笑挥手、身体略转的半身像，浅色简单背景；沿用主要发型、眼睛颜色、服饰配色和头饰，动作/细节可自然变化，无文字水印，不要求严格身份或像素一致 |
+| 返回 | HTTP 200，回显模型 `gpt-image-2`，一张 base64 PNG，解码后 1,220,783 字节、1024×1024；SHA-256 `e99aa6499e81f9222ba2ee449992e35771646e956f9ac19a455a9085298ab106` |
+| 请求号 | `edf9ed22-eee9-4682-bba6-f2197a0327b9, req_97e2c3a5d12a27e30d020e8a3efdb28f` |
+| 目视结果 | 生成图保留黑色短发、红眼、主要头饰及红/黄/蓝/白服饰，变为微笑挥手半身构图；基础画风相近，未进行严格身份/服饰一致性评分 |
+| 用量与次数 | 单次请求，自动重试 0；usage 的 input/output/total tokens 及 image/text 明细全为 0，不能据此断定免费。未接 LISA 预算拦截，符合本轮图片需求豁免方向 |
+| 本机文件（Git 忽略） | `runtime/reports/image-reference-probe-20261028/reference.png`、`reference-result.png`、`result.json`；完整实际提示词在 JSON，未保存密钥 |
+
+只证明当前端点/模型在上述单参考图及参数下成功返回并实际绘制参考内容，不扩展为纯文本端点、全部参数、连续运行或 QQ/网页业务通过。没有业务实现、修改正式配置、重载、数据库写入或 QQ 投递。测试图不自动成为全体账号正式人设参考素材。此前旧站/旧模型的 503 属于历史。
+
+## 2026-10-28 小说插图模型连通性预研
+
+本节为后续追加的历史探针证据；现行需求/接续见 [小说插图草案](../../PROJECT_PLAN.md#小说插图需求草案)及 [模型预研摘要](../../DEVELOPMENT.md#小说插图模型预研)。本次用户只要求需求与连通性测试，不包含功能实现。
+
+授权与方式：用户提供目标模型 `gpt-image-2.5-sunburst` 和测试密钥，自动审批首次因密钥目标地址授权不明而阻止执行，未发请求；用户随后明确授权 `https://test.mcii.cc/v1`，允许查询模型并最多生成一张低质量合成图。通过独立临时 httpx 探针执行，保留正常网络环境，不修改代理，不改正式配置、数据库或进程；密钥经标准输入传入，不落文件、不回显、不进入请求报告。没有调用 LISA 生图接口，因为当前还不存在该功能。
+
+| 项目 | 实际结果 |
+| --- | --- |
+| 时间 | 北京时间 2026 年 10 月 28 日 02:41:16—02:41:27（原始报告保存 UTC） |
+| 模型清单 | `GET /v1/models`，HTTP 200，0.791 秒，含精确 ID `gpt-image-2.5-sunburst`；请求号 `431ed80d-6bb3-417d-8612-2527d5ac2df5` |
+| 唯一生图请求 | `POST /v1/images/generations`，模型同上，`n=1`、`size=1024x1024`、`quality=low`、`output_format=png`；无参考图、无私人材料 |
+| 合成提示内容 | 蓝衣成年旅者与白色小车置于月光下的盐原，远山、两颗小月亮、蓝银色水彩科幻小说插图，无文字或水印；不是用户小说情节 |
+| 生图返回 | HTTP 503，0.789 秒；JSON 错误 `{"error":{"message":"No available compatible accounts","type":"api_error"}}`；请求号 `c11cc691-7c1c-4c21-bd6c-bc2d25d2fdad` |
+| 图片与费用 | 无图片、无 usage，无可展示样张；独立探针未接 LISA 预算账本，不能由 503 推断免费或已退款，需供应商核账 |
+| 重试与影响 | 生图仅一次，自动重试为 0；没有替换模型、改协议、启用功能、修改正式密钥/模型配置、重载服务或发送 QQ |
+| 本机证据（Git 忽略） | `runtime/reports/illustration-probe-20261028/models.json`、`runtime/reports/illustration-probe-20261028/generate.json`；临时探针 `runtime/tmp/probe_illustration_connectivity.py` 不含密钥，不纳入源码交付 |
+
+协议核对依据为 [OpenAI Create image](https://developers.openai.com/api/reference/resources/images/methods/generate?site_locale=en)及 [Sunburst 模型页](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)：指定模型可通过 Images API 请求；官方格式不能证明该中转的参数实现、后端版本或价格。当前 503 需要供应商核对路由/兼容账号资源，不能凭报错独立锁定根因，也不能把清单成功当成生成成功。本次未继续发付费请求，真实图像、参考图编辑、人物一致性、参数、账单与 QQ/网页链路均未验收。
+
 ## QQChatExporter V5 格式兼容验证
 
 2026 年 10 月 24 日：`lisa/chat_corpus.py` 及上传接口兼容 QQChatExporter V5 的昵称、时间、内容分行 TXT，独立 CLI 共用严格解码；已知 V5 空字符以 `�` 标记，网页明确提示数量，避免编码误报及 PostgreSQL JSON 原文入库失败。旧 TXT/UTF-16/GB18030 保留回归，页头与终端统计不计入消息。
@@ -698,40 +735,147 @@ TypeScript 与正式构建通过。复用 `scripts/test_app.py --browser` 的临
 
 脱敏观测文件：runtime/reports/probes/relay-status-20261024-181729.json、relay-live-20261024-181847.json；脚本位于忽略的runtime/check_relay_live.py。生产源码、模型配置及服务未改动或重启。
 
-## 2026-10-28 参考图输入实测通过
 
-用户本轮明确要求取消 D25 既有消费额度限制，提供 [参考图](https://s3.bmp.ovh/2026/04/30/JFipVWmO.png)试验带图生成，并说明只需基础画风锚定、不要求严格一致。按该授权，使用本地独立 `LISA_IMAGE_*` 配置直接请求当前中转；此记录追加于历史归档，现行需求查 [D25](../../PROJECT_PLAN.md#小说插图需求草案)，运行摘要查 [图片预研](../../DEVELOPMENT.md#小说插图模型预研)。
+## 2026-10-27 更换模型密钥与连接验证
 
-| 项目 | 实际证据 |
-| --- | --- |
-| 时间 | 北京时间 2026 年 10 月 28 日 18:59:19—18:59:44；耗时 24.895 秒 |
-| 输入 | 用户给定 PNG 下载 HTTP 200，1,158,135 字节，1020×1809；SHA-256 `62c010e9c697dd695e74ed8fe8aabcc94be7884b8d5a9f4b13d82e1f6fc54e8a`；已目视查看 |
-| 实际请求 | `POST https://drc.totokens.cc/v1/images/edits`，multipart 上传 `image` 文件；`model=gpt-image-2`、`n=1`、`size=1024x1024`、`quality=medium`、`output_format=png`；不是先识图再纯文本生图 |
-| 提示要求 | 参考输入图的人物与基础画风，生成微笑挥手、身体略转的半身像，浅色简单背景；沿用主要发型、眼睛颜色、服饰配色和头饰，动作/细节可自然变化，无文字水印，不要求严格身份或像素一致 |
-| 返回 | HTTP 200，回显模型 `gpt-image-2`，一张 base64 PNG，解码后 1,220,783 字节、1024×1024；SHA-256 `e99aa6499e81f9222ba2ee449992e35771646e956f9ac19a455a9085298ab106` |
-| 请求号 | `edf9ed22-eee9-4682-bba6-f2197a0327b9, req_97e2c3a5d12a27e30d020e8a3efdb28f` |
-| 目视结果 | 生成图保留黑色短发、红眼、主要头饰及红/黄/蓝/白服饰，变为微笑挥手半身构图；基础画风相近，未进行严格身份/服饰一致性评分 |
-| 用量与次数 | 单次请求，自动重试 0；usage 的 input/output/total tokens 及 image/text 明细全为 0，不能据此断定免费。未接 LISA 预算拦截，符合本轮图片需求豁免方向 |
-| 本机文件（Git 忽略） | `runtime/reports/image-reference-probe-20261028/reference.png`、`reference-result.png`、`result.json`；完整实际提示词在 JSON，未保存密钥 |
+北京时间 17:09 按用户要求仅更新忽略的 `runtime/.env` 中四个主模型字段：新提供的密钥、`https://test.mcii.cc/v1`、`gpt-6.1-sol`、`high`。`Settings()` 验证四项与要求一致，无进程环境变量覆盖；视觉与向量独立配置保持。密钥未写入源码、模板、文档或报告。
 
-只证明当前端点/模型在上述单参考图及参数下成功返回并实际绘制参考内容，不扩展为纯文本端点、全部参数、连续运行或 QQ/网页业务通过。没有业务实现、修改正式配置、重载、数据库写入或 QQ 投递。测试图不自动成为全体账号正式人设参考素材。此前旧站/旧模型的 503 属于历史。
+首个 `/models` 探针返回 HTTP 401。随后为排除仅模型清单接口受限，再次查询清单并通过现有 `generate_reply` / Responses 结构化入口执行一次合成请求，清单及生成仍均为 HTTP 401；生成请求号 `2187fa2b-81c9-4d93-b841-a300965e85c2`。该轮总耗时 0.83 秒，生成状态 failed/http_401，项目估算收费 0.000000 元，预算预留已释放，临时无登录测试账号及关联任务/调用记录已清理，共享日账保留。没有重试生成或发送个人材料/QQ；服务可达但鉴权未通过，未获得模型输出，无法确认 high 的服务端执行或生成稳定性。
+
+按项目进程识别逻辑只读确认 API、worker、QQ gateway 均未运行，没有为配置验证启动服务；下次启动读取新配置。脱敏证据及探针保存在忽略的 `runtime/reports/probes/model_connection_20261027.json` / `.py`。
 
 
-## 2026-10-28 小说插图模型连通性预研
+同日北京时间 17:10 用户随后提供第二枚新密钥，已替换第一枚并核实 `Settings()` 读取一致，地址、模型和 high 保持。最新 `/models` 返回 HTTP 200，精确模型名 `gpt-6.1-sol` 存在；通过相同统一入口的一次合成 Responses 调用返回 HTTP 502，请求号 `95e7a45a-e6fb-4ba6-84bf-493f2d77fbea`，该轮总耗时 4.18 秒。调用状态 unknown/http_502，项目按既有规则保留 0.007970 元估算费用（不是已核实供应商实际账单），释放并发，没有自动重试。临时无登录账号及关联任务/调用记录已清理，共享日账扣账保留；未发送 QQ 或个人资料。清单鉴权已成功，但生成未返回输出，无法认定生成链路连通、上游恢复或 high 的服务端执行。
 
-本节为后续追加的历史探针证据；现行需求/接续见 [小说插图草案](../../PROJECT_PLAN.md#小说插图需求草案)及 [模型预研摘要](../../DEVELOPMENT.md#小说插图模型预研)。本次用户只要求需求与连通性测试，不包含功能实现。
+最新脱敏报告为 `runtime/reports/probes/model_connection_20261027.json`；第一枚密钥的 401 报告另存 `model_connection_20261027_first_key_401.json`，均处于忽略目录。最终密钥仅存 `runtime/.env`，未启动或重载正式服务。
 
-授权与方式：用户提供目标模型 `gpt-image-2.5-sunburst` 和测试密钥，自动审批首次因密钥目标地址授权不明而阻止执行，未发请求；用户随后明确授权 `https://test.mcii.cc/v1`，允许查询模型并最多生成一张低质量合成图。通过独立临时 httpx 探针执行，保留正常网络环境，不修改代理，不改正式配置、数据库或进程；密钥经标准输入传入，不落文件、不回显、不进入请求报告。没有调用 LISA 生图接口，因为当前还不存在该功能。
 
-| 项目 | 实际结果 |
-| --- | --- |
-| 时间 | 北京时间 2026 年 10 月 28 日 02:41:16—02:41:27（原始报告保存 UTC） |
-| 模型清单 | `GET /v1/models`，HTTP 200，0.791 秒，含精确 ID `gpt-image-2.5-sunburst`；请求号 `431ed80d-6bb3-417d-8612-2527d5ac2df5` |
-| 唯一生图请求 | `POST /v1/images/generations`，模型同上，`n=1`、`size=1024x1024`、`quality=low`、`output_format=png`；无参考图、无私人材料 |
-| 合成提示内容 | 蓝衣成年旅者与白色小车置于月光下的盐原，远山、两颗小月亮、蓝银色水彩科幻小说插图，无文字或水印；不是用户小说情节 |
-| 生图返回 | HTTP 503，0.789 秒；JSON 错误 `{"error":{"message":"No available compatible accounts","type":"api_error"}}`；请求号 `c11cc691-7c1c-4c21-bd6c-bc2d25d2fdad` |
-| 图片与费用 | 无图片、无 usage，无可展示样张；独立探针未接 LISA 预算账本，不能由 503 推断免费或已退款，需供应商核账 |
-| 重试与影响 | 生图仅一次，自动重试为 0；没有替换模型、改协议、启用功能、修改正式密钥/模型配置、重载服务或发送 QQ |
-| 本机证据（Git 忽略） | `runtime/reports/illustration-probe-20261028/models.json`、`runtime/reports/illustration-probe-20261028/generate.json`；临时探针 `runtime/tmp/probe_illustration_connectivity.py` 不含密钥，不纳入源码交付 |
+## 2026-10-27 GPT 502 协议对照排查
 
-协议核对依据为 [OpenAI Create image](https://developers.openai.com/api/reference/resources/images/methods/generate?site_locale=en)及 [Sunburst 模型页](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)：指定模型可通过 Images API 请求；官方格式不能证明该中转的参数实现、后端版本或价格。当前 503 需要供应商核对路由/兼容账号资源，不能凭报错独立锁定根因，也不能把清单成功当成生成成功。本次未继续发付费请求，真实图像、参考图编辑、人物一致性、参数、账单与 QQ/网页链路均未验收。
+用户要求解释并排查最新密钥的 502。本轮仅发送独立合成诊断，保留正式密钥、地址、模型和 high 配置，不重放原失败任务，不修改正式模型调用代码。全部调用使用项目共享预算和并发预留/结算，无自动重试；为每个对照新建任务，临时无登录账号及关联任务/调用清理，共享日账保留。对照通过 `DefaultAsyncHttpxClient` 直接发送 JSON，配合现有 `_reserve` / `_finish`，最后以原 SDK 调用入口验证。
+
+| 合成对照 | HTTP / 结果 | 耗时 | 请求号 |
+| --- | --- | --- | --- |
+| Responses 最简输入 + high，无 Schema | 200 / completed，DIAG_OK | 4.93 秒 | `37390924-9f69-4629-b88e-27a140f076ca` |
+| Chat Completions 最简消息 + high | 200 / DIAG_OK | 3.41 秒 | `c3a5e0fd-c4cc-40ba-ad04-f6e6d75f57a6` |
+| 原项目请求构造：Responses + high + strict JSON Schema | 200 / completed，JSON 对象 reply=DIAG_OK | 3.39 秒 | `891622fd-f844-457c-bcf4-0b67b23d993b` |
+| 原项目 generate_reply / SDK / 严格解析入口 | 200 / completed，LISA_LINK_OK；响应模型 gpt-6.1-sol，reasoning high | 4.50 秒（含清单查询与记账） | `5726096a-300d-4358-9951-7c6f59571312` |
+
+前三条合计估算 0.009356 元，项目原入口核验 0.000264 元，本轮合计 0.009620 元；不是供应商实际账单。前三条均成功，未执行预留的 low 对照。原 17:10 失败仅耗时 4.18 秒，远早于本地 120 秒超时，后续未复现 502；当前证据不支持固定的接口、high 或 Schema 不兼容原因，较符合中转/上游的间歇故障，但未取得供应商内部日志，不能锁定具体通道、节点或失败原因。原失败请求号 `95e7a45a-e6fb-4ba6-84bf-493f2d77fbea` 可用于供应商查日志；该轮没有保存供应商错误正文，无法事后补取，不能声称已读到 upstream_error 等具体报错。
+
+脱敏结果位于忽略的 `runtime/reports/probes/gpt_502_diagnostic_20261027.json` / `.py` 及最新 `model_connection_20261027.json`；原 502 摘要保留在 `model_connection_20261027_second_key_502.json`。没有启动 API、worker、QQ gateway 或发送个人材料/QQ，未替换协议、降低推理强度、增加自动重试或调整超时。当前合成生成链路已成功验证，不代表个人材料、QQ、完整蒸馏或长期稳定性已验收。
+
+## 2026-10-28 DeepSeek最新模型与新密钥连接验证
+
+用户明确要求替换新密钥，模型采用最新DeepSeek（如4.1-1017）、effort high，完成后测试连通。密钥仅写入忽略的runtime/.env，没有进入源码、模板或报告；保留https://test.mcii.cc/v1及视觉/向量独立连接。新密钥GET /models为200，列出deepseek-v4-pro、deepseek-v4.1-flash、deepseek-v4.1-flash-sg；选择默认未带区域后缀的deepseek-v4.1-flash，runtime、Settings.model_name默认和.env.example同步，模板显式high，低/空推理覆盖能力保留。
+
+核对 [DeepSeek官方更新日志](https://api-docs.deepseek.com/updates/)：10月17日最新发布为V4.1-Flash-1017，官方deepseek-flash别名访问最新版本。中转使用自己的deepseek-v4.1-flash别名，清单与返回均不带1017日期，因此不能独立验证后端确切补丁版本。[官方Responses API](https://api-docs.deepseek.com/api/create-response/)支持reasoning.effort=high。本轮实际线上请求含该字段，服务返回reasoning=null，不声称独立观测到内部推理档位。
+
+北京时间00:27:59，经原generate_reply / SDK / 共享预算与并发 / Responses / strict JSON Schema / Pydantic解析入口，一次纯合成短测试2.416秒完成：HTTP200、status=completed，返回LISA_DEEPSEEK_LINK_OK，响应模型deepseek-v4.1-flash。线上URL为https://test.mcii.cc/v1/responses，max_output_tokens600、strict=true、reasoning.effort=high。输入135/output14 tokens，应用估算0.000410元，非供应商账单；succeeded=1，无自动重试。请求号头含两个值 `528abf10-74a8-4244-809d-aab0060659c7, 8401136c5eb00eff593a8cba03ab3c0c`。临时无登录账号和关联任务清理，reserved=0、promptbench_账号=0。
+
+发现API/worker/gateway已于00:24启动并缓存旧配置，先核对running任务0/预留0，再复用项目进程归属选择与启动锁、逐PID身份复核，仅停止三类应用的venv启动器及其Python子进程。00:30:50完成隐藏重载，新启动器PID API25040、worker13544、gateway27544；三角色识别、网页与/api/health通过。数据库及NapCat登录进程未停止，未迁移、重构建或手工发送QQ，原正常应用功能继续运行。此前被中断的503完整格式矩阵仅准备脚本，尚未执行；本次同时换密钥和模型，不能据此锁定旧503是密钥、模型通道、账户分组或中转故障中的哪一项。
+
+证据在runtime/reports/deepseek-switch-20261028/，含models.json、link_test_20261027T162759Z.json、reload.json及本轮辅助脚本。正式调用协议未更改，无Chat Completions自动回退，SDK重试和超时保持。短请求成功不代表大请求、真实群聊gold、风格或多日稳定性通过；当前只完成模型配置、短链路与应用生效验证，未执行新的gold评测。旧配置失败的费用和报告保留，不混算跨模型效果。
+
+
+## 2026-10-28 主模型可用性与结构化返回复查
+
+用户要求检查项目 LLM 是否可用、是否正常返回结构化文本。读取 `Settings()` 的当前本地配置：`https://test.mcii.cc/v1`、`deepseek-v4.1-flash`、`high`、120 秒超时，密钥存在但不输出。调用前全局在途 0、预留 0、当日开发估算 4.770614 元、日上限 10 元。
+
+临时诊断脚本位于忽略目录 `runtime/tmp/check_llm_structured.py`；最多三次合成请求，预留估算总上限 0.30 元，沿用项目预算/并发/不自动重试规则。创建无登录能力的临时账号和合成人格，调用真实 `generate_structured`，请求线上保留 Responses、`text.format.type=json_schema`、`strict=true`、`reasoning.effort=high`、`store=false`。只包装 provider 入口捕获结构化结果，不替换传输、解析器、模型或 Schema，不发送个人内容，不写真实周表或投递 QQ。完整原始合成返回、请求 Schema、usage、时长与结算保存在 `runtime/reports/probes/structured-20261027T173755Z/report.json`。
+
+| 请求 | 结果 | 秒 | 请求输出上限 | 中转回报输出 tokens | 开发估算元 |
+| --- | --- | --- | --- | --- | --- |
+| Reply | completed；原始返回 `{"reply":"连接正常"}` | 1.983 | 600 | 7 | 0.000302 |
+| Dialogue | completed；正式聊天 Schema，含非空 opinions 与 commission | 13.599 | 600 | 1674 | 0.020134 |
+| AgentPlan | completed；正式周表生成提示和 Schema，56 项、七天完整覆盖，业务归一化通过 | 39.264 | 2800 | 8231 | 0.083390 |
+
+三次原始文本均直接通过 JSON 解析、递归必填字段/额外字段检查及 `model_validate_json(strict=True)`；没有代码块剥离、文本修复或默认字段补齐后才判通过。SDK 返回模型均为 `deepseek-v4.1-flash`。合计开发估算 0.103826 元，全部 ledger 状态 succeeded，临时测试账号和测试预留残留均为 0；日预算保留实际结算，不回滚费用。
+
+可用性结论限于这三次生产入口合成请求；没有修改配置、应用人格或重载服务。中转回报的 1674 / 8231 输出 tokens 高于对应请求上限 600 / 2800，`output_tokens_details` 均为空，尚不能区分输出上限未生效与中转计量/推理转换差异。该兼容性及供应商真实账单仍待确认，不据此保证输出限额、长期稳定性、QQ 完整链路或真实个人效果。
+
+## 2026-10-28 QQ 无回复与登录失效排查
+
+北京时间 01:42—01:45 检查：API 8000、数据库 55432 和 NapCat WebUI 6099 正在监听，OneBot 3001 未监听，项目 `qq-check` 返回连接拒绝。普通聊天配置为启用；worker 四个消费者心跳正常，无 pending/running 业务任务，最近 01:35 的周表模型调用 succeeded，未发现本次来信对应的聊天任务或待发消息。
+
+经本机 WebUI 鉴权后只读查询，NapCat 返回 `isLogin=false`、`coreReady=false`、`loginPhase=waiting_qrcode`。以本地已配置机器人账号尝试一次快速登录，返回失败，错误为登录态已失效、需要重新登录；仍停在等待扫码状态。原因已定位到 QQ 登录会话失效，尚未进入 LISA 聊天或模型链路。需本人用机器人 QQ 重新扫码，随后复查 OneBot 与真实私聊；没有修改业务源码、凭据或模型配置，没有手工发送 QQ 或重放旧消息，不将等待扫码记为恢复成功。
+
+用户随后反馈已经登录；01:45 在实际运行环境复查，扫码阶段为 `qrcode_scanned`，但 `isLogin=false`、`coreReady=false`，OneBot 3001 仍未监听。NapCat 保存的 QQ 服务端登录错误码为 168，错误提示账号近期存在安全风险、部分功能受限，要求登录最新手机 QQ 并按提示恢复账号使用。扫码已发生，但服务端未接受登录；需用户在手机 QQ 完成账号恢复后再次登录，不能通过重启 LISA 或修改模型解决。本轮未再次触发登录或发送测试消息。
+
+用户解除限制并使用刷新后的二维码重新扫码后，复查返回 `isLogin=true`、`isOffline=false`、`loginPhase=ready`、`coreReady=true`、`loginError` 为空；`qq-check` 的版本及登录查询均通过，LISA 网关日志确认 `QQ gateway connected; mode=normal`。QQ 登录及 OneBot 到应用网关的连接已恢复，未手工发送测试消息，真实新私聊回复仍需实际验证。
+
+## 2026-10-28 QQ 来信并发等待与生成失败复查
+
+真实新消息于 01:49:15 和 01:50:53 入站，均归入聊天任务 `b7c8b797-1208-4d7f-b1e2-49470cbd8b7b`。原模型并发为1；独立 `benchmark_dialogue_skill.py --stage develop --live --max-cost 10 --max-calls 130` 进程持续占用唯一名额，聊天在模型预留前因 ModelBusy 等待重试，01:52:06队列已尝试31次，尚未发起模型调用或产生回复。
+
+用户询问调整并发后，本机 `runtime/.env` 改为 `LISA_MODEL_CONCURRENCY=2`；核查无非model_probe在途调用并持有启动锁后，仅重载API/worker，01:53:50启动，网页健康通过，进程归属确认无重复。QQ gateway、NapCat、数据库及独立模型测试进程保留；测试进程仍沿用其原启动配置，未修改源码、模板默认或每日预算。运行辅助脚本位于忽略的 `runtime/reports/raise_model_concurrency_20261028.py`，新日志后缀为 `20261028-015350-concurrency2`。
+
+聊天于01:53:51取得模型名额，01:53:54调用记为failed / invalid_reply，业务任务记为failed / model_failed。当前错误意味着completed返回未通过Pydantic JSON校验，原始返回未保存，不能进一步断定为缺字段、类型不符或非JSON。失败提示于01:53:55实际投递，出站sent、attempts=1并有QQ message_id，网关日志delivery=sent。已验证真实入站及失败提示出站；正常语义回复生成仍未通过，不将传输恢复记为模型格式问题已解决，也未重放真实输入。
+
+## 2026-10-28 invalid_reply与结构化协议适配
+
+用户要求继续修复真实QQ的invalid_reply。原始失败正文依D24未保存，新增脱敏校验日志，仅记录Schema名称、已知顶层字段、错误类型及数量，不记录正文、未知字段名、错误说明或输入。02:03和02:07两条真实新消息均确认为 `json_invalid`，而非遗漏必填字段；分别补充instructions内协议、独立developer协议消息后仍失败，不能把合成提示测试成功当作已修复真实使用。
+
+自动审批拒绝携带生产个人上下文的额外模型诊断，未执行该请求；改用完全合成人格、作品与来话。合成普通文字人格在旧路径可复现非JSON，补充协议后合成请求可通过；三条简单常量Schema对照在仅Schema、instructions、developer三种方式都通过。由此只能确认当前中转在完整聊天上未可靠落实 `text.format`/strict约束，不能声称完全不支持该参数，也无法在没有中转内部日志时锁定转换层细节。诊断均走既有预算/并发入口，不保存个人上下文，不手工发送QQ，不重放失败来信。
+
+最终通过显式 `LISA_MODEL_API_PROTOCOL=chat_completions` 选择原生 `/chat/completions`、`response_format={"type":"json_object"}`，system消息提供完整压缩JSON Schema；聊天额外说明人格中的普通文字只约束reply/messages正文。完整请求用于输入预算测量及模型调用，`reasoning_effort=high`、`store=false`、原输出额度/预算/并发保留。仍通过原Pydantic及业务采用检查，不剥代码块、不补字段、不将普通文本当成功。stop/length/refusal/过滤/未知finish_reason分别归一化，usage按prompt/completion tokens结算，未知结果保守计费且不自动重发或切换协议。`responses`仍可显式配置；Settings缺省保留原协议兼容，本机与当前中转模板显式选择chat_completions。
+
+真实QQ：用户于02:12:46发送新消息，任务 `77e39942-0779-4324-aa24-31e74fa1dfa9`，02:12:56模型调用、02:12:58 succeeded/completed且无错误，02:12:59出站sent、attempts=1、有QQ message_id，网关日志delivery=sent。正常回复链路已恢复。最初临时聊天专用配置随后收敛到上述通用配置，并删除运行环境中的临时 `LISA_CHAT_MODEL_PROTOCOL` 键。
+
+用户随后要求检查其他任务：所有结构化文本调用均复用 `generate_structured`，统一采用可配置协议；向量继续Embeddings，图片理解继续其独立Chat Completions视觉路径。完全合成审计中，原Responses的WritingResult/StyleCandidate两条也成功；原生JSON的WritingResult、AuthorChoice、CharacterSuggestion、ContactReply、AgentPlan、BatchAnalysis、StyleCandidate、Comparison、TrialOutput、共有Analysis十类均通过生产Schema校验，周表样本覆盖七天。结果仅作验证，未采用为用户作品、记忆、周表或公共资料；不据此宣称个人完整蒸馏、真实创作语义或多日稳定性通过。
+
+验证：首轮92项定向与第二轮217项扩展通过；通用协议定稿后 `scripts/test_app.py` 的900项完整后端测试通过（130.60秒，包含独立数据库迁移升降升/差异与队列检查），`python -m unittest scripts.test_real_chat_prompt` 13项通过，相关Ruff及diff检查通过。一次扩展命令误写不存在的tests/test_contact.py而未运行测试，改为test_contact_policy.py后通过，最终完整回归不含该命令错误。隔离检查固定Responses基线，原生JSON专门用例覆盖聊天/非聊天、费用、未知、拒绝和不自动回退。纯文本风格实验显式冻结Responses传输，生产JSON配置不改变已定义的纯文本实验协议。
+
+02:18确认无在途业务调用后，只重载API/worker加载通用配置，网页健康与QQ查询均通过；NapCat、gateway、数据库和独立模型测试进程保留，并发仍为2。运行日志后缀 `20261028-021819-qq-format`。本轮无提交/推送；运行探针、脱敏报告和重载工具均在忽略的runtime/reports，主要证据为 `qq-format-probe-20261028*.json`、`relay-contract-20261028.json`、`structured-tasks-audit-20261028.json`。
+
+## 2026-10-28 totokens文本与生图配置切换
+
+用户明确指定新文本密钥、`https://drc.totokens.cc`、`gpt-6.1-sol` / high，并更换独立生图密钥、模型为 `gpt-image-2`。同站 `/v1/models` 对两把密钥均返回 HTTP 200，精确模型名分别存在；因此 SDK 基址使用 `https://drc.totokens.cc/v1`。生图按本次连接切换使用同一新站，独立保存密钥；未生成图片或启用尚未实现的生图业务。
+
+文本探针仅用合成指令，复用生产 `generate_structured`、JSON mode、Pydantic 与共享预算/并发：high、600 输出上限、SDK 自动重试 0，HTTP 200 / stop，回显模型 `gpt-6.1-sol`，4.029 秒返回 `LISA_GPT61_OK` 且校验通过。供应商 usage 为输入 4518、输出 29 tokens；应用沿用输入 2 元/输出 10 元每百万 tokens 的开发估算，台账 succeeded、估算 0.009326 元，不代表供应商真实价格。临时无登录账号/任务已清理，未发送 QQ 或采用为业务资料。脱敏证据为 `runtime/reports/probes/totokens_switch_20261028.json` 和 `gpt61_availability_20261028T093333Z.json`，辅助脚本均在忽略目录。
+
+`runtime/.env` 保存两把新密钥及对应配置，Settings 默认文本地址/模型与 `.env.example` 同步；新增 `image_model`、`image_base_url`、`image_api_key: SecretStr`，仅为后续接入的配置入口，默认空值、不触发调用。原 Chat Completions JSON mode、high、120 秒正式超时、并发 2、预算与独立视觉/向量连接保留。已验证 Settings 加载和密钥相等但不显示密钥；Ruff 与目标 diff 检查通过，未重跑完整业务回归。
+
+确认无非探针在途模型调用或 running 任务后，于北京时间 17:34 仅重载本项目 API/worker，新进程 16928/18956、日志后缀 `20261028-173433-totokens`；网页与 `/api/health` 正常，worker 周期任务完成。首次受限执行因无法读取 Win32 进程信息退出，随后经沙箱外授权执行同一空闲检查/重载工具成功；未停止 NapCat、gateway、数据库或独立实验进程。额外 `CheckQQ` 返回本地 3001 连接拒绝，本轮未恢复 QQ 服务，不能声称新配置的真实 QQ 回复已验证。长期稳定性、个人材料效果、新站生图及实际费用仍待验；无提交或推送。
+
+## 2026-10-28 totokens文本路径与text.format验证
+
+用户要求验证文本路径及 `text.format` 格式化输出。使用当前新文本密钥、`https://drc.totokens.cc/v1`、`gpt-6.1-sol` / high，通过生产 `generate_structured`、共享预算和并发执行三条预定合成请求，禁用 SDK 自动重试。仅为每次探针在内存覆盖协议，不修改正式 `chat_completions` 配置、不重载、不发送 QQ、不采用任何结果为业务数据。
+
+| 样例 | 实际路径 | 结果 | 时长 |
+| --- | --- | --- | --- |
+| 当前 Chat JSON mode 基线 | `/v1/chat/completions` | HTTP 200 / stop，`reply=LISA_PATH_OK`，严格校验通过 | 15.048 秒 |
+| Responses 参数独立 Schema | `/v1/responses` | HTTP 200 / completed，回显 `json_schema` / strict=true；必填、嵌套数组/对象、整数、布尔、nullable 和随机常量检查通过 | 6.614 秒 |
+| 正式 Dialogue Schema 加合成普通文字人格 | `/v1/responses` | HTTP 200 / completed，回显 `json_schema` / strict=true；原始 JSON、严格类型、全部 wire 必填/额外字段检查通过；业务间隔检查未通过 | 7.276 秒 |
+
+第二条只在 `text.format.schema` 提供随机 marker、字段结构及约束，instructions/user 仅请求普通中文问候，没有 JSON 指令、Schema 或对象示例；返回准确命中随机常量，不能仅解释为另附提示示例后的 JSON 服从。此样本支持新站本次调用落实了格式约束，不据此断定中转内部实现方式或长期强约束保证。
+
+第三条完整返回正式 Dialogue 字段，未剥围栏、修补或补齐字段；其 messages 有 1 条、message_intervals 为 0 条，且 life_events 出现缺少日期依据的合成内容。Pydantic/Schema 通过不等于语义、跨字段业务关系或可采用性通过。探针最初将附加间隔断言失败汇总为 strict_validation_passed=false，随后仅用已保存原始 JSON 和请求 Schema 离线复验，拆分 wire/strict 成功与 business 失败，无额外付费调用；报告 all_wire_formats_passed=true、all_passed=false。
+
+总请求预留开发估算上限 0.043268 元，三次台账均 succeeded，按供应商 usage 的应用估算合计 0.015300 元，不等于供应商真实账单。临时无登录账号和任务已清理，保留匿名费用；没有真实个人内容。终端显示中文编码异常已从 UTF-8 报告离线核对，原始输出没有 Unicode 替换字符，不属于 API 文本损坏。原始合成请求、返回及分类证据保存在 `runtime/reports/probes/text-format-20261028T095143Z/`；复现辅助脚本 `runtime/reports/probes/totokens_text_format_20261028.py`。本轮只增加上述探针与文档记录，无业务代码/配置修改、完整回归、提交或推送。
+
+## 2026-10-28 恢复正式Responses严格Schema
+
+用户要求核对本轮之前是否使用复杂 text.format，并还原该约束方式。Git 最近提交为 e456a0e，本轮对话尚未提交；其 _reply_request 原本即使用 Responses、text.format.type=json_schema、strict=true，完整 Schema 来自任务 Pydantic 模型，并递归要求所有属性/禁止额外字段。当前代码原分支仍在，未简化 Schema，因此仅将 runtime/.env 与 .env.example 的 LISA_MODEL_API_PROTOCOL 恢复为 responses；没有整文件回退或覆盖其他未提交修复，保留兼容分支为显式选项。
+
+从 HEAD 提取旧 _reply_request 函数，对同一组当前任务模型比较实际 text.format 对象：Reply、Dialogue、AgentPlan、WritingResult、StyleCandidate 五类全部一致。Dialogue 包含 14 个顶层字段、6 个嵌套定义；保留嵌套对象/数组、类型、枚举、nullable、必填和 additionalProperties=false。旧版固定 low 的推理设置不回退，继续用户已指定的 gpt-6.1-sol / high、新站和新密钥；生图/视觉/向量独立配置、预算、并发 2、未知不自动重发规则保留。聊天中的输出协议说明仍用于解释字段用途和处理人格输出形式冲突，正式结构约束由请求参数提供，并继续本地 Pydantic/业务检查。
+
+恢复后的真实短合成验证直接读取 Settings，未覆盖协议或输出上限，经生产 generate_structured 发往 responses，线上含 reasoning.effort=high、600 输出上限及完整 Dialogue Schema。HTTP 200、completed，回显 gpt-6.1-sol，5.678 秒返回原始 JSON；严格类型、全部顶层必填/额外字段及 messages/间隔数量检查通过，无生活/记忆候选。台账 succeeded，usage 输入 850、输出 111 tokens，应用开发估算 0.002810 元；实际账单另核。临时无登录账号/任务已清理，不采用结果、不发送 QQ。比较及请求证据位于 runtime/reports/probes/restore_strict_responses_20261028T095720Z.json，辅助脚本同目录。
+
+验证命令 runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests/test_model_calls.py：隔离临时数据库迁移升降升、Alembic 差异、重复迁移及 worker once 通过，53 项模型调用测试通过；pytest 缓存目录有一次访问拒绝警告，不影响测试或临时库清理。没有新写仅镜像配置的单元测试，也未重跑完整业务回归。
+
+确认无在途业务模型调用或 running 任务后，17:57 仅重载本项目 API/worker，新进程 7500/21800，日志后缀 20261028-175740-strict-responses；网页及健康正常，数据库/NapCat/gateway 和独立实验进程未停止。本轮没有验证真实 QQ、个人材料或长期语义效果；Schema 格式通过仍不能保证事实或跨字段业务关系正确。仅恢复协议和维护记录，无提交/推送。
+
+## 2026-10-28 通用模型调用链路首轮优化
+
+用户接受评审建议并要求直接优化，本轮范围为校验对齐、错误分类与 Schema 缓存；连接池复用和格式提示压缩留作后续。新增 lisa/structured_output.py，generate_structured 在 Responses/Chat 两条路径均使用 model_validate_json(strict=true, extra=forbid)，随后递归检查实际提供的模型字段，拒绝顶层/嵌套对象/数组中省略的默认字段及非有限浮点数。只收紧供应商原始返回，不修改表单、内部对象构造或业务采用的默认规则；UUID、日期/时间及 nullable 的合法 JSON 表示继续支持，保留现有业务校验。
+
+完整 Schema 按模型类使用 128 项上限的 LRU 缓存，缓存不可变紧凑 JSON 文本和 SHA-256 指纹；Responses 每次反序列化出独立字典，调用方修改请求不能污染缓存，Chat 提示直接复用缓存文本。线上对象模型若显式 rebuild，需清除该缓存或重启进程。对 Reply、Conversation、Dialogue、WritingResult、AuthorChoice、AgentPlan、StyleCandidate、BatchAnalysis、Comparison、TrialOutput、CharacterSuggestion、ContactReply、共有 Analysis 共 13 类对比本轮修改前 format，内容全部一致。相同合成人格/消息、同进程各 200 次的离线测量：完整请求构造均值 2.1714→0.0303 毫秒；这仅是本地构造开销，不代表模型生成端到端延迟同比改善。证据 runtime/reports/probes/model-pipeline-performance-20261028.json；原源码/Schema 基线位于 runtime/reports/model-pipeline-before-20261028。
+
+台账 configuration 统一增加 protocol、schema、schema_fingerprint、reasoning_effort（实际发送值）。返回诊断固定为 output_json_invalid、output_missing_fields、output_extra_fields、output_type_invalid、output_constraint_invalid，以及 model_refusal、output_limit、content_filtered、unexpected_tool_call、response_incomplete、provider_failed、response_cancelled、response_status_unknown；HTTP/连接异常与 usage_unavailable 保持原路径。Responses 拒绝内容与 Chat finish_reason 独立识别，不把拒绝当 JSON 正文解析。日志仅保留已知顶层字段、错误类型与数量，不保存正文、拒绝说明、未知字段名或上游任意错误描述。错误分类不改变是否未知、费用结算、重试或协议选择。
+
+新增用例覆盖嵌套默认字段、nullable、严格标量、UUID/时间、额外字段、NaN/Infinity、缓存复用/污染、两协议付费失败及终态分类/隐私/不重试。首轮定向 63 项通过；首轮完整回归 920 通过、13 失败、1 错误，其中 10 项为原 SDK 替身省略字段，3 项启动测试和 1 项临时目录用例受沙箱权限影响。仅将 SDK 替身改为完整模型序列化，保留内部注入生成器的简写样例；未放宽生产校验。随后在授权环境重跑 scripts/test_app.py，临时库迁移升降升、差异、重复迁移和 worker once 均通过，934 项后端完整回归通过（136.01 秒），临时库清理完成，日志 runtime/reports/model-pipeline-full-20261028.log。新增解析依赖也纳入三类评测工具的源码快照/哈希；python -m unittest scripts.test_real_chat_prompt scripts.test_chat_prompt_benchmark scripts.test_chat_distillation_benchmark 共 25 项通过，相关 Ruff/diff 检查通过。
+
+真实验证仅一条合成问候，经当前 Settings 的 gpt-6.1-sol/high、Responses、600 输出上限及完整 Dialogue：HTTP 200/completed、6.803 秒；严格字段/类型及 messages/间隔检查通过，台账 succeeded，850 输入/100 输出 tokens，应用开发估算 0.002700 元，不代表供应商实际价格。临时无登录账号/任务已清理，无 QQ 发送或业务采用。报告 runtime/reports/probes/restore_strict_responses_20261028T101513Z.json。
+
+确认无非探针在途调用或 running 业务任务后，北京时间 18:15 仅重载 API/worker，新进程 21780/24252，日志后缀 20261028-181544-model-pipeline；网页及健康正常。数据库、NapCat/gateway、独立实验和生图/视觉/向量配置保留；真实个人/QQ/多日语义效果未在本轮验收。无提交/推送。

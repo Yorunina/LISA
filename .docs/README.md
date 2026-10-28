@@ -1,7 +1,7 @@
 # LISA 文档入口
 
 
-更新：2026 年 10 月 27 日。LISA 是以 QQ 私聊为日常入口、网页为创作管理入口的文学创作伙伴。B01 已完成；B02—B09 主要工程路径已接通，真实个人材料、正常 QQ、语义/多日效果和正式部署仍有待验收项。B08 的账号删除及隔离实进程恢复已完成，本地启停已实现；B10 已获授权并接通表情共建、公共检索、平台额度及表情出站，本地已加载，真实语义/QQ与多日效果仍待验。B11 已接通 10 秒合批、自然分条、模型自定条间间隔和发送顺序屏障，真实 QQ、重启和多日自然度仍待验。当前任务与剩余验收只查 [开发状态](DEVELOPMENT_TASKS.md#交付批次与依赖顺序)。
+更新：2026 年 10 月 28 日。LISA 是以 QQ 私聊为日常入口、网页为创作管理入口的文学创作伙伴。B01 已完成；B02—B09 主要工程路径已接通，真实个人材料、正常 QQ、语义/多日效果和正式部署仍有待验收项。B08 的账号删除及隔离实进程恢复已完成，本地启停已实现；B10 已获授权并接通表情共建、公共检索、平台额度及表情出站，本地已加载，真实语义/QQ与多日效果仍待验。B11 已接通 10 秒合批、自然分条、模型自定条间间隔和发送顺序屏障，真实 QQ、重启和多日自然度仍待验。当前任务与剩余验收只查 [开发状态](DEVELOPMENT_TASKS.md#交付批次与依赖顺序)。
 
 已完成任务规格、启动包、逐轮测试/排障和环境重载记录已移至 [.docs/archive/](archive/README.md)。**默认不读取归档、完整实施历史、决策历史或评审**；仅需要追溯某一任务时先检索其 ID / 标题，再按段读取。现行产品方案、接口边界和未完成任务继续留在活跃文档。
 
@@ -18,17 +18,18 @@
 | 本轮主题 | 项目方案中的有效规则 | 需要时补读 |
 | --- | --- | --- |
 | 产品范围、初始化、人格 | [定位](PROJECT_PLAN.md#产品定位与已确认决策)、[用户与项目](PROJECT_PLAN.md#用户与项目边界)、[流程](PROJECT_PLAN.md#核心使用流程)、[人格](PROJECT_PLAN.md#交流与人格) | 决策记录 D05、D07、D08 |
-| 上传 QQ/作品、蒸馏性格与写作风格 | [风格蒸馏](PROJECT_PLAN.md#上传语料与风格蒸馏) | 决策记录 D15；[B09 扩展任务](DEVELOPMENT_TASKS.md#b09-风格蒸馏需求扩展)；[质量优化方案](STYLE_DISTILLATION_OPTIMIZATION.md)（聊天优先，本轮仅方案、暂不编码）；工程与页面已接通，真实材料/模型效果待验证；涉及页面时读前端规范 |
+| 上传 QQ/作品、蒸馏性格与写作风格 | [风格蒸馏](PROJECT_PLAN.md#上传语料与风格蒸馏) | 决策记录 D15；[B09 扩展任务](DEVELOPMENT_TASKS.md#b09-风格蒸馏需求扩展)；[质量优化方案](STYLE_DISTILLATION_OPTIMIZATION.md)（收缩后的首轮工程与隔离回归通过，真实个人效果待验）；[聊天蒸馏合成基准](CHAT_DISTILLATION_BENCHMARK.md)；涉及页面时读前端规范 |
 | 创作资料填写、作者写法、偏好与讨论 | [填写方式](PROJECT_PLAN.md#创作资料的填写方式)、[风格应用](PROJECT_PLAN.md#两类结果与作用范围) | 决策 D11/D15；涉及页面时读前端规范 |
 | 群记录历史能力与网页入口移除 | [群记录](PROJECT_PLAN.md#群消息采集授权与检索蒸馏) | 决策记录 D17；网页已移除，保留后端与既有数据 |
 | 共有表情与用户共建 | [共有记忆](PROJECT_PLAN.md#共有记忆与共同维护) | 决策记录 D20；[B10](DEVELOPMENT_TASKS.md#b10-共有记忆扩展) 工程已接通、真实效果待验；全体用户维护，无管理员审批 |
 | 作品完结、修订、新建与切换 | [作品生命周期](PROJECT_PLAN.md#作品完结与开启新作品)、[工作台](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D13、D14；涉及页面时读前端规范 |
 | 作品与章节公开分享、Agent 分享链接 | [作品网页分享](PROJECT_PLAN.md#作品网页分享) | 决策记录 D18；部署基址与验证查开发环境，页面查前端规范 |
 | 小说插图/封面、基础画风模板、聊天自制图片 | [图片需求](PROJECT_PLAN.md#小说插图需求草案)、[风格模板](PROJECT_PLAN.md#预设风格模板)、[低频聊天发图](PROJECT_PLAN.md#聊天-agent-的自制图片) | [D25 待决](PENDING_DECISIONS.md#d25-小说插图)；[参考图实测](DEVELOPMENT.md#小说插图模型预研)；无消费额度、基础画风锚定；业务已接通并通过真实合成验证，正式加载已核对，QQ/多日效果待验 |
-| 聊天、虚拟生活、偏好 | [生活事实](PROJECT_PLAN.md#虚拟生活与日记的事实同步)、[用户权威](PROJECT_PLAN.md#用户意见与创作权威)、[联系](PROJECT_PLAN.md#作息学习与主动联系)、[每周虚拟生活提案表](PROJECT_PLAN.md#每周虚拟生活提案表) | 决策记录 D02、D03、D06、D23 |
+| 聊天、虚拟生活、偏好 | [生活事实](PROJECT_PLAN.md#虚拟生活与日记的事实同步)、[用户权威](PROJECT_PLAN.md#用户意见与创作权威)、[联系](PROJECT_PLAN.md#作息学习与主动联系)、[每周虚拟生活提案表](PROJECT_PLAN.md#每周虚拟生活提案表) | 决策记录 D02、D03、D06、D23；[直接聊天prompt实验](CHAT_DIRECT_PROMPT_REPORT.md) |
 | 连续消息、回复长度、分条与插话 | [合批与分条](PROJECT_PLAN.md#连续消息合批与自然分条发送) | 决策记录 D21；[B11](DEVELOPMENT_TASKS.md#b11-对话节奏与分条投递) 核心工程已接通，真实 QQ/多日效果与具体参数见待决清单 |
 | 自主创作、暂停、任务 | [暂停](PROJECT_PLAN.md#自主推进与暂停规则)、[主动取消](PROJECT_PLAN.md#主动取消生成任务)、[Agent](PROJECT_PLAN.md#agent-职责与上下文)、[预算](PROJECT_PLAN.md#公众试用与预算)、[架构](PROJECT_PLAN.md#技术架构与工具栈) | 决策记录 D01—D04、D09、D12、D14 |
-| 世界书、剧情状态、记忆、检索、编辑、删除 | [世界书与当前剧情](PROJECT_PLAN.md#世界书与当前剧情)、[记忆与检索](PROJECT_PLAN.md#长期记忆与检索)、[导出与删除](PROJECT_PLAN.md#正文导出账号删除与备份边界)、[工作台与版本](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D04、D05、D10 |
+| 世界书、剧情状态、记忆、检索、编辑、删除 | [世界书与当前剧情](PROJECT_PLAN.md#世界书与当前剧情)、[记忆与检索](PROJECT_PLAN.md#长期记忆与检索)、[导出与删除](PROJECT_PLAN.md#正文导出账号删除与备份边界)、[工作台与版本](PROJECT_PLAN.md#网页工作台与版本) | 决策记录 D04、D05、D10、D22、D24；[B17 短期连续性](DEVELOPMENT_TASKS.md#b17-短期对话连续性与图片委托补全)已接通并通过相关隔离/真实合成语义验证，正式加载与QQ待验；[B14 记忆读取可靠性](DEVELOPMENT_TASKS.md#b14-记忆读取可靠性优化方案)含受限降级与聊天预算收缩版已完成相关隔离验证，真实效果待验；通用预算重排后置 |
+| 运行仪表盘、调用费用、RAG 评测与取消文本额度 | [运行仪表盘](PROJECT_PLAN.md#运行仪表盘)、[试用与消耗](PROJECT_PLAN.md#公众试用与预算) | [首版指标与验收](OPERATIONS_DASHBOARD_REQUIREMENTS.md)；[B16 待开发](DEVELOPMENT_TASKS.md#b16-第一版运行仪表盘与消费额度调整)；仅维护者入口，采集不保存聊天原文 |
 | QQ、账号、部署 | [接入](PROJECT_PLAN.md#接入与部署边界)、[流程](PROJECT_PLAN.md#核心使用流程)、[架构](PROJECT_PLAN.md#技术架构与工具栈) | 待决清单 D08；[开发环境](DEVELOPMENT.md) |
 | 前端设计、实现、视觉验收 | [工作台](PROJECT_PLAN.md#网页工作台与版本) | 必读 [前端规范](FRONTEND_DESIGN.md)，对照 [原型及限制](prototype/README.md) |
 | 开发、提交、交付验收 | [模块与任务](DEVELOPMENT_TASKS.md#模块总览与数据归属)、[开发批次](DEVELOPMENT_TASKS.md#交付批次与依赖顺序)，以及主方案的 [架构](PROJECT_PLAN.md#技术架构与工具栈)、[交付顺序](PROJECT_PLAN.md#首版边界与交付顺序)、[验收场景](PROJECT_PLAN.md#验收场景) | 开发和提交前必读 [Git 协作](CONTRIBUTING.md)；环境操作查 [开发环境](DEVELOPMENT.md)；完成后更新 [实施记录](DEVELOPMENT_TASKS.md#完成条件与实施记录) |
@@ -48,7 +49,8 @@ Get-Content -Encoding UTF8 .docs/PROJECT_PLAN.md | Select-Object -Skip <起始�
 | --- | --- |
 | [PROJECT_PLAN.md](PROJECT_PLAN.md) | 唯一现行产品方案，包含规则、架构方向及验收要求 |
 | [DEVELOPMENT_TASKS.md](DEVELOPMENT_TASKS.md) | 当前模块/接口边界、简短完成索引、未完成任务与验收、接续交接；产品规则引用主方案 |
-| [STYLE_DISTILLATION_OPTIMIZATION.md](STYLE_DISTILLATION_OPTIMIZATION.md) | D15/B09 蒸馏质量优化专题提案：聊天优先、作品接续的分析、生成与验收细化；不构成独立产品基线或开发授权 |
+| [STYLE_DISTILLATION_OPTIMIZATION.md](STYLE_DISTILLATION_OPTIMIZATION.md) | D15/B09 首轮质量优化实施范围与轻量验收；完整档案、大规模评测等后续方向暂缓，产品边界仍以主方案为准 |
+| [OPERATIONS_DASHBOARD_REQUIREMENTS.md](OPERATIONS_DASHBOARD_REQUIREMENTS.md) | D26 首版运行仪表盘指标口径、只读页面、数据边界与验收；产品规则仍引用主方案 |
 | [PENDING_DECISIONS.md](PENDING_DECISIONS.md) | 剩余问题、待确认建议、接续时机 |
 | [DECISION_LOG.md](DECISION_LOG.md#决策索引) | 稳定 D 编号、状态、结论、日期、用户依据及替代过程；按项读取 |
 | [CHANGELOG.md](CHANGELOG.md) | 方案与文档变更历史；仅追溯时读取 |
