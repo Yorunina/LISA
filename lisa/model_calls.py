@@ -7,17 +7,23 @@ import math
 import re
 from datetime import UTC, datetime
 from decimal import ROUND_UP, Decimal
+from types import SimpleNamespace
 from uuid import UUID
 
 from httpx2 import ConnectError, ConnectTimeout, PoolTimeout
 from openai import APIStatusError, AsyncOpenAI, DefaultAsyncHttpxClient, OpenAIError
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from lisa.models import Account, BudgetDay, ModelCall, Task
 from lisa.settings import Settings
+from lisa.structured_output import (
+    parse_structured_output,
+    structured_schema,
+    validation_error_code,
+)
 
 # Conservative application default, separate from the provider model context window.
 MAX_INPUT_BYTES = 64_000
@@ -41,6 +47,14 @@ class ModelBusy(Exception):
 
 class ModelCallFailed(Exception):
     pass
+
+
+class EmbeddingUnavailable(ModelCallFailed):
+    """A definitive embedding failure successfully settled by this attempt."""
+
+    def __init__(self, message: str, call_id: UUID | None = None):
+        super().__init__(message)
+        self.call_id = call_id
 
 
 class ModelInputTooLarge(ModelCallFailed):
@@ -127,11 +141,14 @@ def _reserve(
             if task.kind in {"scene", "rewrite"}
             else MAX_TASK_CALLS
         )
-        if not budget_exempt and (len(budgeted_calls) >= max_calls or (
+        # Ordinary chat interprets image commissions in its single call. D09
+        # removes consumption caps while preserving accounting and concurrency.
+        consumption_limited = not budget_exempt and task.kind != "chat"
+        if consumption_limited and (len(budgeted_calls) >= max_calls or (
             task.kind != "style_distill" and task_cost + amount > settings.model_task_usd
         )):
             raise BudgetExceeded("Task model allowance exhausted")
-        if not budget_exempt and (
+        if consumption_limited and (
             day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd
         ):
             raise BudgetExceeded("Daily model allowance exhausted")
@@ -190,13 +207,13 @@ def _finish(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     error: str | None = None,
-) -> None:
+) -> bool:
     with Session(engine) as db, db.begin():
         db.execute(text("SELECT pg_advisory_xact_lock(7273101)"))
         call = db.get(ModelCall, call_id)
         if call is None or call.state != "reserved":
             # Deleted accounts and interrupted attempts cannot be settled twice.
-            return
+            return False
         day = db.scalar(select(BudgetDay).where(BudgetDay.day == call.budget_day).with_for_update())
         # No retry releases an unknown provider outcome back into available budget.
         amount = charged if charged is not None else call.reserved_usd
@@ -206,26 +223,43 @@ def _finish(
         call.state, call.charged_usd = state, amount
         call.input_tokens, call.output_tokens = input_tokens, output_tokens
         call.finished_at, call.error = datetime.now(UTC), error
+    return True
 
 
 def _reply_request(
     settings: Settings, instructions: str, messages: list[dict], schema: type[BaseModel] = Reply
 ) -> dict:
-    def compact_schema(value):
-        if isinstance(value, dict):
-            result = {
-                key: compact_schema(item)
-                for key, item in value.items()
-                if key != "default" and (key != "title" or not isinstance(item, str))
-            }
-            if result.get("type") == "object":
-                # Structured Outputs requires every property, even when local parsing has defaults.
-                result["required"] = list(result.get("properties", {}))
-                result["additionalProperties"] = False
-            return result
-        if isinstance(value, list):
-            return [compact_schema(item) for item in value]
-        return value
+    structured_instructions = getattr(schema, "structured_instructions", None)
+    if structured_instructions is not None:
+        # Keep the application's wire contract in an explicit high-priority
+        # input message: compatible relays may not forward `instructions`.
+        # This same builder accounts for its bytes during context packing.
+        messages = [
+            {"role": "developer", "content": structured_instructions("")},
+            *messages,
+        ]
+
+    compiled_schema = structured_schema(schema)
+    effort = settings.model_reasoning_effort
+    if effort is None and settings.model_name in {"gpt-6-astra", "gpt-6.1-sol"}:
+        effort = "low"
+    if settings.model_api_protocol == "chat_completions":
+        request = {
+            "model": settings.model_name,
+            "store": False,
+            "messages": [
+                {"role": "system", "content": instructions
+                 + "\n必须输出JSON对象，严格符合以下JSON Schema：\n"
+                  + compiled_schema.json_text},
+                *[dict(message, role="system" if message["role"] == "developer"
+                       else message["role"]) for message in messages],
+            ],
+            "max_tokens": settings.model_max_output_tokens,
+            "response_format": {"type": "json_object"},
+        }
+        if effort is not None:
+            request["reasoning_effort"] = effort
+        return request
 
     request = {
         "model": settings.model_name,
@@ -238,13 +272,76 @@ def _reply_request(
                 "type": "json_schema",
                 "name": schema.__name__,
                 "strict": True,
-                "schema": compact_schema(schema.model_json_schema()),
+                # A fresh dict prevents request mutation from changing the cached schema.
+                "schema": json.loads(compiled_schema.json_text),
             }
         },
     }
-    if settings.model_name in {"gpt-6-astra", "gpt-6.1-sol"}:
-        request["reasoning"] = {"effort": "low"}
+    if effort is not None:
+        request["reasoning"] = {"effort": effort}
     return request
+
+
+def _completion_response(response):
+    """Normalize only an explicit Chat Completions result; never repair its content."""
+    choices = getattr(response, "choices", None)
+    choice = choices[0] if choices else None
+    reason = getattr(choice, "finish_reason", None)
+    if not isinstance(reason, str):
+        reason = None
+    status = {
+        "stop": "completed", "length": "incomplete", "content_filter": "failed",
+        "tool_calls": "failed", "function_call": "failed",
+    }.get(reason)
+    message = getattr(choice, "message", None)
+    if getattr(message, "refusal", None):
+        status = "failed"
+    error = {
+        "stop": None, "length": "output_limit", "content_filter": "content_filtered",
+        "tool_calls": "unexpected_tool_call", "function_call": "unexpected_tool_call",
+    }.get(reason, "response_status_unknown")
+    if getattr(message, "refusal", None):
+        error = "model_refusal"
+    usage = getattr(response, "usage", None)
+    return SimpleNamespace(
+        status=status,
+        result_error=error,
+        output_text=getattr(message, "content", None),
+        usage=SimpleNamespace(
+            input_tokens=getattr(usage, "prompt_tokens", None),
+            output_tokens=getattr(usage, "completion_tokens", None),
+        ),
+    )
+
+
+def _response_error(response) -> str | None:
+    """Classify known terminal states without persisting arbitrary provider messages."""
+    status = getattr(response, "status", None)
+    if not isinstance(status, str) or status not in {
+        "completed", "incomplete", "failed", "cancelled",
+    }:
+        return "response_status_unknown"
+    normalized = getattr(response, "result_error", None)
+    if isinstance(normalized, str) and normalized in {
+        "output_limit", "content_filtered", "unexpected_tool_call", "model_refusal",
+    }:
+        return normalized
+    output = getattr(response, "output", None)
+    if isinstance(output, list):
+        for item in output:
+            content = getattr(item, "content", None)
+            if isinstance(content, list) and any(
+                getattr(part, "type", None) == "refusal" for part in content
+            ):
+                return "model_refusal"
+    if status == "incomplete":
+        reason = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        if not isinstance(reason, str):
+            reason = None
+        return {
+            "max_output_tokens": "output_limit", "content_filter": "content_filtered",
+        }.get(reason, "response_incomplete")
+    return {"failed": "provider_failed", "cancelled": "response_cancelled"}.get(status)
 
 
 def _request_size(request: dict) -> int:
@@ -306,7 +403,7 @@ async def _provider_request(
         )
         # Rejections are definitive; a timeout or server failure may follow execution.
         rejected = 400 <= exc.status_code < 500 and exc.status_code not in {408, 499}
-        _finish(
+        settled = _finish(
             engine,
             call_id,
             state="failed" if rejected else "unknown",
@@ -314,6 +411,10 @@ async def _provider_request(
             error=f"http_{exc.status_code}",
         )
         exception = ModelCallFailed if rejected else ModelCallUnknown
+        if rejected and settled and endpoint == "embeddings":
+            exception = EmbeddingUnavailable
+        if exception is EmbeddingUnavailable:
+            raise EmbeddingUnavailable("Model request rejected", call_id) from None
         raise exception("Model request rejected" if rejected else "Model outcome unknown") from None
     except (OpenAIError, TimeoutError, asyncio.CancelledError) as exc:
         cause = exc.__cause__
@@ -332,7 +433,7 @@ async def _provider_request(
             )
             current = current.__cause__ or current.__context__
         logger.warning("model_call=%s transport_failure=%s", call_id, chain)
-        _finish(
+        settled = _finish(
             engine,
             call_id,
             state="failed" if not_sent else "unknown",
@@ -342,6 +443,8 @@ async def _provider_request(
         if isinstance(exc, asyncio.CancelledError):
             raise
         if not_sent:
+            if settled and endpoint == "embeddings":
+                raise EmbeddingUnavailable("Embedding connection unavailable", call_id) from None
             raise ModelCallFailed("Model connection could not be established") from None
         raise ModelCallUnknown("Model outcome unknown") from None
 
@@ -365,6 +468,7 @@ async def generate_structured(
     if output_tokens is not None:
         settings = settings.model_copy(update={"model_max_output_tokens": output_tokens})
     request = _reply_request(settings, instructions, messages, schema)
+    endpoint = "chat.completions" if "response_format" in request else "responses"
     input_bytes = _request_size(request)
     limit = settings.model_max_input_bytes if input_byte_limit is None else input_byte_limit
     if not 1 <= limit <= MAX_INPUT_BYTES_HARD_LIMIT or input_bytes > limit:
@@ -387,9 +491,16 @@ async def generate_structured(
             "output_per_million": str(settings.model_output_per_million),
             "request_bytes": input_bytes,
             "input_limit_bytes": limit,
+            "protocol": settings.model_api_protocol,
+            "schema": schema.__name__,
+            "schema_fingerprint": structured_schema(schema).fingerprint,
+            "reasoning_effort": request.get("reasoning", {}).get("effort")
+            if endpoint == "responses" else request.get("reasoning_effort"),
         },
     )
-    response = await _provider_request(settings, engine, call_id, request, endpoint="responses")
+    response = await _provider_request(settings, engine, call_id, request, endpoint=endpoint)
+    if endpoint == "chat.completions":
+        response = _completion_response(response)
 
     # The SDK accepts partially shaped responses from compatible relay services.
     usage = getattr(response, "usage", None)
@@ -404,16 +515,28 @@ async def generate_structured(
     charged = _cost(settings, input_tokens, output_tokens) if usage_known else amount
     if not usage_known:
         input_tokens, output_tokens = None, None
-    error = None
+    error = _response_error(response)
     reply = None
     status = getattr(response, "status", None)
-    if status == "completed":
+    if status == "completed" and error is None:
         try:
-            reply = schema.model_validate_json(response.output_text)
+            reply = parse_structured_output(schema, response.output_text)
+        except ValidationError as exc:
+            # Error messages, inputs, context and unknown property names may all
+            # contain private model output. Log only fixed schema fields/types.
+            failures = exc.errors(include_input=False, include_context=False, include_url=False)
+            diagnostics = [
+                (row["loc"][0] if row["loc"] and row["loc"][0] in schema.model_fields else "$",
+                 row["type"])
+                for row in failures[:8]
+            ]
+            logger.warning(
+                "call=%s invalid_reply schema=%s errors=%s count=%s",
+                call_id, schema.__name__, diagnostics, len(failures),
+            )
+            error = validation_error_code(failures)
         except (ValueError, TypeError, AttributeError):
-            error = "invalid_reply"
-    else:
-        error = "response_not_completed"
+            error = "output_type_invalid"
     unknown = not isinstance(status, str) or status not in {
         "completed",
         "incomplete",
@@ -533,7 +656,7 @@ async def generate_embeddings(
         vectors = [by_index[index] for index in range(len(texts))]
     except (AttributeError, TypeError, ValueError, OverflowError):
         pass
-    _finish(
+    settled = _finish(
         engine,
         call_id,
         state="succeeded" if vectors is not None else "failed",
@@ -547,5 +670,7 @@ async def generate_embeddings(
         else "usage_unavailable",
     )
     if vectors is None:
+        if settled:
+            raise EmbeddingUnavailable("Embedding response invalid", call_id)
         raise ModelCallFailed("Embedding response invalid")
     return vectors

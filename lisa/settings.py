@@ -1,5 +1,6 @@
 from decimal import Decimal
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from psycopg.conninfo import make_conninfo
@@ -42,9 +43,19 @@ class Settings(BaseSettings):
             raise ValueError("web_url must be an absolute HTTP(S) base URL")
         return value
 
-    model_base_url: str = "https://test.mcii.cc/v1"
+    model_base_url: str = "https://drc.totokens.cc/v1"
     model_api_key: SecretStr = SecretStr("")
     model_name: str = "gpt-6.1-sol"
+    model_api_protocol: Literal["responses", "chat_completions"] = "responses"
+    model_reasoning_effort: Literal["low", "medium", "high"] | None = None
+    dialogue_skill_mode: Literal["off", "core", "examples", "corpus"] = "off"
+    dialogue_skill_output_tokens: int = Field(default=2400, ge=600, le=4096)
+
+    @field_validator("model_reasoning_effort", mode="before")
+    @classmethod
+    def empty_reasoning_effort(cls, value):
+        return None if value == "" else value
+
     # Amounts use CNY; legacy *_usd names remain compatible with stored data and clients.
     model_daily_usd: Decimal = Field(default=Decimal("10.00"), gt=0)
     model_task_usd: Decimal = Field(default=Decimal("0.15"), gt=0)

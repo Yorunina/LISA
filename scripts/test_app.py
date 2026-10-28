@@ -167,6 +167,12 @@ def main() -> None:
     env["LISA_API_PROXY"] = "http://127.0.0.1:8011"
     env["LISA_TEST_BASE_URL"] = "http://127.0.0.1:5174"
     env["LISA_CHAT_ENABLED"] = "false"
+    # Test defaults must not follow a developer's live relay transport override.
+    # Dedicated protocol tests explicitly exercise Chat Completions as well.
+    env["LISA_MODEL_API_PROTOCOL"] = "responses"
+    # Skill-specific tests opt in explicitly; never import a live private corpus
+    # into the generic isolated test suite or its artificial input-size limits.
+    env["LISA_DIALOGUE_SKILL_MODE"] = "off"
     env["LISA_CHAT_TEST_ENABLED"] = "false"
     env["LISA_AUTONOMY_ENABLED"] = "false"
     env["LISA_PROACTIVE_ENABLED"] = "false"

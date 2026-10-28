@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from lisa import model_calls
 from lisa.model_calls import (
     BudgetExceeded,
+    EmbeddingUnavailable,
     ModelBusy,
     ModelCallFailed,
     ModelCallUnknown,
@@ -220,7 +221,9 @@ async def test_embedding_uses_global_inflight_slot(embedding_settings, engine, t
     sdk.embeddings.assert_not_awaited()
 
 
-@pytest.mark.parametrize("code,unknown", [(400, False), (429, False), (408, True), (500, True)])
+@pytest.mark.parametrize(
+    "code,unknown", [(400, False), (429, False), (408, True), (499, True), (500, True), (502, True)]
+)
 @pytest.mark.asyncio
 async def test_embedding_http_failure_accounting(
     embedding_settings, engine, task_account, sdk, code, unknown
@@ -230,7 +233,7 @@ async def test_embedding_http_failure_accounting(
         response=httpx2.Response(code, request=httpx2.Request("POST", "https://embedding.invalid")),
         body=None,
     )
-    with pytest.raises(ModelCallUnknown if unknown else ModelCallFailed):
+    with pytest.raises(ModelCallUnknown if unknown else EmbeddingUnavailable):
         await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
     calls, days = records(engine)
     assert calls[0].state == ("unknown" if unknown else "failed")
@@ -255,7 +258,7 @@ async def test_embedding_transport_failure_accounting(
         ) from cause("synthetic")
 
     sdk.embeddings.side_effect = fail
-    with pytest.raises(ModelCallUnknown if unknown else ModelCallFailed):
+    with pytest.raises(ModelCallUnknown if unknown else EmbeddingUnavailable):
         await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
     calls, _ = records(engine)
     assert calls[0].charged_usd == (calls[0].reserved_usd if unknown else 0)
@@ -297,7 +300,7 @@ async def test_invalid_paid_vectors_still_charged(
     embedding_settings, engine, task_account, sdk, data
 ):
     sdk.embeddings.return_value = response(data=data)
-    with pytest.raises(ModelCallFailed):
+    with pytest.raises(EmbeddingUnavailable):
         await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
     calls, days = records(engine)
     assert calls[0].state == "failed" and calls[0].error == "invalid_embeddings"
@@ -309,6 +312,38 @@ async def test_duplicate_response_index_rejected(embedding_settings, engine, tas
     sdk.embeddings.return_value = response(data=[SimpleNamespace(index=0, embedding=[1, 0, 0])] * 2)
     with pytest.raises(ModelCallFailed):
         await generate_embeddings(embedding_settings, engine, *task_account, ["one", "two"])
+
+
+@pytest.mark.parametrize("failure", ["http", "connect", "invalid"])
+@pytest.mark.asyncio
+async def test_previously_settled_call_never_grants_embedding_fallback(
+    embedding_settings, engine, task_account, sdk, failure
+):
+    async def provider(**kwargs):
+        call_id = records(engine)[0][0].id
+        assert model_calls._finish(engine, call_id, state="unknown") is True
+        if failure == "http":
+            raise APIStatusError(
+                "synthetic", response=httpx2.Response(
+                    400, request=httpx2.Request("POST", "https://embedding.invalid")
+                ), body=None,
+            )
+        if failure == "connect":
+            raise APIConnectionError(
+                request=httpx2.Request("POST", "https://embedding.invalid")
+            ) from httpx2.ConnectError("synthetic")
+        return response(data=[])
+
+    sdk.embeddings.side_effect = provider
+    with pytest.raises(ModelCallFailed) as caught:
+        await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
+    assert not isinstance(caught.value, EmbeddingUnavailable)
+    calls, days = records(engine)
+    assert calls[0].state == "unknown"
+    assert days[0].spent_usd == calls[0].reserved_usd and days[0].reserved_usd == 0
+    with pytest.raises(ModelCallUnknown):
+        await generate_reply(embedding_settings, engine, *task_account, "test", [])
+    sdk.responses.assert_not_awaited()
 
 
 @pytest.mark.parametrize("valid", [True, False])
