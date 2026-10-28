@@ -9,9 +9,9 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from lisa.auth import DB, current_user
@@ -373,6 +373,10 @@ def _finish_generation(
         return None, "account_unavailable"
     if task is None or task.status != "running":
         return None, "task_cancelled"
+    if start != week_start_for(db, user_id):
+        discard_other_weeks(db, user_id)
+        _cancel_generation(task, "week_expired")
+        return None, "week_expired"
     plan = _find_plan(db, user_id, start, lock=True)
     snapshot = task.input_snapshot or {}
     reason = (
@@ -534,8 +538,31 @@ def _find_plan(db: Session, user_id: UUID, week_start: date, *, lock: bool = Fal
     return db.scalar(statement)
 
 
+def discard_other_weeks(db: Session, user_id: UUID) -> int:
+    """Keep only this account's current week, calculated in its own timezone."""
+    return db.execute(delete(LifeWeekPlan).where(
+        LifeWeekPlan.user_id == user_id,
+        LifeWeekPlan.week_start != week_start_for(db, user_id),
+    )).rowcount
+
+
+def cleanup_expired_plans(engine) -> int:
+    """Existing maintenance scans discard old plans even for inactive accounts."""
+    with Session(engine) as db:
+        user_ids = list(db.scalars(select(LifeWeekPlan.user_id).distinct()))
+    removed = 0
+    for user_id in user_ids:
+        with Session(engine) as db, db.begin():
+            user = db.scalar(select(Account).where(Account.id == user_id)
+                             .with_for_update(skip_locked=True))
+            if user is not None:
+                removed += discard_other_weeks(db, user_id)
+    return removed
+
+
 def ensure_current_plan(db: Session, user_id: UUID) -> LifeWeekPlan:
     start = week_start_for(db, user_id)
+    discard_other_weeks(db, user_id)
     end = start + timedelta(days=6)
     plan = _find_plan(db, user_id, start, lock=True)
     if plan is not None:
@@ -668,23 +695,17 @@ def apply_explicit_plan_text(
 
 
 @router.get("")
-def get_plan(
-    db: DB,
-    user: User,
-    history: bool = Query(False),
-):
+def get_plan(db: DB, user: User):
+    lock_account(db, user.id)
+    discard_other_weeks(db, user.id)
     start = week_start_for(db, user.id)
-    statement = (
-        select(LifeWeekPlan)
-        .where(LifeWeekPlan.user_id == user.id)
-        .order_by(LifeWeekPlan.week_start.desc())
-    )
-    plans = db.scalars(statement.limit(8)).all() if history else []
     current = _find_plan(db, user.id, start)
-    return {
+    result = {
         "current": plan_view(db, current),
-        "plans": [plan_view(db, plan) for plan in plans] if history else [],
+        "today": datetime.now(_timezone(db, user.id)).date().isoformat(),
     }
+    db.commit()
+    return result
 
 
 @router.post("/generate")
@@ -693,10 +714,15 @@ async def generate_plan(body: GenerateBody, request: Request, db: DB, user: User
     user = lock_account(db, user_id)
     if user is None or not user.active:
         raise HTTPException(401, "账号已不可用。")
-    start = _normalize_week_start(body.week_start or week_start_for(db, user.id))
+    start = week_start_for(db, user.id)
+    if body.week_start is not None and _normalize_week_start(body.week_start) != start:
+        raise HTTPException(422, "只保留和生成本周提案。")
+    discard_other_weeks(db, user.id)
     plan = _find_plan(db, user.id, start, lock=True)
     if plan is not None and not body.force:
-        return plan_view(db, plan)
+        result = plan_view(db, plan)
+        db.commit()
+        return result
     current_items = list(plan.items or []) if plan is not None else []
     task = Task(
         user_id=user.id,
@@ -739,7 +765,8 @@ def update_plan(plan_id: UUID, body: PlanUpdate, db: DB, user: User):
         raise HTTPException(401, "账号已不可用。")
     plan = db.scalar(
         select(LifeWeekPlan)
-        .where(LifeWeekPlan.id == plan_id, LifeWeekPlan.user_id == user.id)
+        .where(LifeWeekPlan.id == plan_id, LifeWeekPlan.user_id == user.id,
+               LifeWeekPlan.week_start == week_start_for(db, user.id))
         .with_for_update()
     )
     if plan is None:

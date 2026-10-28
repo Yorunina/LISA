@@ -15,6 +15,8 @@ export default defineConfig({
   use: {
     baseURL: process.env.LISA_TEST_BASE_URL,
     browserName: 'chromium',
+    // Keep native scrollbars visible so layout checks catch width changes.
+    launchOptions: { ignoreDefaultArgs: ['--hide-scrollbars'] },
     viewport: { width: 1440, height: 1000 },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',

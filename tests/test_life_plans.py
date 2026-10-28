@@ -7,6 +7,7 @@ from lisa.life_plans import (
     _default_items,
     _merge_generated_items,
     apply_explicit_plan_text,
+    cleanup_expired_plans,
     enqueue_agent_plan,
     ensure_current_plan,
     execute_life_plan,
@@ -295,7 +296,8 @@ async def test_queued_generation_does_not_start_after_pause_or_for_an_old_week(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "change", ["disabled", "cancelled", "memory", "deleted", "edited", "account_deleted"]
+    "change",
+    ["disabled", "cancelled", "memory", "deleted", "edited", "account_deleted", "week_rollover"],
 )
 async def test_queued_generation_rechecks_adoption_boundary(
     settings, engine, db, owner, queued_plan, monkeypatch, change,
@@ -313,6 +315,10 @@ async def test_queued_generation_rechecks_adoption_boundary(
             db.delete(db.get(LifeWeekPlan, plan_id))
         elif change == "account_deleted":
             db.delete(db.get(Account, owner))
+        elif change == "week_rollover":
+            monkeypatch.setattr(
+                "lisa.life_plans.week_start_for", lambda *args: start + timedelta(days=7)
+            )
         else:
             plan = db.get(LifeWeekPlan, plan_id)
             plan.items = [{**plan.items[0], "title": "用户已修改", "source": "user"}]
@@ -330,7 +336,8 @@ async def test_queued_generation_rechecks_adoption_boundary(
 
 
 @pytest.mark.parametrize(
-    "change", ["deleted", "edited", "disabled", "cancelled", "memory", "account_deleted"]
+    "change",
+    ["deleted", "edited", "disabled", "cancelled", "memory", "account_deleted", "week_rollover"],
 )
 def test_web_generation_does_not_restore_deleted_or_stale_plan(
     client, db, owner, monkeypatch, change,
@@ -351,6 +358,10 @@ def test_web_generation_does_not_restore_deleted_or_stale_plan(
             db.get(Task, task_id).status = "cancelled"
         elif change == "account_deleted":
             db.delete(db.get(Account, owner))
+        elif change == "week_rollover":
+            monkeypatch.setattr(
+                "lisa.life_plans.week_start_for", lambda *args: start + timedelta(days=7)
+            )
         else:
             db.get(Account, owner).memory_revision += 1
         db.commit()
@@ -369,9 +380,17 @@ def test_web_generation_does_not_restore_deleted_or_stale_plan(
 
 
 @pytest.mark.parametrize("history", [False, True])
-def test_future_plans_do_not_hide_the_current_week(client, db, owner, history):
+def test_current_week_only_even_with_legacy_history_query(client, db, owner, history):
     start = week_start_for(db, owner)
-    for offset in range(10):
+    other = Account(username="other_plan_owner", password_hash="unused")
+    db.add(other)
+    db.flush()
+    other_plan = LifeWeekPlan(
+        user_id=other.id, week_start=start - timedelta(weeks=1),
+        week_end=start - timedelta(days=1), items=[],
+    )
+    db.add(other_plan)
+    for offset in range(-1, 10):
         day = start + timedelta(weeks=offset)
         db.add(LifeWeekPlan(
             user_id=owner, week_start=day, week_end=day + timedelta(days=6), items=[],
@@ -380,7 +399,63 @@ def test_future_plans_do_not_hide_the_current_week(client, db, owner, history):
     response = client.get("/api/life-plan", params={"history": str(history).lower()})
     assert response.status_code == 200
     assert response.json()["current"]["week_start"] == start.isoformat()
-    assert len(response.json()["plans"]) == (8 if history else 0)
+    assert "plans" not in response.json()
+    db.expire_all()
+    assert db.query(LifeWeekPlan).filter_by(user_id=owner).count() == 1
+    assert db.get(LifeWeekPlan, other_plan.id) is not None
+
+
+@pytest.mark.parametrize("offset", [-1, 1])
+def test_other_week_generation_rejected(client, db, owner, monkeypatch, offset):
+    async def unexpected(*args):
+        pytest.fail("only current week generation is supported")
+
+    monkeypatch.setattr("lisa.life_plans._generate_agent_items", unexpected)
+    start = week_start_for(db, owner) + timedelta(weeks=offset)
+    response = client.post("/api/life-plan/generate", headers=HEADERS,
+                           json={"week_start": start.isoformat()})
+    assert response.status_code == 422
+    assert db.query(LifeWeekPlan).filter_by(user_id=owner).count() == 0
+
+
+def test_maintenance_discards_other_weeks_per_account(engine, db, owner, monkeypatch):
+    start = week_start_for(db, owner)
+    other = Account(username="inactive_plan_owner", password_hash="unused", active=False)
+    db.add(other)
+    db.flush()
+    other_id = other.id
+    # Different account-local week boundaries must not share a single UTC cutoff.
+    monkeypatch.setattr("lisa.life_plans.week_start_for",
+                        lambda session, uid: start if uid == owner else start + timedelta(weeks=1))
+    for uid in [owner, other_id]:
+        for offset in [-1, 0, 1]:
+            day = start + timedelta(weeks=offset)
+            db.add(LifeWeekPlan(user_id=uid, week_start=day,
+                               week_end=day + timedelta(days=6), items=[]))
+    db.commit()
+    assert cleanup_expired_plans(engine) == 4
+    assert cleanup_expired_plans(engine) == 0
+    db.expire_all()
+    assert db.query(LifeWeekPlan).filter_by(user_id=owner).one().week_start == start
+    other_current = db.query(LifeWeekPlan).filter_by(user_id=other_id).one()
+    assert other_current.week_start == start + timedelta(weeks=1)
+
+
+def test_chat_rollover_discards_old_plan_and_rejects_stale_web_saves(client, db, owner):
+    start = week_start_for(db, owner)
+    old = LifeWeekPlan(user_id=owner, week_start=start - timedelta(weeks=1),
+                       week_end=start - timedelta(days=1), items=[])
+    db.add(old)
+    db.commit()
+    old_id = old.id
+    response = client.put(f"/api/life-plan/{old_id}", headers=HEADERS,
+                          json={"revision": 1, "items": []})
+    assert response.status_code == 404
+    current = ensure_current_plan(db, owner)
+    db.commit()
+    db.expire_all()
+    assert current.week_start == start
+    assert db.get(LifeWeekPlan, old_id) is None
 
 
 def test_concurrent_first_generation_preserves_the_first_saved_plan(client, db, owner, monkeypatch):

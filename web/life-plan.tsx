@@ -12,15 +12,11 @@ type PlanItem = {
   source_deleted?: boolean; source_label?: string;
 };
 type Plan = { id: string; week_start: string; week_end: string; state: 'active' | 'cancelled'; revision: number; items: PlanItem[]; updated_at: string | null };
-type PlanResponse = { current: Plan | null; plans: Plan[] };
+type PlanResponse = { current: Plan | null; today: string };
 export type LifePlanHandle = { requestLeave: (action: () => void) => void };
 
 const weekdayNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
 const MAX_PLAN_ITEMS = 56;
-const timeSlots = Array.from({ length: 12 }, (_, index) => {
-  const start = index * 2;
-  return { start, label: `${String(start).padStart(2, '0')}:00–${String(start + 2).padStart(2, '0')}:00` };
-});
 const weekLabel = (plan: Plan) => `${plan.week_start} 至 ${plan.week_end}`;
 function addDays(value: string, offset: number) {
   const date = new Date(`${value}T12:00:00`);
@@ -43,7 +39,6 @@ const newItem = (date: string, time: string): PlanItem => ({
 
 export const LifePlan = forwardRef<LifePlanHandle>(function LifePlan(_, ref) {
   const [plan, setPlan] = useState<Plan | null>(null);
-  const [history, setHistory] = useState<Plan[]>([]);
   const [draft, setDraft] = useState<PlanItem[]>([]);
   const [baseline, setBaseline] = useState<PlanItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,14 +51,16 @@ export const LifePlan = forwardRef<LifePlanHandle>(function LifePlan(_, ref) {
   const dialog = useRef<HTMLDialogElement>(null);
   const detailsDialog = useRef<HTMLDialogElement>(null);
   const saveButton = useRef<HTMLButtonElement>(null);
+  const dateNavigation = useRef<HTMLElement>(null);
   const [selectedDate, setSelectedDate] = useState('');
   const dirty = !!plan && JSON.stringify(draft) !== JSON.stringify(baseline);
 
   async function load() {
     setLoading(true); setError('');
     try {
-      const result = await request<PlanResponse>('/life-plan?history=true');
-      setPlan(result.current); setHistory(result.plans); setDraft(result.current?.items ?? []); setBaseline(result.current?.items ?? []);
+      const result = await request<PlanResponse>('/life-plan');
+      setPlan(result.current); setDraft(result.current?.items ?? []); setBaseline(result.current?.items ?? []);
+      setSelectedDate(result.today);
     } catch (cause) { setError(cause instanceof Error ? cause.message : '无法读取每周提案。'); }
     finally { setLoading(false); }
   }
@@ -136,67 +133,61 @@ export const LifePlan = forwardRef<LifePlanHandle>(function LifePlan(_, ref) {
   const calendarDays = plan
     ? weekdayNames.map((weekday, offset) => ({ date: addDays(plan.week_start, offset), weekday }))
     : [];
-  const calendarItems = new Map<string, Array<{ item: PlanItem; index: number }>>();
-  draft.forEach((item, index) => {
-    const items = calendarItems.get(item.date) ?? [];
-    items.push({ item, index });
-    calendarItems.set(item.date, items);
-  });
+  // Each proposal appears once per day, with overnight continuations at the top.
+  // Unrecognised time labels stay visible after the day's timed proposals.
+  const calendarItems = new Map(calendarDays.map(({ date }) => {
+    const startTime = (item: PlanItem) => item.date !== date ? 0 : timeRange(item.time)?.start ?? Infinity;
+    return [date, draft.filter(item => item.date === date || itemOccupies(item, date, 0))
+      .sort((a, b) => startTime(a) - startTime(b))] as const;
+  }));
   const selectedIndex = expandedItem ? draft.findIndex(item => item.id === expandedItem) : -1;
   const selectedItem = selectedIndex >= 0 ? draft[selectedIndex] : null;
   const selectedDay = selectedItem && calendarDays.find(day => day.date === selectedItem.date);
   const visibleDate = calendarDays.some(day => day.date === selectedDate) ? selectedDate : plan?.week_start ?? '';
-  const dailyItems = draft.filter(item => item.date === visibleDate || timeSlots.some(slot => itemOccupies(item, visibleDate, slot.start / 2)));
-  const unscheduledItems = draft.filter(item => timeRange(item.time) === null);
-  const renderCell = (date: string, slot: number, label: string) => {
-    const entries = draft.flatMap((item, index) => itemOccupies(item, date, slot) ? [{ item, index }] : []);
-    return <div
-      className={`life-plan-slot${entries.length ? ' has-items' : ''}`}
-      role={entries.length ? undefined : 'button'}
-      tabIndex={entries.length ? -1 : busy ? -1 : 0}
-      aria-label={`${dayLabel(date, calendarDays.find(day => day.date === date)?.weekday ?? '')} ${label}${entries.length ? `，${entries.length} 项提案` : '，自由时间'}`}
-      onClick={() => { if (!busy && !entries.length) addItemAt(date, slot * 2); }}
-      onKeyDown={event => { if ((event.key === 'Enter' || event.key === ' ') && !busy && !entries.length) { event.preventDefault(); addItemAt(date, slot * 2); } }}
-    >
-      {entries.length ? entries.map(({ item }) => <button type="button" className={`life-plan-event${expandedItem === item.id ? ' is-selected' : ''}`} key={item.id} onClick={event => { event.stopPropagation(); if (!busy) setExpandedItem(expandedItem === item.id ? null : item.id); }}>
-        <span className="life-plan-event-time">{item.time || label}</span>
-        <strong>{item.title || '未命名提案'}</strong>
-      </button>) : <span className="life-plan-free-time">自由时间</span>}
-    </div>;
-  };
+  const dailyItems = calendarItems.get(visibleDate) ?? [];
+  const visibleDayIndex = calendarDays.findIndex(day => day.date === visibleDate);
+  const visibleDay = calendarDays[visibleDayIndex];
+  function moveDay(index: number, focus = false) {
+    const day = calendarDays[index];
+    if (!day) return;
+    setSelectedDate(day.date);
+    if (focus) dateNavigation.current?.querySelectorAll<HTMLButtonElement>('button')[index]?.focus();
+  }
+  const renderEvent = (item: PlanItem, date: string) => <button type="button" className="life-plan-event" disabled={busy} onClick={() => setExpandedItem(item.id)}>
+    <span className="life-plan-event-time">{item.date !== date ? '前一日延续 · ' : ''}{item.time || '未填写时间'}</span>
+    <span className="life-plan-event-content"><strong>{item.title || '未命名提案'}</strong>{item.detail && <span className="life-plan-event-detail">{item.detail}</span>}</span>
+    <span className="life-plan-event-open" aria-hidden="true">›</span>
+  </button>;
 
   return <section className="life-plan-page">
-    <div className="memory-heading"><div><p className="eyebrow">LISA 的这一周</p><h1>每周虚拟生活提案</h1><p className="page-subtitle">这里是可修改的暂定安排，不是已经发生的生活事实。</p></div><div className="life-plan-actions"><button className="secondary" disabled={busy || loading} onClick={() => requestAction(() => { void generate(!!plan); }, 'regenerate')}>{plan ? '重新生成' : '生成本周提案'}</button>{plan && <><button className="text-button" disabled={busy || dirty} onClick={() => void saveState(plan.state === 'cancelled' ? 'active' : 'cancelled')}>{plan.state === 'cancelled' ? '恢复本周' : '取消本周'}</button><button className="text-button danger" disabled={busy} onClick={() => setModal('delete')}>删除本周</button></>}</div></div>
+    <div className="life-plan-actions"><button className="secondary" disabled={busy || loading} onClick={() => requestAction(() => { void generate(!!plan); }, 'regenerate')}>{plan ? '重新生成' : '生成本周提案'}</button>{plan && <><button className="text-button" disabled={busy || dirty} onClick={() => void saveState(plan.state === 'cancelled' ? 'active' : 'cancelled')}>{plan.state === 'cancelled' ? '恢复本周' : '取消本周'}</button><button className="text-button danger" disabled={busy} onClick={() => setModal('delete')}>删除本周</button></>}</div>
     {error && <ErrorNotice message={error} />}
     {notice && <p className="memory-notice" role="status">{notice}</p>}
     {loading ? <p className="loading-note" role="status">正在读取每周提案…</p> : !plan ? <section className="empty-paper life-plan-empty"><h2>还没有本周提案</h2><p>生成后，LISA 会先放下一份有连续作息的本周安排。你可以在这里修改、确认或删除它们。</p><button className="primary" disabled={busy} onClick={() => void generate()}>生成本周提案</button></section> : <>
       <section className="life-plan-summary" aria-label="周表范围"><strong>{weekLabel(plan)}</strong><span>{plan.state === 'cancelled' ? '本周已取消' : '计划不会自动变成已发生事实'}</span></section>
+      <nav ref={dateNavigation} className="life-plan-date-nav" aria-label="选择计划日期">
+        {calendarDays.map(({ date, weekday }, index) => <button type="button" key={date} aria-label={dayLabel(date, weekday)} aria-current={date === visibleDate ? 'date' : undefined} onClick={() => moveDay(index)} onKeyDown={event => {
+          const target = event.key === 'ArrowLeft' ? Math.max(0, index - 1) : event.key === 'ArrowRight' ? Math.min(6, index + 1) : event.key === 'Home' ? 0 : event.key === 'End' ? 6 : null;
+          if (target !== null) { event.preventDefault(); moveDay(target, true); }
+        }}><span>{weekday}</span><strong>{Number(date.slice(-2))}</strong><small>{calendarItems.get(date)?.length ?? 0} 项</small></button>)}
+      </nav>
       <section className="life-plan-daily" aria-label="按日查看提案">
-        <div className="life-plan-daily-toolbar"><div className="field"><label htmlFor="life-plan-selected-day">查看日期</label><select id="life-plan-selected-day" value={visibleDate} onChange={event => setSelectedDate(event.target.value)}>{calendarDays.map(({ date, weekday }) => <option key={date} value={date}>{dayLabel(date, weekday)}</option>)}</select></div><button className="secondary" disabled={busy || draft.length >= MAX_PLAN_ITEMS} onClick={() => addItemAt(visibleDate, 12)}>添加提案</button></div>
-        {dailyItems.length ? dailyItems.map(item => <button className="life-plan-event" key={item.id} disabled={busy} onClick={() => setExpandedItem(item.id)}><span className="life-plan-event-time">{item.date !== visibleDate ? '前一日延续 · ' : ''}{item.time}</span><strong>{item.title || '未命名提案'}</strong></button>) : <p className="life-plan-day-empty">这一天暂无提案，可以留些自由时间。</p>}
+        <header className="life-plan-daily-heading"><div><h2>{visibleDay ? dayLabel(visibleDate, visibleDay.weekday) : visibleDate}</h2><p>{dailyItems.length} 项安排 · 点击卡片查看或编辑</p></div><button className="secondary" disabled={busy || draft.length >= MAX_PLAN_ITEMS} onClick={() => addItemAt(visibleDate, 12)}>＋ 添加提案</button></header>
+        {dailyItems.length ? <ol className="life-plan-event-list">{dailyItems.map(item => <li key={item.id}>{renderEvent(item, visibleDate)}</li>)}</ol> : <div className="life-plan-day-empty"><p>这一天还没有安排</p><span>可以留些自由时间，也可以添加一件想做的小事。</span></div>}
+        <div className="life-plan-day-switch"><button type="button" className="text-button" disabled={visibleDayIndex <= 0} onClick={() => moveDay(visibleDayIndex - 1)}>‹ 前一天</button><span>切换日期会保留未保存修改</span><button type="button" className="text-button" disabled={visibleDayIndex >= 6} onClick={() => moveDay(visibleDayIndex + 1)}>后一天 ›</button></div>
       </section>
-      <section className="life-plan-schedule" aria-label="每周虚拟生活提案日程">
-        <div className="life-plan-schedule-grid">
-          <div className="life-plan-schedule-head"><span className="life-plan-time-axis">时间</span>{calendarDays.map(({ date, weekday }) => <span className="life-plan-day-head" key={date}><strong>{dayLabel(date, weekday)}</strong><small>{calendarItems.get(date)?.length ?? 0} 项</small></span>)}</div>
-          <div className="life-plan-schedule-body">
-            {timeSlots.map(slot => <div className="life-plan-schedule-row" key={slot.start}><span className="life-plan-time-axis">{slot.label}</span>{calendarDays.map(({ date }) => <div key={date}>{renderCell(date, slot.start / 2, slot.label)}</div>)}</div>)}
-          </div>
-        </div>
-      </section>
-      {!!unscheduledItems.length && <section className="life-plan-unplaced" aria-label="未定位时间的提案"><p>以下时间尚未定位到日程格，仍保留在周表中：</p>{unscheduledItems.map(item => <button className="secondary" key={item.id} onClick={() => setExpandedItem(item.id)}>{item.date} · {item.time || '未填写时间'} · {item.title || '未命名提案'}</button>)}</section>}
       <dialog ref={detailsDialog} className="life-plan-popover" aria-labelledby="life-plan-popover-title" onCancel={event => { event.preventDefault(); if (!busy) setExpandedItem(null); }}>
         {selectedItem && selectedIndex >= 0 && <>
           <div className="life-plan-popover-head"><div><p className="eyebrow">{selectedDay ? dayLabel(selectedDay.date, selectedDay.weekday) : selectedItem.date}</p><h2 id="life-plan-popover-title">提案详情</h2></div><button type="button" className="text-button" disabled={busy} onClick={() => setExpandedItem(null)}>关闭</button></div>
           {error && <ErrorNotice message={error} />}
-          <div className="life-plan-fields"><div className="field"><label htmlFor={`life-plan-date-${selectedItem.id}`}>日期</label><input id={`life-plan-date-${selectedItem.id}`} type="date" data-modal-autofocus value={selectedItem.date} disabled={busy} onChange={event => change(selectedIndex, { date: event.target.value })} /></div><div className="field"><label htmlFor={`life-plan-time-${selectedItem.id}`}>时间段</label><input id={`life-plan-time-${selectedItem.id}`} value={selectedItem.time} maxLength={80} disabled={busy} onChange={event => change(selectedIndex, { time: event.target.value })} placeholder="例如：18:00 或 18:00–20:00" required /></div></div>
+          <div className="life-plan-fields"><div className="field"><label htmlFor={`life-plan-date-${selectedItem.id}`}>日期</label><input id={`life-plan-date-${selectedItem.id}`} type="date" min={plan.week_start} max={plan.week_end} data-modal-autofocus value={selectedItem.date} disabled={busy} onChange={event => change(selectedIndex, { date: event.target.value })} /></div><div className="field"><label htmlFor={`life-plan-time-${selectedItem.id}`}>时间段</label><input id={`life-plan-time-${selectedItem.id}`} value={selectedItem.time} maxLength={80} disabled={busy} onChange={event => change(selectedIndex, { time: event.target.value })} placeholder="例如：18:00 或 18:00–20:00" required /></div></div>
           <div className="field"><label htmlFor={`life-plan-title-${selectedItem.id}`}>提案</label><input id={`life-plan-title-${selectedItem.id}`} value={selectedItem.title} maxLength={160} disabled={busy} onChange={event => change(selectedIndex, { title: event.target.value })} placeholder="这一周想做的一件小事" /></div>
           <div className="field"><label htmlFor={`life-plan-detail-text-${selectedItem.id}`}>补充说明（可选）</label><textarea id={`life-plan-detail-text-${selectedItem.id}`} rows={4} maxLength={500} disabled={busy} value={selectedItem.detail} onChange={event => change(selectedIndex, { detail: event.target.value })} /></div>
           {selectedItem.source !== 'agent' && <p className="life-plan-meta">来源：{selectedItem.source_label}（仅保留结构化来源，不保存原文） · 日期到达不会自动完成。</p>}
           <div className="life-plan-popover-actions"><button type="button" className="text-button danger" disabled={busy} onClick={() => removeItem(selectedIndex)}>删除提案</button><button type="button" className="primary" disabled={busy} onClick={() => setExpandedItem(null)}>完成</button></div>
         </>}
       </dialog>
-      <div className="life-plan-footer"><div className="save-bar"><button ref={saveButton} className="primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? '正在处理…' : '保存周表'}</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : '已保存'}</p></div></div>
-      {!!history.length && <details className="life-plan-history"><summary>查看已有周表（{history.length}）</summary>{history.map(item => <div key={item.id} className="life-plan-history-row"><strong>{weekLabel(item)}</strong><span>{item.items.length} 项 · {item.state === 'cancelled' ? '已取消' : '已保存'}</span></div>)}</details>}
+      <div className={`life-plan-footer${dirty ? ' is-dirty' : ''}`}><div className="save-bar"><button ref={saveButton} className="primary" disabled={busy || !dirty} onClick={() => void save()}>{busy ? '正在处理…' : '保存周表'}</button><p role="status">{dirty ? '有未保存修改 · Ctrl+S 保存' : '已保存'}</p></div></div>
     </>}
     <dialog ref={dialog} className="leave-dialog" aria-labelledby="life-plan-dialog-title" onCancel={event => { event.preventDefault(); if (!busy) setModal(null); }}>
       {modal === 'leave' || modal === 'regenerate' ? <><h2 id="life-plan-dialog-title">有未保存的周表修改</h2><p>{modal === 'regenerate' ? '重新生成前，请先保存或放弃本次修改。' : '保存后再离开，或放弃本次修改。'}</p><div className="button-row"><button className="primary" disabled={busy} onClick={() => void resolveLeave(true)}>保存</button><button className="secondary" disabled={busy} onClick={() => void resolveLeave(false)}>放弃修改</button><button className="text-button" disabled={busy} data-modal-autofocus onClick={() => setModal(null)}>继续编辑</button></div></> : <><h2 id="life-plan-dialog-title">删除本周提案？</h2><p>删除后本周提案不再显示；已经形成的生活事实不会被删除。</p><div className="button-row"><button className="secondary danger" disabled={busy} onClick={() => void deletePlan()}>确认删除</button><button className="text-button" disabled={busy} onClick={() => setModal(null)}>取消</button></div></>}

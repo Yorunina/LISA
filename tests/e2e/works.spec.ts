@@ -80,6 +80,47 @@ test('a late library refresh cannot hide a newly uploaded cover', async ({ page 
   await expect(page.locator('.library-cover img')).toHaveAttribute('src', '/api/private-images/synthetic-picture');
 });
 
+for (const width of [1440, 1024, 390]) {
+  test(`work navigation stays anchored when material panels change height at ${width}px`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 1200 });
+    await stubStudy(page, true);
+    const tabs = page.getByRole('navigation', { name: '作品页面' });
+    await tabs.getByRole('button', { name: '创作资料', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '创作要求', exact: true })).toBeVisible();
+    const initial = (await tabs.boundingBox())!;
+    const directory = page.getByRole('complementary', { name: '资料目录' });
+    const railBefore = (await directory.boundingBox())!;
+    await directory.getByRole('button', { name: '讨论记录', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '讨论记录', exact: true })).toBeVisible();
+    // Clicking the directory on a phone may scroll; compare document coordinates.
+    const position = async () => tabs.evaluate(el => ({ x: el.getBoundingClientRect().x + scrollX, y: el.getBoundingClientRect().y + scrollY }));
+    expect(Math.abs((await position()).y - initial.y)).toBeLessThan(1);
+    expect(Math.abs((await position()).x - initial.x)).toBeLessThan(1);
+    expect(Math.abs((await tabs.boundingBox())!.width - initial.width)).toBeLessThan(1);
+    expect(Math.abs((await directory.boundingBox())!.x - railBefore.x)).toBeLessThan(1);
+    if (width > 900) expect(Math.abs((await directory.boundingBox())!.y - railBefore.y)).toBeLessThan(1);
+    await page.screenshot({ path: info.outputPath(`discussion-${width}.png`), fullPage: true });
+    await page.getByText('偏好倾向', { exact: true }).click();
+    expect(Math.abs((await position()).y - initial.y)).toBeLessThan(1);
+    await directory.getByRole('button', { name: '作品摘要', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '作品摘要', exact: true })).toBeVisible();
+    expect(Math.abs((await position()).y - initial.y)).toBeLessThan(1);
+    expect(Math.abs((await position()).x - initial.x)).toBeLessThan(1);
+    expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await directory.getByRole('button', { name: '世界书', exact: true }).click();
+    const worldTabs = page.getByRole('navigation', { name: '世界书分区' });
+    const worldBefore = (await worldTabs.boundingBox())!;
+    await worldTabs.getByRole('button', { name: /^设定条目/ }).click();
+    expect(Math.abs((await worldTabs.boundingBox())!.width - worldBefore.width)).toBeLessThan(1);
+    expect(Math.abs((await position()).y - initial.y)).toBeLessThan(1);
+    for (const name of ['书架', '创作任务', '正文']) {
+      await tabs.getByRole('button', { name, exact: true }).click();
+      expect(Math.abs((await position()).y - initial.y)).toBeLessThan(1);
+      expect(Math.abs((await tabs.boundingBox())!.width - initial.width)).toBeLessThan(1);
+    }
+  });
+}
+
 async function stubStudy(page: Page, seeded = false) {
   const state = {
     pictureReadFails: false,
@@ -303,7 +344,7 @@ test('guided requirements and discussion preserve legacy fields, examples and on
   expect(state.project!.tentative).toBe('寄信人身份未定。')
   expect(state.project!.author_prompt).toBe('保留原有作者指引。')
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-guided-discussion.png'), fullPage: true })
 })
 
@@ -344,7 +385,7 @@ test('work writing settings apply explicit versions with supplements and retain 
   await page.getByRole('button', { name: '保存写作设置' }).click()
   await expect(page.getByRole('status', { name: '当前作品风格' })).toContainText('跟随 LISA 默认 · 克制笔法 · 版本 1')
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-work-writing-style.png'), fullPage: true })
   await page.getByRole('button', { name: '讨论记录', exact: true }).click()
   state.styleLoadFails = true
@@ -394,7 +435,7 @@ test('worldbook entries preserve edits, search, links and plot state on desktop 
   await page.getByLabel('搜索设定', { exact: true }).fill('')
   await page.screenshot({ path: testInfo.outputPath('desktop-worldbook.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-worldbook.png'), fullPage: true })
   await page.getByLabel('设定正文', { exact: true }).fill('未保存的规则。')
   await page.getByRole('button', { name: '剧情状态', exact: true }).click()
@@ -467,7 +508,7 @@ test('material settings separate rules, constraints, preferences, writing and cu
   await expect(page.getByLabel('当前地点', { exact: true })).toHaveValue('车站')
   await page.screenshot({ path: testInfo.outputPath('desktop-structured-plot.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-structured-plot.png'), fullPage: true })
   await page.getByRole('button', { name: '创作要求', exact: true }).click()
   await page.getByRole('button', { name: '移除约束 1', exact: true }).click()
@@ -529,7 +570,7 @@ test('individual character dossiers manage definitions, legacy notes and protect
   const column = await page.locator('.character-workspace > .writing-column').boundingBox()
   expect(column!.width).toBe(workspace!.width)
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-character-dossiers.png'), fullPage: true })
   await page.getByText('旧版人物资料 · 待整理为独立角色', { exact: true }).click()
   await page.getByRole('button', { name: '编辑旧版人物资料', exact: true }).click()
@@ -574,7 +615,7 @@ test('character configuration preserves edits, validates knowledge and isolates 
   await expect(page.getByRole('button', { name: '许知夏 可独立参与创作' })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('desktop-characters.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-characters.png'), fullPage: true })
   await page.getByText('高级设置 · 补充指引与知识检索', { exact: true }).click()
   await page.getByLabel('角色 prompt', { exact: true }).fill('说话简短，先观察再行动。')
@@ -637,7 +678,7 @@ test('character scene and retrieval settings save together and remain isolated w
   expect(state.retrievalConfigs['work-1']).toEqual(retrievalConfig())
   await page.screenshot({ path: testInfo.outputPath('desktop-character-retrieval.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-character-retrieval.png'), fullPage: true })
   await page.getByRole('button', { name: '恢复角色检索默认值', exact: true }).click()
   await expect(page.getByLabel('按当前场景检索角色已知信息')).not.toBeChecked()
@@ -734,7 +775,7 @@ test('retrieval settings protect edits, save explicitly, restore defaults and re
   await expect(page.getByRole('alert')).toHaveCount(0)
   await page.screenshot({ path: testInfo.outputPath('desktop-retrieval.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-retrieval.png'), fullPage: true })
   await page.getByLabel('召回数量（条）').fill('9')
   await page.getByRole('button', { name: '书架', exact: true }).click()
@@ -784,7 +825,7 @@ test('task references show current authorized excerpts and unavailable states wi
   await expect(page.getByRole('dialog')).not.toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('desktop-references.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-references.png'), fullPage: true })
   await page.getByRole('button', { name: '收起参考资料' }).click()
   state.references[0] = { ...state.references[0], state: 'unavailable', title: null, text: null }
@@ -818,7 +859,7 @@ test('first novel, explicit material confirmation, scene adoption and structured
   await expect.poll(() => state.project?.agreement).toBe('现代都市小说，叙述克制。')
   await page.screenshot({ path: testInfo.outputPath('desktop-materials.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-materials.png'), fullPage: true })
   await page.setViewportSize({ width: 1440, height: 1000 })
   await page.getByRole('button', { name: '创作任务', exact: true }).click()
@@ -839,7 +880,7 @@ test('first novel, explicit material confirmation, scene adoption and structured
   expect(state.chapterSaves[0].content).toEqual(doc('她在车站等一封迟来的信。'))
   await page.screenshot({ path: testInfo.outputPath('desktop-writing.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-writing.png'), fullPage: true })
 })
 
@@ -983,7 +1024,7 @@ test('first diary keeps LISA viewpoint, requires agreement, and writes a bounded
   await expect.poll(() => state.chapterSaves.length).toBe(1)
   expect(state.requests.some(item => item.path.startsWith('/memories'))).toBe(false)
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-diary-writing.png'), fullPage: true })
 })
 
@@ -1015,7 +1056,7 @@ test('scheduled continuation stays distinct from running work and a 24-hour paus
   await expect(page.getByRole('button', { name: '发起创作', exact: true })).toBeEnabled()
   await page.setViewportSize({ width: 390, height: 844 })
   await note.scrollIntoViewIfNeeded()
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-paused-continuation.png'), fullPage: true })
   await editor.press('Control+s')
   await expect.poll(() => state.chapterSaves.length).toBe(1)
@@ -1054,7 +1095,7 @@ test('other-project plans and schedule failures never replace the viewed work or
   await expect(note).not.toContainText('24 小时')
   await page.setViewportSize({ width: 390, height: 844 })
   await note.scrollIntoViewIfNeeded()
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-creative-feedback-limit.png'), fullPage: true })
   state.schedule = schedule()
   await page.clock.fastForward(5_100)
@@ -1115,7 +1156,7 @@ test('new work, reading old work, completion and explicit resume keep distinct s
   await page.getByRole('button', { name: '书架', exact: true }).click()
   await page.screenshot({ path: testInfo.outputPath('desktop-library.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-library.png'), fullPage: true })
 })
 
@@ -1142,7 +1183,7 @@ test('switching with a running old task exposes scope and a working cancel actio
   expect(state.tasks[0].status).toBe('running')
   await page.screenshot({ path: testInfo.outputPath('desktop-handoff.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-handoff.png'), fullPage: true })
   await page.getByRole('button', { name: '取消《雨夜来信》的任务', exact: true }).click()
   await expect(page.getByRole('complementary', { name: '旧作品任务' })).toBeHidden()
@@ -1180,7 +1221,7 @@ test('version browsing protects edits, restoration retains history, and failed o
   expect(state.chapters[0].version).toBe(2)
   await page.screenshot({ path: testInfo.outputPath('desktop-versions.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-versions.png'), fullPage: true })
   state.restoreFails = true
   await page.getByRole('button', { name: '恢复此版本为当前正文' }).click()
@@ -1222,7 +1263,7 @@ test('work sharing creates copyable links, preserves edits and revokes old links
   await page.screenshot({ path: testInfo.outputPath('work-sharing-desktop.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
   await page.screenshot({ path: testInfo.outputPath('work-sharing-phone.png'), fullPage: true })
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
+  expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.getByRole('button', { name: '收回已有链接' }).click()
   await expect(page.getByRole('status').filter({ hasText: '此前的作品和章节链接已失效' })).toBeVisible()
   expect(revoked).toBe(true)
@@ -1281,7 +1322,7 @@ test('reading stays compact while library and task pages keep their own controls
   await expect(page.getByLabel('这次的创作要求')).toHaveCount(0)
   await page.getByRole('button', { name: '打开《雨夜来信》', exact: true }).click()
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await expect(page.getByRole('button', { name: '性格与风格', exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('mobile-clean-reading.png'), fullPage: true })
 })

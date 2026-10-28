@@ -216,11 +216,12 @@ export const Memory = forwardRef<MemoryHandle>(function Memory(_, ref) {
   const count = memories.length;
 
   return <main id="main" className="works-page memory-page" tabIndex={-1}>
-    <div className="memory-heading"><div><p className="eyebrow">记得，也可以重新理解</p><h1>记忆与日常</h1><p className="page-subtitle">哪些事留下，如何使用，由你决定。</p></div>{tab !== 'plan' && <button className="primary" disabled={busy} onClick={() => requestLeave(() => openEditor(null))}>添加记忆</button>}</div>
+    <div className="memory-heading"><div><p className="eyebrow">{tab === 'plan' ? 'LISA 的这一周' : '记得，也可以重新理解'}</p><h1>{tab === 'plan' ? '每周虚拟生活提案' : '记忆与日常'}</h1><p className="page-subtitle">记忆由你维护，计划不等于生活事实。</p></div></div>
     <nav className="work-tabs" aria-label="记忆页面"><button aria-current={tab === 'memory' ? 'page' : undefined} onClick={() => { if (tab !== 'memory') switchTab('memory'); }}>记忆条目</button><button aria-current={tab === 'plan' ? 'page' : undefined} onClick={() => { if (tab !== 'plan') switchTab('plan'); }}>每周提案</button></nav>
     {error && !modal && <ErrorNotice message={error} />}
     {notice && <p className="memory-notice" role="status">{notice}</p>}
     {tab === 'plan' && <LifePlan ref={lifePlan} />}
+    {tab === 'memory' && <div className="memory-toolbar"><button className="primary" disabled={busy} onClick={() => requestLeave(() => openEditor(null))}>添加记忆</button></div>}
     {tab !== 'plan' && editing && <section className="material-paper memory-editor" aria-labelledby="memory-editor-title">
       <div className="panel-toolbar"><h2 id="memory-editor-title">{selected ? '纠正与用途' : '添加记忆'}</h2><button className="text-button" disabled={busy} onClick={() => requestLeave(() => setEditing(false))}>返回列表</button></div>
       <p className="form-copy">保存后生效。LISA 不保存原始聊天；这里的记忆只来自你的明确输入，或聊天 Agent 在本轮内容中主动提升的条目。</p>

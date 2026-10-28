@@ -77,6 +77,27 @@ async function stubMemory(page: Page) {
   return state
 }
 
+for (const width of [1440, 1024, 390]) {
+  test(`memory list, map and empty search keep the same navigation width at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 1200 });
+    await stubMemory(page);
+    const tabs = page.getByRole('tablist', { name: '记忆呈现方式' });
+    const original = (await tabs.boundingBox())!;
+    await tabs.getByRole('tab', { name: '记忆地图' }).click();
+    await expect(page.getByRole('heading', { name: '记忆地图', exact: true })).toBeVisible();
+    expect(Math.abs((await tabs.boundingBox())!.width - original.width)).toBeLessThan(1);
+    expect(Math.abs((await tabs.boundingBox())!.y - original.y)).toBeLessThan(1);
+    await page.getByLabel('搜索记忆', { exact: true }).fill('没有这条记忆');
+    await page.getByRole('button', { name: '搜索', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '没有符合条件的记忆', exact: true })).toBeVisible();
+    expect(Math.abs((await tabs.boundingBox())!.width - original.width)).toBeLessThan(1);
+    await tabs.getByRole('tab', { name: '列表', exact: true }).click();
+    await expect(page.getByRole('heading', { name: '没有符合条件的记录', exact: true })).toBeVisible();
+    expect(Math.abs((await tabs.boundingBox())!.y - original.y)).toBeLessThan(1);
+    expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  });
+}
+
 test('memory map is a read-only visual view and opens the existing editor', async ({ page }) => {
   await stubMemory(page)
   await page.getByRole('tab', { name: '记忆地图' }).click()
@@ -111,7 +132,7 @@ test('memory correction and use restrictions require save, failed leave preserve
   await expect(page.getByText('已保存', { exact: true })).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('desktop-memory-editor.png'), fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-memory-editor.png'), fullPage: true })
   await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('button', { name: '查看来源' }).click()
@@ -150,7 +171,7 @@ test('memory deletion confirms scope, preserves other memories, and never offers
   await expect(confirmation.getByRole('alert')).toContainText('合成保存失败')
   expect(state.memories).toHaveLength(2)
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-memory-deletion.png'), fullPage: true })
   state.saveFails = false
   await confirmation.getByRole('button', { name: '确认删除记忆', exact: true }).click()
@@ -223,7 +244,7 @@ test('life timeline keeps dreams distinct, displays exact diary source version a
   await page.getByLabel('发生时间', { exact: true }).fill('2026-10-21T23:30')
   await page.getByLabel('作品创作', { exact: true }).uncheck()
   await page.setViewportSize({ width: 390, height: 844 })
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390)
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
   await page.screenshot({ path: testInfo.outputPath('mobile-life-editor.png'), fullPage: true })
   await page.getByRole('button', { name: '返回列表', exact: true }).click()
   await page.getByRole('dialog').getByRole('button', { name: '保存', exact: true }).click()

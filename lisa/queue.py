@@ -116,14 +116,18 @@ def create_queue(settings: Settings | None = None) -> procrastinate.App:
 
     @app.task(name="lisa.recovery_sweep", queue="lisa")
     def recovery_sweep(timestamp: int):
+        from lisa.life_plans import cleanup_expired_plans
         from lisa.recovery import recover_tasks
 
         # No static queue lock: a dead sweep cannot block its own successor.
         with _execution_engine(settings, f"lisa.recovery_sweep:{timestamp}") as engine:
             recover_tasks(engine)
+            cleanup_expired_plans(engine)
+            from lisa.chat_context import cleanup_context
             from lisa.images import cleanup_images
             with Session(engine) as db, db.begin():
                 cleanup_images(db)
+                cleanup_context(db)
 
     # Recovery is operational cleanup, independent of autonomous/model features.
     app.periodic(cron="* * * * *")(recovery_sweep)
