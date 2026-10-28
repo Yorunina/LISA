@@ -1,8 +1,10 @@
 import asyncio
 import base64
 import io
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
@@ -19,10 +21,9 @@ from test_works import owner as owner
 from test_works import project as project
 
 from lisa.chat import claim_outbound, execute_chat, finish_delivery
-from lisa.dialogue import Conversation
+from lisa.dialogue import Conversation, Dialogue
 from lisa.images import (
     ImageAction,
-    ImagePreparation,
     apply_image_action,
     cleanup_images,
     execute_image,
@@ -86,6 +87,14 @@ def commission(db, settings, user_id, proposal):
 
 async def fake_image(*_args):
     return png()
+
+
+def mock_image_chat(monkeypatch, proposal, text="本轮内部回复正文。"):
+    result = Dialogue(reply=text, opinions=[], commission=None, image_action=proposal)
+    generate = AsyncMock(return_value=result)
+    monkeypatch.setattr("lisa.chat.generate_conversation", generate)
+    monkeypatch.setattr("lisa.chat.generate_dialogue", generate)
+    return generate
 
 
 def test_private_upload_validates_and_never_calls_model(client, db, project, chapter, owner):
@@ -307,8 +316,12 @@ def test_budget_exempt_description_and_generation_do_not_consume_text_budget(
     db.expire_all()
     day = db.get(BudgetDay, datetime.now(UTC).date())
     assert day.spent_usd == 100 and day.reserved_usd == 0
+    # Other text task kinds retain their old consumption gate until B16.
+    other = Task(user_id=owner, kind="scene", status="running")
+    db.add(other)
+    db.commit()
     with pytest.raises(BudgetExceeded):
-        _reserve(image_settings, engine, source.id, owner, Decimal("0.01"))
+        _reserve(image_settings, engine, other.id, owner, Decimal("0.01"))
     call_id = _reserve(
         image_settings,
         engine,
@@ -333,21 +346,28 @@ async def test_exhausted_text_budget_still_accepts_drawing_turn(
     source_id = ingest(db, "exempt-image", qq_id="720000001", content=content)
     db.add(BudgetDay(day=datetime.now(UTC).date(), spent_usd=Decimal("999")))
     db.commit()
-    monkeypatch.setattr(
-        "lisa.images.prepare_image_action",
-        AsyncMock(
-            return_value=ImagePreparation(
-                image_action=action(project).model_copy(update={"evidence": content}),
-                clarification="",
-            )
-        ),
+    result = Dialogue(
+        reply="本轮内部回复正文。", opinions=[], commission=None,
+        image_action=action(project).model_copy(update={"evidence": content}),
     )
+    provider = AsyncMock(return_value=SimpleNamespace(
+        status="completed", output_text=json.dumps(result.model_dump(mode="json")),
+        usage=SimpleNamespace(input_tokens=100, output_tokens=20),
+    ))
+    monkeypatch.setattr("lisa.model_calls._provider_request", provider)
     configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
     await execute_chat(configured, engine, source_id)
     db.expire_all()
     assert db.get(Task, source_id).status == "completed"
     assert db.scalar(select(Task.id).where(Task.kind == "image"))
     assert not db.scalar(select(ChatMessage.id))
+    assert provider.await_count == 1
+    call = db.scalar(select(ModelCall).where(ModelCall.task_id == source_id))
+    assert call.state == "succeeded" and not call.budget_exempt
+    assert call.configuration["schema"] == "Dialogue"
+    assert call.configuration.get("purpose") != "image_description"
+    assert call.charged_usd > 0
+    assert db.get(BudgetDay, datetime.now(UTC).date()).spent_usd > Decimal("999")
 
 
 def test_reference_is_explicit_private_and_required_for_lisa(db, owner, image_settings):
@@ -616,12 +636,10 @@ async def test_explicit_drawing_can_reply_with_one_image_and_no_acknowledgement(
         }
     )
     source = ingest(db, "only-image", qq_id="720000001", content="请画一张图，只发图片不用文字")
-    monkeypatch.setattr(
-        "lisa.images.prepare_image_action",
-        AsyncMock(return_value=ImagePreparation(image_action=proposal, clarification="")),
-    )
+    generate = mock_image_chat(monkeypatch, proposal)
     configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
     await execute_chat(configured, engine, source)
+    assert generate.await_count == 1
     db.expire_all()
     assert db.get(Task, source).status == "completed"
     assert db.get(Task, source).result["outbound_count"] == 0
@@ -689,14 +707,8 @@ async def test_requested_poem_can_accompany_picture_without_an_extra_ack(
     db, engine, image_settings, owner, monkeypatch
 ):
     source = ingest(db, "poem-with-image", qq_id="720000001", content="请画一张图，配一句短诗")
-    monkeypatch.setattr(
-        "lisa.images.prepare_image_action",
-        AsyncMock(
-            return_value=ImagePreparation(
-                image_action=action(send_text_reply=False, caption="落日沉入海，晚风吻过浪。"),
-                clarification="",
-            )
-        ),
+    mock_image_chat(
+        monkeypatch, action(send_text_reply=False, caption="落日沉入海，晚风吻过浪。")
     )
     configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
     await execute_chat(configured, engine, source)
@@ -729,10 +741,7 @@ async def test_rejected_image_only_request_still_explains_the_problem(
 ):
     proposal = action(send_text_reply=False).model_copy(update={"goal": ""})
     source = ingest(db, "rejected-image", qq_id="720000001", content="请画一张图，只发图片")
-    monkeypatch.setattr(
-        "lisa.images.prepare_image_action",
-        AsyncMock(return_value=ImagePreparation(image_action=proposal, clarification="")),
-    )
+    mock_image_chat(monkeypatch, proposal, "需要先明确画面。")
 
     async def reply(*_args):
         return Conversation(reply="需要先明确画面。", image_action=proposal)

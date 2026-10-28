@@ -19,7 +19,6 @@ from lisa.character_calls import CharacterUnavailable, consult_character
 from lisa.characters import KnowledgeObservation, adopt_character_knowledge, adopt_character_names
 from lisa.context_budget import ContextBudgetExceeded, ContextItem, pack_mapping
 from lisa.life import LIFE_INSTRUCTIONS, LifeCandidate
-from lisa.memory import memory_context
 from lisa.model_calls import (
     BudgetExceeded,
     ModelBusy,
@@ -576,10 +575,8 @@ async def execute_author(
                 return
         snapshot = task.input_snapshot
         messages = _messages_for_attempt(db, user.id, snapshot)
-        # Resolve memory afresh on each attempt; retry snapshots never retain removed memories.
-        instructions = snapshot["instructions"] + memory_context(
-            db, user.id, project.id, purpose="writing", max_chars=1200
-        )
+        # retrieve_context resolves current allowed memories after the optional query.
+        instructions = snapshot["instructions"]
         memory_revision = user.memory_revision
         task.status = "running"
         task.started_at = task.started_at or datetime.now(UTC)
@@ -610,8 +607,7 @@ async def execute_author(
             from lisa.shared_retrieval import shared_references_current
             if not shared_references_current(db, recalled, user_id):
                 raise ContextChanged
-        if recalled.text:
-            instructions = snapshot["instructions"] + recalled.text
+        instructions += recalled.text
         source_messages = deepcopy(messages)
         packed_stats = None
         try:

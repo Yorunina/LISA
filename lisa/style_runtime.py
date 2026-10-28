@@ -45,7 +45,7 @@ def _text(value: object) -> str:
 
 def _rule(item: dict, *, kind: str) -> dict:
     choice_key = "write_choice" if kind == "writing" else "response_choice"
-    choice = _text(item.get(choice_key) or item.get("response_choice"))
+    choice = _text(item.get(choice_key) or item.get("response_choice") or item.get("feature"))
     return {
         "condition": _text(item.get("condition")) or "适合当前上下文时",
         "choice": choice or "先回应当前重点，再决定是否需要展开。",
@@ -75,46 +75,38 @@ def select_chat_rules(profile: dict, scene: str | None = None) -> tuple[list[dic
             ],
             *[item for item in scene_rules[scene] if isinstance(item, dict)],
         ]
-    normalized_scene = scene if scene in CHAT_SCENES else None
-    core, selected = [], []
-    for item in rules:
-        if not isinstance(item, dict):
-            continue
-        item_scene = item.get("scene")
-        target = selected if normalized_scene and item_scene == normalized_scene else core
-        if target is core and item_scene in CHAT_SCENES and normalized_scene:
-            continue
-        if len(target) < (2 if target is selected else 5):
-            target.append(item)
-    # If no core rules were explicitly marked, use the first available rules as
-    # global guidance, while still keeping the scene quota bounded.
-    if not core:
-        for item in rules:
-            if isinstance(item, dict) and item not in selected and len(core) < 5:
-                core.append(item)
+    core = [
+        item for item in rules
+        if isinstance(item, dict) and item.get("scene") not in CHAT_SCENES
+    ][:5]
+    if scene in CHAT_SCENES:
+        selected = [
+            item for item in rules
+            if isinstance(item, dict) and item.get("scene") == scene
+        ][:2]
+    elif scene is None:
+        # The generic editor preview retains scoped rules with their labels.
+        selected = [
+            item for item in rules
+            if isinstance(item, dict) and item.get("scene") in CHAT_SCENES
+        ][:2]
+    else:
+        selected = []
     return core, selected
 
 
 def select_writing_rules(profile: dict, task: str | None = None) -> list[dict]:
     """Select rules for an existing writing task boundary."""
     normalized_task = task if task in WRITING_TASKS else "novel"
-    rules = list(
-        profile.get("rules")
-        or profile.get("evidence", [])
-        or []
-    )
+    rules = list(profile.get("rules") or profile.get("evidence", []) or [])
     task_rules = profile.get("task_rules", {})
     if isinstance(task_rules, dict) and task_rules.get(normalized_task):
         rules = [item for item in task_rules[normalized_task] if isinstance(item, dict)]
-    selected = [
-        item
-        for item in rules
+    return [
+        item for item in rules
         if isinstance(item, dict)
         and item.get("task", item.get("scene")) in {normalized_task, "all", None}
     ]
-    if not selected:
-        selected = [item for item in rules if isinstance(item, dict)]
-    return selected
 
 
 def _render_rule(item: dict, *, kind: str) -> str:
@@ -124,7 +116,7 @@ def _render_rule(item: dict, *, kind: str) -> str:
     scope_text = f"[{scope}] " if scope and scope not in {"other", "all"} else ""
     return (
         f"{scope_text}条件：{rule['condition']}；{label}：{rule['choice']}；"
-        f"反例：{rule['counterexample']}；不确定：{rule['uncertainty']}"
+        f"反例：{rule['counterexample']}"
     )
 
 
@@ -142,8 +134,8 @@ def compile_runtime_style_card(
         core, selected = select_chat_rules(profile, scene)
         sections = [
             "交流风格卡：只影响表达方式，服从当前事实、权限和用户明确要求。",
-            *(_render_rule(item, kind=kind) for item in core),
             *(_render_rule(item, kind=kind) for item in selected),
+            *(_render_rule(item, kind=kind) for item in core),
         ]
         limit = CHAT_STYLE_CARD_BYTES
     else:
@@ -153,25 +145,53 @@ def compile_runtime_style_card(
             *(_render_rule(item, kind=kind) for item in selected),
         ]
         limit = WRITING_STYLE_CARD_BYTES
-    card = "\n".join(section for section in sections if section)
+    # Pack whole rules, with current-scene choices before global defaults.
+    # A clipped exception can reverse the intended behavior.
+    packed = [sections[0]]
+    for section in sections[1:]:
+        if utf8_bytes("\n".join([*packed, section])) <= limit:
+            packed.append(section)
+    card = "\n".join(packed)
     has_rules = bool(
-        profile.get("rules")
-        or profile.get("core_rules")
-        or profile.get("evidence")
-        or profile.get("task_rules")
+        profile.get("rules") or profile.get("core_rules")
+        or profile.get("evidence") or profile.get("task_rules")
     )
     if not selected and not has_rules and fallback:
         card = fallback
     return fit_utf8(card, limit)
 
 
+def runtime_style_prompt(
+    report: dict | None, kind: str, prompt: str, *, scene=None, task=None
+) -> str:
+    """Use the same card handling for saved styles, evaluations and trials."""
+    report = report or {}
+    validation = report.get("validation", {})
+    if report.get("edited_from_source") or validation.get("status") == "edited_not_evaluated":
+        limit = CHAT_STYLE_CARD_BYTES if kind == "personality" else WRITING_STYLE_CARD_BYTES
+        return fit_utf8(prompt, limit)
+    return compile_runtime_style_card(report, kind, scene=scene, task=task, fallback=prompt)
+
+
 def chat_scene(text: str) -> str:
     """Small deterministic scene hint; classification never calls another model."""
     value = _text(text)
-    if re.search(r"先去|晚点|下次|晚安|再见|拜拜", value):
+    # Delayed transport is not a conversational goodbye. Keep this a small
+    # selection hint rather than treating every occurrence of "later" as closing.
+    if re.search(
+        r"先去|下次|晚安|再见|拜拜|晚点(?:再)?(?:聊|说|谈|联系)|晚点见", value
+    ) or re.fullmatch(
+        r"晚点[吧哈啊呀～~。.!！\s]*", value
+    ):
         return "closing"
     if re.search(r"不想|别问|不要|拒绝|不方便|停一下", value):
         return "boundary"
+    # An explicit request for help remains a question even when it mentions
+    # worry or starts with a joke; ordinary third-person sharing is not a request.
+    if re.search(r"(?:请|能不能|能否)(?:你)?帮我|(?:^|[，。！？!?])\s*帮我", value) or (
+        re.search(r"(?:你能|能帮我|可以帮我)", value) and re.search(r"[?？]", value)
+    ):
+        return "question"
     if re.search(r"哈哈|笑死|好笑|玩笑|😂|🤣", value):
         return "humor"
     if re.search(r"难过|烦|累|委屈|担心|焦虑|安慰", value):

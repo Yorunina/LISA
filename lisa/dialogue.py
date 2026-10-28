@@ -35,6 +35,10 @@ class Commission(BaseModel):
 
 
 class Conversation(Reply):
+    @classmethod
+    def structured_instructions(cls, instructions: str) -> str:
+        return _chat_output_instructions(instructions, cls)
+
     # The model may choose a few semantic message parts for QQ delivery.  `reply`
     # remains the complete logical response used by memory/life evidence and by
     # older callers; an empty list keeps synthetic and legacy generators compatible.
@@ -58,6 +62,24 @@ class Dialogue(Conversation):
     commission: Commission | None
     scene_plan: ScenePlanProposal | None = None
     feedback_evidence: str = Field(default="", max_length=1000)
+
+
+def _chat_output_instructions(instructions: str, schema: type[Conversation]) -> str:
+    # Some compatible relays do not reliably enforce text.format. Keep the
+    # application's wire contract explicit even when a persona asks for prose.
+    shape = schema(reply="本轮自然回复正文", opinions=[], commission=None) if schema is Dialogue \
+        else schema(reply="本轮自然回复正文")
+    return (
+        instructions
+        + "\n\n应用输出协议（优先于前文关于输出形式的要求）："
+        "最终只返回一个符合指定Schema的JSON对象，"
+        "不加Markdown代码块、解释或JSON之外的文字。性格设定中的普通文字、直接回复、只输出正文等"
+        "要求只作用于reply和messages中的用户可见正文，不改变此JSON传输协议。"
+        "完整返回所有字段；没有相关证据时，列表用[]、可空字段用null、说明字段用空字符串，"
+        "不得省略字段或编造记忆、意见、委托与生活事件。reply填写实际完整回复，messages按语义分条，"
+        "message_intervals与messages等长。下列仅示意字段结构，正文必须根据本轮消息生成：\n"
+        + json.dumps(shape.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
+    )
 
 
 async def generate_conversation(settings, engine, task_id, user_id, instructions, messages):
@@ -182,7 +204,7 @@ def chat_project_context(project: Project, *, autonomy_enabled: bool = False) ->
 
 
 def apply_decision(db, user, project_id, current_texts: list[str], decision: Dialogue) -> str:
-    project = db.get(Project, project_id)
+    project = db.get(Project, project_id) if project_id is not None else None
     if project is None or project.user_id != user.id:
         return "作品已不可用，这次没有安排创作。"
 

@@ -11,6 +11,19 @@ from lisa.chat_corpus import target_windows
 from lisa.chat_style import chat_metrics, chat_probes, dependency_groups, synthetic_probes
 from lisa.settings import Settings
 
+WRITING_PROBES = (
+    {
+        "task": "scene",
+        "instruction": "写一个全新对白场景：两个人争论是否归还一把借来的伞，"
+        "用对话和动作表现分歧，不续写来源作品。",
+    },
+    {
+        "task": "novel",
+        "instruction": "写一段全新叙述：修钟人在清晨打开停业已久的店门，"
+        "通过观察与动作组织段落，不使用来源人物或剧情。",
+    },
+)
+
 
 @dataclass
 class AnalysisPlan:
@@ -400,8 +413,10 @@ def build_plan(
     while count > 4:
         count = (count + 3) // 4
         merge_calls += count
-    holdout_calls = 2 if holdout else 0
-    calls = len(batches) + merge_calls + 1 + (1 if development else 0) + holdout_calls
+    # Two short writing tasks plus one review; without holdout these are
+    # explicitly synthetic checks, never evidence of source-style fidelity.
+    verification_calls = len(WRITING_PROBES) + 1
+    calls = len(batches) + merge_calls + 1 + (1 if development else 0) + verification_calls
     if calls > settings.style_distillation_max_calls:
         raise HTTPException(
             422,

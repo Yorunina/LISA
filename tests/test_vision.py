@@ -182,7 +182,8 @@ async def test_image_description_promotes_task_memory_and_erases_transient_sourc
 
     async def remember(*args):
         assert memory.content in args[-2]
-        assert len(args[-1]) == 1 and args[-1][0]["role"] == "user"
+        assert len(args[-1]) == 2 and all(item["role"] == "user" for item in args[-1])
+        assert args[-1][-1]["content"].endswith("刚才的图片是什么？")
         assert all(CAPTION not in item["content"] for item in args[-1])
         assert IMAGE_URL not in args[-2] and "base64" not in args[-2]
         return "是雨夜车站。"

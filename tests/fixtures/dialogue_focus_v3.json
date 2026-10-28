@@ -1,0 +1,113 @@
+{
+  "scope": "v3: six fresh synthetic focus cases, two fresh task controls, one known failure; targeted only.",
+  "cases": [
+    {
+      "id": "F01",
+      "turns": [
+        "不想再复盘了，我去吃饭。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "用户已指出的已知失败：简单承接收尾，避免分别确认拒绝复盘与去吃饭。",
+      "critical": false,
+      "category": "known",
+      "episode": "F01"
+    },
+    {
+      "id": "N01",
+      "turns": [
+        "这事先搁着，我去倒杯水。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "收尾或转场，一声承接即可；不逐项复述两项。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N01"
+    },
+    {
+      "id": "N02",
+      "turns": [
+        "不折腾这个了，猫在门口叫我。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "自然接转场或猫，不分别确认不折腾和去照看猫，不安排回来继续。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N02"
+    },
+    {
+      "id": "N03",
+      "turns": [
+        "刚把表格交了，楼下居然有卖糖葫芦的。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "重心是新发现；可自然联想交完表格奖励一串，但不机械复述两项再认同。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N03"
+    },
+    {
+      "id": "N04",
+      "turns": [
+        "昨天被雨淋惨了，衣服已经晾干了。今天这云倒是挺好看的。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "接今天的云，已解决的背景不需复述、安慰或补防雨教程。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N04"
+    },
+    {
+      "id": "N05",
+      "turns": [
+        "不用把刚才的事再讲一遍了，我去浇花。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "不再讲旧事，简单承接新行动或收尾，不把两项各重复确认。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N05"
+    },
+    {
+      "id": "N06",
+      "turns": [
+        "刚忙完，终于能看会儿窗外了。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "轻松接眼下的闲暇，可有具体反应，不必逐项复述；不强迫只回一个词。",
+      "critical": false,
+      "category": "focus",
+      "episode": "N06"
+    },
+    {
+      "id": "U01",
+      "turns": [
+        "帮我把“你们拖太久了”改客气点，再给两个催办办法。顺便说声，我刚泡好茶。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "主要交办是改写和两个办法，都要完成；泡茶是末句背景，不可只接茶或只接最后一句。",
+      "critical": true,
+      "category": "task",
+      "episode": "U01"
+    },
+    {
+      "id": "U02",
+      "turns": [
+        "请逐项确认：周日、下午四点、南门，三项都要。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "明确逐项核对三个信息必须全给，不将省略用于此任务。",
+      "critical": true,
+      "category": "task",
+      "episode": "U02"
+    }
+  ]
+}

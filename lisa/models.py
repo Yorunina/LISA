@@ -454,6 +454,24 @@ class ChatMessage(Base):
     image_description: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
+class ChatTurn(Base):
+    """Bounded temporary conversation context, never a searchable chat archive."""
+
+    __tablename__ = "chat_turns"
+
+    task_id: Mapped[UUID] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    qq_id: Mapped[str] = mapped_column(String(32))
+    memory_revision: Mapped[int]
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    messages: Mapped[list] = mapped_column(JSONB, default=list, server_default="[]")
+
+
 class Memory(Base):
     __tablename__ = "memories"
 

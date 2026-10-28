@@ -24,7 +24,7 @@ from lisa.style_corpus import StyleKind, StyleUser, clear_expired_corpora
 from lisa.style_runtime import (
     CHAT_STYLE_CARD_BYTES,
     WRITING_STYLE_CARD_BYTES,
-    compile_runtime_style_card,
+    runtime_style_prompt,
 )
 from lisa.works import lock_account, require_project
 
@@ -59,21 +59,7 @@ def _style_prompt_limit(kind: str) -> int:
 
 
 def _runtime_prompt(report: dict, kind: str, prompt: str, *, scene=None, task=None) -> str:
-    validation = report.get("validation", {}) if isinstance(report, dict) else {}
-    edited = bool(report.get("edited_from_source")) or (
-        validation.get("status") == "edited_not_evaluated"
-    )
-    if edited:
-        from lisa.style_runtime import fit_utf8
-
-        return fit_utf8(prompt, _style_prompt_limit(kind))
-    return compile_runtime_style_card(
-        report,
-        kind,
-        scene=scene,
-        task=task,
-        fallback=prompt,
-    )
+    return runtime_style_prompt(report, kind, prompt, scene=scene, task=task)
 
 
 def require_profile(db: Session, user_id: UUID, profile_id: UUID) -> StyleProfile:

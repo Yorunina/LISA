@@ -49,6 +49,15 @@ class Context:
     text: str = ""
     memory_ids: list[UUID] = field(default_factory=list)
     references: list[dict] = field(default_factory=list)
+    public_text: str = ""
+
+    def without_public(self) -> "Context":
+        """Remove the public suffix added by retrieve_context, without a new lookup."""
+        return Context(
+            text=self.text[:-len(self.public_text)] if self.public_text else self.text,
+            memory_ids=list(self.memory_ids),
+            references=[ref for ref in self.references if ref["source_kind"] != "shared"],
+        )
 
 
 @dataclass
@@ -653,6 +662,10 @@ def _assemble_context(candidates, max_chars, limit) -> Context:
     size = len(heading)
     omitted = False
     for source, start, end, chunk_index, space in candidates:
+        if source.kind == "memory":
+            # A hit selects the current memory, not a fragment that may omit a
+            # negation, condition or basis. Keep the original ranking/candidate cap.
+            start, end = 0, len(source.text)
         section = next(name for name, a, b in source.sections if a <= start < b)
         is_entry = section.startswith("worldbook_entry:")
         key = (source.kind, source.id, section if is_entry else start)
@@ -707,7 +720,7 @@ def _assemble_context(candidates, max_chars, limit) -> Context:
         }
         remaining = max_chars - size - bool(lines)
         line = json.dumps(entry, ensure_ascii=False)
-        while len(line) > remaining and entry["text"]:
+        while source.kind != "memory" and len(line) > remaining and entry["text"]:
             entry["text"] = entry["text"][: max(0, len(entry["text"]) - len(line) + remaining)]
             line = json.dumps(entry, ensure_ascii=False)
         if not entry["text"] or len(line) > remaining:

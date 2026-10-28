@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select
@@ -8,6 +9,7 @@ from test_retrieval import library as library
 from test_retrieval import vector_settings as vector_settings
 
 from lisa.character_calls import consult_character
+from lisa.model_calls import EmbeddingUnavailable
 from lisa.models import (
     Character,
     CharacterParticipation,
@@ -50,6 +52,25 @@ def running_task(db, owner, project_id):
     db.add(item)
     db.commit()
     return item.id
+
+
+@pytest.mark.asyncio
+async def test_role_query_does_not_swallow_definitive_embedding_failure(
+    db, engine, vector_settings, library
+):
+    owner, _, project, _, _ = library
+    role_id = character(db, project)
+    task_id = running_task(db, owner, project)
+    db.commit()
+    await index_all(engine, vector_settings)
+    generate = AsyncMock()
+    with pytest.raises(EmbeddingUnavailable):
+        await consult_character(
+            vector_settings, engine, task_id, owner, project, role_id,
+            embed=AsyncMock(side_effect=EmbeddingUnavailable("settled failure")),
+            generate=generate,
+        )
+    generate.assert_not_awaited()
 
 
 @pytest.mark.asyncio

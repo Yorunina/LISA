@@ -155,11 +155,22 @@ def synthetic_probes(*, regression=False) -> list[dict]:
                     }
                 ],
             },
+            {
+                "window": ["synthetic", "humor", "4"],
+                "context": [{"speaker": "other", "text": "今天把钥匙锁屋里了，笑死。"}],
+            },
+            {
+                "window": ["synthetic", "humor", "4"],
+                "context": [{
+                    "speaker": "other",
+                    "text": "认真说，我现在很担心，能不能帮我想想怎么处理？",
+                }],
+            },
         ]
     return [
         {
-            "window": ["synthetic", "closing", "0"],
-            "context": [{"speaker": "other", "text": "我先去吃饭，晚点再说。"}],
+            "window": ["synthetic", "casual", "0"],
+            "context": [{"speaker": "other", "text": "今天下班路上看见一只猫趴在车顶。"}],
         },
         {
             "window": ["synthetic", "support", "1"],

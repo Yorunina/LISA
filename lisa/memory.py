@@ -328,6 +328,9 @@ def edit_memory(memory_id: UUID, body: MemoryBody, db: DB, user: User):
     changed = any(getattr(item, key) != value for key, value in body.model_dump().items())
     if changed:
         user.memory_revision += 1
+        from lisa.chat_context import clear_context
+
+        clear_context(db, user.id)
         _exclude_memory(db, item)
         if any(
             getattr(item, key) != getattr(body, key)
@@ -353,6 +356,9 @@ def delete_memory(memory_id: UUID, db: DB, user: User):
     item = _require_memory(db, user.id, memory_id)
     _exclude_memory(db, item)
     user.memory_revision += 1
+    from lisa.chat_context import clear_context
+
+    clear_context(db, user.id)
     item.active, item.content, item.basis = False, "", ""
     item.revision += 1
     item.updated_at = datetime.now(UTC)
@@ -412,6 +418,8 @@ def memory_context(
     purpose: Literal["chat", "writing"] = "chat",
     max_chars: int = 3000,
     references: list[UUID] | None = None,
+    *,
+    limit: int | None = None,
 ) -> str:
     allowed = Memory.allow_writing if purpose == "writing" else Memory.allow_chat
     scope = Memory.project_id.is_(None)
@@ -432,6 +440,8 @@ def memory_context(
     lines = []
     size = len(heading)
     for item in items:
+        if limit is not None and len(lines) >= limit:
+            break
         entry = {
             "type": item.kind,
             "scope": "project" if item.project_id else "relationship",

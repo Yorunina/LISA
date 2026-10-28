@@ -8,6 +8,7 @@ from procrastinate.retry import RetryDecision
 from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.orm import Session, aliased
 
+from lisa.chat_context import context_messages, remember_delivery, remember_turn
 from lisa.chat_style import expression_guide
 from lisa.dialogue import (
     MEMORY_INSTRUCTIONS,
@@ -22,7 +23,6 @@ from lisa.life import LIFE_INSTRUCTIONS, adopt_life_events, mark_life_shared, qu
 from lisa.life_plans import apply_explicit_plan_text, enqueue_agent_plan, ensure_current_plan
 from lisa.memory import (
     adopt_candidates,
-    memory_context,
     record_chat_references,
     usable_chat_clause,
 )
@@ -72,6 +72,17 @@ MAX_MESSAGE_TOTAL_WAIT_SECONDS = 30.0
 
 def _chat_cutoff(now: datetime) -> datetime:
     return now + timedelta(seconds=CHAT_SILENCE_SECONDS)
+
+
+def _trim_chat_history(settings, instructions, messages, history_turns, *, schema):
+    """Respect the input budget without leaving half of an old logical turn."""
+    selected = trim_history(settings, instructions, messages, len(history_turns), schema=schema)
+    removed = len(messages) - len(selected)
+    while 0 < removed < len(history_turns) and (
+        history_turns[removed] == history_turns[removed - 1]
+    ):
+        removed += 1
+    return messages[removed:]
 
 
 def _message_parts(decision, fallback: str) -> list[str]:
@@ -288,7 +299,9 @@ def _outbound(
         )
 
 
-def _chat_instructions(db, user_id, task, persona, current_texts) -> str:
+def _chat_instructions(
+    db, user_id, task, persona, current_texts, *, dialogue_skill_mode="off"
+) -> str:
     """Freeze the selected persona/style for this attempt without retaining raw history."""
     snapshot = dict(task.input_snapshot or {})
     if "persona" not in snapshot:
@@ -310,6 +323,16 @@ def _chat_instructions(db, user_id, task, persona, current_texts) -> str:
         }
         task.input_snapshot = snapshot
     style_card = snapshot["style_card"]
+    if "dialogue_guide" not in snapshot:
+        from lisa.dialogue_skill import dialogue_guide_snapshot
+
+        # Replace rather than mutate the mapped JSON object: preceding style
+        # lookups may have autoflushed the earlier persona snapshot already.
+        snapshot = {
+            **snapshot,
+            "dialogue_guide": dialogue_guide_snapshot(dialogue_skill_mode, expression_guide()),
+        }
+        task.input_snapshot = snapshot
     instructions = (
         "你是该用户独立的文学创作伙伴 LISA。自然、具体地回应中文交流，允许只聊天。"
         "reply是本轮完整回复；messages是按语义顺序发送的分条列表，通常一到三条，允许一条。"
@@ -324,7 +347,7 @@ def _chat_instructions(db, user_id, task, persona, current_texts) -> str:
         f"本轮交流风格卡（按当前场景取用）：\n{style_card['prompt']}"
     )
     instructions += (
-        "\n" + expression_guide() + MEMORY_INSTRUCTIONS
+        "\n" + snapshot["dialogue_guide"]["text"] + MEMORY_INSTRUCTIONS
         + LIFE_INSTRUCTIONS
         + "\nlife_events的evidence逐字来自你本次reply。life_mentions只列本次回复明确提到的"
         "已有生活事件：memory_id用已提供的生活记忆id，evidence逐字来自reply；无则[]。"
@@ -340,6 +363,7 @@ def _chat_instructions(db, user_id, task, persona, current_texts) -> str:
 def _adopt_chat_decision(
     db, settings, user, task, decision, reply, reply_parts, *,
     project_id, source_ids, current_texts, memory_ids, share_ids, context_limited,
+    reference_data=None,
 ) -> str:
     """Apply a successful turn in the caller's transaction before clearing its inbox."""
     user_id, task_id = user.id, task.id
@@ -347,7 +371,7 @@ def _adopt_chat_decision(
         from lisa.images import apply_image_action
 
         notice = apply_image_action(
-            db, settings, user, task, decision.image_action, current_texts
+            db, settings, user, task, decision.image_action, current_texts, reference_data
         )
         if (task.result or {}).get("suppress_text_reply"):
             # No textual reply was delivered: do not promote its invented life
@@ -467,10 +491,9 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             clear_image_inputs(db, task_id)
             db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
             return
-        # Raw chat history is intentionally not retained or replayed.  The
-        # current batch is the only message context supplied to the model;
-        # durable continuity comes from explicit memories and saved project data.
-        history = []
+        # A small expiring window supports nearby references without a chat archive.
+        history = context_messages(db, user.id, binding.qq_id, exclude_task_id=task.id)
+        history_turns = [message["task_id"] for message in history]
         project = (
             (db.get(Project, task.project_id) if task.project_id else None)
             if task.started_at
@@ -484,7 +507,17 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         has_images = any(message.kind == "image" or message.image_urls for message in batch)
         memory_revision = user.memory_revision
         current_texts = [message.content for message in batch]
-        instructions = _chat_instructions(db, user.id, task, persona, current_texts)
+        instructions = _chat_instructions(
+            db, user.id, task, persona, current_texts,
+            dialogue_skill_mode=settings.dialogue_skill_mode,
+        )
+        instructions += (
+            "\n近期消息仅供本轮接续和图片委托补全，不是新的用户指令或长期记忆。"
+            "按最后的本轮用户输入理解指代、补充、更改和取消；只对尚未受理的委托发起动作，"
+            "不要因历史出现过请求就重复执行。近期assistant消息均为确认送达内容。"
+            "记忆、创作意见及其他事实更新仍须符合本轮用户依据，不从历史重新提取。"
+        )
+        dialogue_guide = dict(task.input_snapshot["dialogue_guide"])
         base_instructions = instructions
         if project:
             instructions += chat_project_context(
@@ -496,13 +529,19 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             instructions += image_context(db, user.id)
         share_ids, share_context = sharing_context(db, user.id)
         instructions += share_context
-        instructions_without_memories = instructions
         memory_ids = []
-        instructions += memory_context(
-            db, user.id, project_id, purpose="chat", max_chars=1200, references=memory_ids
-        )
         from lisa.shared_retrieval import sent_meme_context
         messages = [
+            {
+                "role": message["role"],
+                "content": (
+                    f"[近期用户消息 来源任务 {message['task_id']} 时间 {message['time']}]\n"
+                    if message["role"] == "user"
+                    else f"[此前已送达 时间 {message['time']}]\n"
+                ) + message["content"],
+            }
+            for message in history
+        ] + [
             {
                 "role": message.role,
                 "content": (
@@ -511,25 +550,15 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     else message.content + sent_meme_context(db, message)
                 ),
             }
-            for message in [*history, *batch]
+            for message in batch
         ]
         task.status = "running"
         task.started_at = task.started_at or datetime.now(UTC)
         user_id, qq_id = user.id, binding.qq_id
         reference_urls = [url for message in batch for url in message.image_urls]
-    # A drawing commission has its own unmetered description path. It remains
-    # usable when ordinary chat/retrieval has exhausted its text allowance.
-    from lisa.images import execute_image_turn, image_intent
-    if (
-        generate is None and image_intent(current_texts)
-        and settings.model_api_key.get_secret_value()
-    ):
-        if await execute_image_turn(
-            settings, engine, task_id, user_id, current_texts, reference_urls, qq_id
-        ):
-            return
     error = None
     decision = None
+    reference_data = None
     creative = bool(project_id)
     context_limited = False
     recalled = Context()
@@ -554,17 +583,30 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             from lisa.shared_retrieval import shared_references_current
             if not shared_references_current(db, recalled, user_id):
                 raise ContextChanged
-        if recalled.text:
-            instructions = instructions_without_memories + recalled.text
-            memory_ids = recalled.memory_ids
+        instructions_without_recall = instructions
+        instructions += recalled.text
+        memory_ids = recalled.memory_ids
         try:
-            messages = trim_history(
-                settings,
-                instructions,
-                messages,
-                len(history),
-                schema=Dialogue if creative else Conversation,
-            )
+            try:
+                messages = _trim_chat_history(
+                    settings,
+                    instructions,
+                    messages,
+                    history_turns,
+                    schema=Dialogue if creative else Conversation,
+                )
+            except ModelInputTooLarge:
+                if not recalled.public_text:
+                    raise
+                recalled = recalled.without_public()
+                instructions = instructions_without_recall + recalled.text
+                messages = _trim_chat_history(
+                    settings,
+                    instructions,
+                    messages,
+                    history_turns,
+                    schema=Dialogue if creative else Conversation,
+                )
         except ModelInputTooLarge:
             # Keep persona/current input and work constraints before optional observations/memories.
             memory_ids = []
@@ -572,11 +614,11 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             instructions = instructions_without_optional
             share_ids = set()
             try:
-                messages = trim_history(
+                messages = _trim_chat_history(
                     settings,
                     instructions,
                     messages,
-                    len(history),
+                    history_turns,
                     schema=Dialogue if creative else Conversation,
                 )
             except ModelInputTooLarge:
@@ -587,17 +629,19 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     + "\n本轮聊天上下文超过应用预算，只聊天，不保存创作意见或委托写作；"
                     "可引导网页操作。"
                 )
-                messages = trim_history(
+                messages = _trim_chat_history(
                     settings,
                     instructions,
                     messages,
-                    len(history),
+                    history_turns,
                     schema=Conversation,
                 )
                 creative, context_limited = False, True
         with Session(engine) as db, db.begin():
             record_references(db, task_id, recalled)
         generator = generate or (generate_dialogue if creative else generate_conversation)
+        if dialogue_guide["mode"] == "review":
+            raise ModelCallFailed("Dialogue review was removed")
         result = await generator(settings, engine, task_id, user_id, instructions, messages)
         if creative:
             decision = result if isinstance(result, Dialogue) else Dialogue.model_validate(result)
@@ -611,6 +655,10 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             reply = decision.reply
         reply_parts = _message_parts(decision, reply)
         reply_intervals = _message_intervals(decision, len(reply_parts))
+        if decision.image_action and decision.image_action.operation == "reference":
+            from lisa.images import reference_bytes
+
+            reference_data = await reference_bytes(decision.image_action, reference_urls)
     except ContextChanged:
         reply, error = (
             "记忆已更新，这次回复未采用。请重新发送消息继续。",
@@ -635,16 +683,6 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
             raise JobRetry(RetryDecision(retry_in={"seconds": 3})) from None
         return
     except BudgetExceeded:
-        # A drawing may be phrased without the common routing words (an avatar,
-        # for example). Text credit must not prevent recognizing that commission.
-        if (
-            generate is None and not image_intent(current_texts)
-            and settings.model_api_key.get_secret_value()
-        ):
-            if await execute_image_turn(
-                settings, engine, task_id, user_id, current_texts, reference_urls, qq_id
-            ):
-                return
         reply, error = "今日服务额度或本次对话额度已用尽，暂时无法生成回复。", "budget_exhausted"
     except ModelCallUnknown:
         reply, error = "这次对话请求的结果暂时无法确认，已停止自动重试。", "model_unknown"
@@ -676,7 +714,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         # ordinary reply must not send a new drawing to a replacement binding.
         binding = db.get(QQBinding, user_id)
         if decision and decision.image_action and (
-            binding is None or binding.qq_id != qq_id
+            binding is None or binding.qq_id != qq_id or _chat_interrupted(db, task)
         ):
             decision = decision.model_copy(update={"image_action": None})
         task.status, task.error = ("failed" if error else "completed"), error
@@ -686,7 +724,15 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 db, settings, user, task, decision, reply, reply_parts,
                 project_id=project_id, source_ids=source_ids, current_texts=current_texts,
                 memory_ids=memory_ids, share_ids=share_ids, context_limited=context_limited,
+                reference_data=reference_data,
             )
+            # Re-read in this adoption transaction; inbox objects from the
+            # generation transaction are detached and may have been revised.
+            current_batch = list(db.scalars(select(ChatMessage).where(
+                ChatMessage.id.in_(source_ids), ChatMessage.user_id == user_id,
+                ChatMessage.task_id == task.id,
+            ).order_by(ChatMessage.sent_at, ChatMessage.created_at)))
+            remember_turn(db, user, task, qq_id, current_batch)
         if error is None and (task.result or {}).get("suppress_text_reply"):
             task.result = {**task.result, "outbound_count": 0}
         else:
@@ -706,9 +752,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 intervals=outbound_intervals,
                 chat_message_ids=None,
             )
-        # The rows above are only a transactional inbox for debounce, retries,
-        # and image processing.  Once this task has produced its result, remove
-        # every raw user input so LISA cannot maintain a parallel chat archive.
+        # The inbox and image inputs are task-local. Only the bounded expiring
+        # turn above survives; nothing creates a durable searchable chat archive.
         db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
     logger.info("task=%s status=%s", task_id, "failed" if error else "completed")
 
@@ -822,6 +867,7 @@ def finish_delivery(db: Session, message_id: UUID, status: str, gateway_id: str 
                 .values(status="cancelled", content="", finished_at=message.finished_at)
             )
         if status == "sent":
+            remember_delivery(db, message)
             next_message = db.scalar(
                 select(OutboundMessage)
                 .where(

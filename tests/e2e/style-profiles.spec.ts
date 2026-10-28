@@ -129,7 +129,7 @@ test('feedback revises a candidate without applying and preserves version proven
   expect(state.applications.personality).toBeNull();
   await page.screenshot({ path: info.outputPath('desktop-chat-refinement-candidate.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('mobile-chat-refinement-candidate.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByRole('button', { name: '载入修订候选', exact: true }).click();
@@ -140,7 +140,7 @@ test('feedback revises a candidate without applying and preserves version proven
   expect(state.applications.personality).toBeNull();
   await page.screenshot({ path: info.outputPath('desktop-chat-refinement.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('mobile-chat-refinement.png'), fullPage: true });
 });
 
@@ -160,6 +160,8 @@ test('QQ selection, isolated trial, save and apply are separate and preserve exp
   await page.getByRole('button', { name: '开始试聊', exact: true }).click();
   await expect(page.getByLabel('隔离试用结果')).toContainText('这是一段隔离合成试用文字');
   expect(state.trials).toHaveLength(1); expect(state.trials[0].prompt).toContain('合成风格');
+  expect(state.trials[0].source_task_id).toBe('task-1');
+  expect(state.trials[0].report).toBeUndefined();
   expect(state.mutations.some(path => /onebot|chat|memory|chapters|autonomy/.test(path))).toBe(false);
   await page.getByLabel('方案名称', { exact: true }).press('Control+s');
   await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 1');
@@ -217,6 +219,26 @@ test('saved bookmark keeps the upload region stable and releases an unstarted co
   expect(Math.abs((after.uploadTop ?? 0) - (before.uploadTop ?? 0))).toBeLessThanOrEqual(1);
   expect(Math.abs((after.editorTop ?? 0) - (before.editorTop ?? 0))).toBeLessThanOrEqual(1);
   expect(state.cleaned).toEqual(['corpus-1']);
+});
+
+test('isolated trial references the saved version and keeps subsequent editor text', async ({ page }) => {
+  const state = await study(page);
+  await page.getByLabel('方案名称', { exact: true }).fill('试用版本');
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('保存的合成性格。');
+  await page.getByRole('button', { name: '保存方案', exact: true }).click();
+  await expect(page.getByRole('status', { name: '风格保存状态' })).toContainText('已保存版本 1');
+  await page.getByLabel('试聊情境与消息').fill('今天路上看见一只猫。');
+  await page.getByRole('button', { name: '开始试聊', exact: true }).click();
+  await expect(page.getByLabel('隔离试用结果')).toContainText('这是一段隔离合成试用文字');
+  expect(state.trials[0].version_id).toBe('profile-1-v1');
+  expect(state.trials[0].report).toBeUndefined();
+  await page.getByLabel('交流性格 prompt', { exact: true }).fill('这段编辑文本必须保留。');
+  await page.getByRole('button', { name: '开始试聊', exact: true }).click();
+  await expect(page.getByLabel('隔离试用结果')).toContainText('这是一段隔离合成试用文字');
+  expect(state.trials[1].version_id).toBe('profile-1-v1');
+  expect(state.trials[1].prompt).toBe('这段编辑文本必须保留。');
+  expect(state.profiles[0].versions).toHaveLength(1);
+  expect(state.applications.personality).toBeNull();
 });
 
 test('multi-file writing range, LISA default and a work override remain independent', async ({ page }, info) => {
@@ -472,7 +494,7 @@ test('real isolated API parses QQ bytes, cancels and cleans, then persists expli
   await page.screenshot({ path: info.outputPath('desktop-v5-upload.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(recommendation).toBeVisible();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(await page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath('mobile-v5-upload.png'), fullPage: true });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.getByLabel(/^小雨\(700000095\) · 2 条消息/).check();
@@ -572,7 +594,7 @@ test('persistent style navigation and the persona editor shortcut both protect u
   await expect(page.getByRole('button', { name: '交流性格', exact: true })).toHaveAttribute('aria-pressed', 'true');
   await page.screenshot({ path: info.outputPath('desktop-style-navigation.png'), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.locator('body')).toHaveJSProperty('scrollWidth', 390);
+  await expect.poll(() => page.evaluate(() => document.body.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   await expect(entry).toBeVisible();
   await page.screenshot({ path: info.outputPath('mobile-style-navigation.png'), fullPage: true });
 });

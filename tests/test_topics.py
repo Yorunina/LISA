@@ -221,7 +221,7 @@ async def test_optional_memories_do_not_crowd_out_current_chat_input(
     task_id = ingest(db, "observation-budget", content="你好，今天聊点轻松的。")
     settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
     monkeypatch.setattr(
-        "lisa.chat.memory_context", lambda *args, **kwargs: "过长的可选记忆" * 3000
+        "lisa.recall.memory_context", lambda *args, **kwargs: "过长的可选记忆" * 3000
     )
     generate = AsyncMock(return_value="好，我们轻松聊聊。")
     await execute_chat(settings, engine, task_id, generate=generate)

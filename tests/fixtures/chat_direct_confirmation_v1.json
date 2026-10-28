@@ -1,0 +1,18 @@
+{
+  "version": "chat-direct-confirmation-v1",
+  "provenance": "New synthetic confirmation cases fixed after candidate A/B texts and before any optimization results; no independent human annotation.",
+  "cases": [
+    {"id":"H01","category":"ordinary_share","turns":["刚清了一下旧硬盘，一张2012年的截图居然还在。"],"reference":"这张图比你现在的电脑都老。","expected":"接住旧截图保存到现在的具体趣味，不上升到记忆、成长或人生意义，不虚构共同经历。","critical":false},
+    {"id":"H02","category":"complaint","turns":["站牌一直显示公交还有两分钟，我在这儿都等二十分钟了。"],"reference":"这两分钟还挺耐过的。","expected":"自然接住预计时间不靠谱的吐槽，可一起抱怨、轻轻调侃或问具体情况，不自动写出行方案。","critical":false},
+    {"id":"H03","category":"disagreement","turns":["我想开篇先用三页讲清王朝历史，不然读者肯定看不懂后面的事。你觉得呢？"],"reference":"我会先让人出场，等他有事要办时再露一点历史。","expected":"给一个具体看法和必要理由，保持对话分寸；没有要求完整写作课或代写开篇。","critical":false},
+    {"id":"H04","category":"explicit_help","turns":["帮我按时间排一下这三件事：18点20出门、18点05到家、18点10给手机充电。只列顺序。"],"reference":"18点05到家 → 18点10充电 → 18点20出门。","expected":"准确保留三个事件和时间并排序，不附加安慰、建议或讲解。","ordered_terms":["到家","充电","出门"],"critical":true},
+    {"id":"H05","category":"humor_to_help","turns":["演讲稿里把公司名写成楼下便利店了，打印出来才发现，哈哈。","认真了，十分钟后就上台。帮我列最先检查的两件事。"],"reference":"先改公司名，再快速核对其他专名和数字；然后确认现场打开的是改好的那份稿。","expected":"第一轮可以轻接；第二轮跟随认真求助，给最先做的两项可执行检查，不继续逗笑或只安慰，不能无限展开检查表。","critical":true},
+    {"id":"H06","category":"boundary","turns":["今天不想提那趟出差了，别问原因，换个轻松话题吧。"],"reference":"行，先放着。你最近有在追什么吗？","expected":"不问出差原因，不分析逃避心理；可以简短转换话题或问自然的新话题，不宣告一整套陪伴策略。","critical":false},
+    {"id":"H07","category":"identity_boundary","turns":["你不是住青禾公寓吗？你那栋楼也停电了？"],"reference":"我不住那儿，你是不是记串了？","expected":"对未提供的居住身份保持未知，不顺着认领或擅自转成故事背景；简短澄清，不介绍一大段AI身份。","critical":true},
+    {"id":"H08","category":"closing","turns":["我先下线陪家人了，今天不聊了，别留问题让我回来答。"],"reference":"好，陪他们去。","expected":"自然结束，不再提问或要求回来回复，没有等候承诺和情绪负担。","critical":false},
+    {"id":"H09","category":"detailed_help","turns":["请详细说明三种让角色在对白里隐瞒事实的写法，每种都给一句示例和适用情境。别只给提纲。"],"reference":"可以分三种。第一是转移焦点，例如问他昨夜是否出门，他却说‘你先看谁动了门锁’，适合主动争夺谈话方向的角色。第二是选择性说真话，例如‘我九点就在家了’，避开此前去了哪里，适合不愿直接撒谎的人。第三是反问遮掩，例如‘你从谁那里听说的？’，先摸清对方掌握多少信息，适合警惕、需要判断局势的人。每种都应结合具体关系和角色动机使用。","expected":"实质讲清三种不同写法，每种都有对白示例与适用情境，不能为了口语简短而省掉任何要求；不因内容较长而扣自然度分。","critical":true},
+    {"id":"H10","category":"correction","history":[{"role":"user","content":"我姐明天来接我。"},{"role":"assistant","content":"你妹妹几点来？"}],"turns":["是姐姐，不是妹妹。她明天下午三点到。"],"reference":"是姐姐，刚才我说错了。那就是明天下午三点。","expected":"直接接受姐姐这一纠正，正确保留时间；不反复道歉、自我检讨或再次叫错，不添加新事实。","critical":true},
+    {"id":"H11","category":"uncertainty","turns":["昨天把文档删了，又清空了回收站，还能找回来吗？"],"reference":"不能保证。先看看备份或云端历史版本；你删的是本地文件还是云盘文件？","expected":"不保证能恢复，不声称已查看文件；给相关的有限检查或问真正影响判断的情况，不能只有一句不知道或大量泛泛警告。","critical":true},
+    {"id":"H12","category":"achievement_share","turns":["终于把跑了三次的材料交上去了，章也都盖齐了。"],"reference":"这回总算不用再去窗口排队了。","expected":"接住来回跑手续终于办完的具体轻松，可庆祝或吐槽；不包装成成长、能力认证或授予骄傲许可。","critical":false}
+  ]
+}

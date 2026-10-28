@@ -14,7 +14,8 @@ from test_works import chapter as chapter
 from test_works import owner as owner
 from test_works import project as project
 
-from lisa.author import _character_choice_context, execute_author
+from lisa.author import WritingResult, _character_choice_context, execute_author
+from lisa.character_calls import CharacterSuggestion
 from lisa.characters import DEFAULT_CHARACTER_PROMPT, CharacterDefinition
 from lisa.model_calls import BudgetExceeded, ModelCallUnknown
 from lisa.models import (
@@ -420,8 +421,8 @@ async def test_real_stage_wrappers_charge_same_task_without_nested_tasks(
     task_id = pending_task(db, owner, project)
     results = [
         {"character_id": str(character_id), "result": None},
-        {"suggestion": "我先等下一班车。"},
-        RESULT,
+        CharacterSuggestion(suggestion="我先等下一班车。").model_dump(mode="json"),
+        WritingResult.model_validate(RESULT).model_dump(mode="json"),
     ]
     sdk.create.side_effect = [
         SimpleNamespace(

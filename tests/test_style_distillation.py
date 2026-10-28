@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -21,6 +22,8 @@ from lisa.models import (
     ModelCall,
     OutboundMessage,
     StyleCorpus,
+    StyleProfile,
+    StyleProfileVersion,
     Task,
 )
 from lisa.style_corpus import parse_chat, parse_writing
@@ -35,6 +38,7 @@ from lisa.style_distillation import (
     cleanup_trials,
     execute_style,
 )
+from lisa.style_runtime import chat_scene, compile_runtime_style_card
 
 
 def group_source(db, owner, corpus_id):
@@ -282,11 +286,14 @@ async def test_success_cleans_sources_without_application_or_context_side_effect
     await execute_style(settings, engine, task_id, generate=fake_generator(calls))
     db.expire_all()
     task, corpus = db.get(Task, task_id), db.get(StyleCorpus, corpus_id)
-    assert task.status == "completed" and len(calls) == 2
+    assert task.status == "completed" and len(calls) == 5
     assert corpus.state == "cleaned" and corpus.payload == {}
     assert SOURCE not in json.dumps(task.result, ensure_ascii=False)
     assert task.input_snapshot is None and task.adopted_at is None
     assert task.result["report"]["validation"]["holdout"]["status"] == "not_executed"
+    assert task.result["report"]["validation"]["synthetic_regression"]["grouping"] == (
+        "synthetic_only"
+    )
     assert task.result["report"]["source_state"] == "cleaned"
     db.refresh(user)
     assert (user.last_active_at, user.memory_revision) == before
@@ -330,11 +337,17 @@ async def test_holdout_generation_cannot_see_answers(settings, engine, db, style
     db.expire_all()
     task = db.get(Task, task_id)
     assert task.status == "completed"
-    assert len(calls) == 5
+    assert len(calls) == 6
     synthesis = next(content for schema, content, _ in calls if schema is StyleCandidate)
     generator = next(content for schema, content, _ in calls if schema is TrialOutput)
     assert "绝密留出" not in json.dumps(synthesis, ensure_ascii=False)
     assert "绝密留出" not in json.dumps(generator, ensure_ascii=False)
+    generated = [content for schema, content, _ in calls if schema is TrialOutput]
+    assert [item["probe"]["task"] for item in generated] == ["scene", "novel"]
+    for item in generated:
+        assert item["candidate"] == compile_runtime_style_card(
+            task.result["report"], "writing", task=item["probe"]["task"]
+        )
     assert task.result["report"]["validation"]["holdout"]["status"] == (
         "generated_and_model_reviewed"
     )
@@ -405,6 +418,17 @@ async def test_personality_compares_revises_and_checks_frozen_candidate(
     assert validation["synthetic_regression"]["status"] == "generated_and_model_reviewed"
     assert len([schema for schema, _, _ in calls if schema is StyleCandidate]) == 2
     assert task.result["report"]["evidence"][0]["support_messages"] == 1
+    final = [content for schema, content, _ in calls if schema is TrialOutput
+             and content.get("evaluation_stage") == "合成回归"]
+    for content in final[len(final) // 2:]:
+        scene = chat_scene("\n".join(row["text"] for row in content["context"]))
+        expected = compile_runtime_style_card(task.result["report"], "personality", scene=scene)
+        assert content["candidate"] == expected
+        assert "叙述以具体动作推进" not in expected
+    expected_hash = hashlib.sha256(final[-1]["candidate"].encode("utf-8")).hexdigest()
+    assert validation["synthetic_regression"]["runtime_cards"]["candidate"][-1]["sha256"] == (
+        expected_hash
+    )
     assert db.get(StyleCorpus, corpus_id).payload == {}
 
 
@@ -433,6 +457,13 @@ async def test_correction_is_isolated_saveable_and_does_not_apply(
     task = db.get(Task, task_id)
     assert task.status == "completed", task.error
     assert len(calls) == 6 and task.request == {"kind": "personality", "mode": "refine"}
+    generated = [content for schema, content, _ in calls if schema is TrialOutput]
+    assert len(generated) == 4
+    for content in (generated[1], generated[3]):
+        assert content["context"] == [
+            {"speaker": "other", "text": "我先去吃饭，晚点再说。"}
+        ]
+        assert chat_scene(content["context"][0]["text"]) == "closing"
     assert "synthetic scene" not in json.dumps(task.result)
     result = task.result
     response = client.post(
@@ -656,7 +687,7 @@ def test_task_api_works_before_persona_initialization_and_checks_ownership(
     response = client.post("/api/style/tasks", json={"corpus_id": corpus["id"]}, headers=HEADERS)
     assert response.status_code == 201, response.text
     task = response.json()
-    assert task["planned_calls"] == 2
+    assert task["planned_calls"] == 5
     assert task["cleanup_state"] == "processing"
     assert "text" not in db.get(Task, UUID(task["id"])).request
     assert client.get("/api/style/tasks").json()[0]["id"] == task["id"]
@@ -672,6 +703,78 @@ def test_task_api_works_before_persona_initialization_and_checks_ownership(
         "status"
     ] == ("cancelled")
     assert db.get(StyleCorpus, UUID(corpus["id"])).payload == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reference", ["source_task_id", "version_id"])
+async def test_trial_uses_server_scoped_card_but_keeps_editor_changes(
+    settings, engine, client, db, style_owner, reference
+):
+    preview = "未选择情境的预览卡。"
+    report = {"profile": {"rules": [
+        {"scene": "question", "condition": "明确求助", "response_choice": "说明具体步骤"},
+        {"scene": "closing", "condition": "告别", "response_choice": "结束交流"},
+    ]}}
+    if reference == "source_task_id":
+        source = Task(
+            user_id=style_owner, kind="style_distill", source="web", status="completed",
+            request={"kind": "personality"},
+            result={"kind": "personality", "prompt": preview, "report": report},
+        )
+        db.add(source)
+        db.flush()
+        source_id = source.id
+    else:
+        profile = StyleProfile(user_id=style_owner, kind="personality", name="合成性格")
+        db.add(profile)
+        db.flush()
+        version = StyleProfileVersion(
+            profile_id=profile.id, version=1, prompt=preview, report=report
+        )
+        db.add(version)
+        db.flush()
+        source_id = version.id
+    db.commit()
+    for edited in (False, True):
+        prompt = "只用这段用户编辑的文字。" if edited else preview
+        response = client.post(
+            "/api/style/trials",
+            json={"kind": "personality", "prompt": prompt, "input": "能不能帮我？",
+                  reference: str(source_id)},
+            headers=HEADERS,
+        )
+        assert response.status_code == 201, response.text
+        trial = db.get(Task, UUID(response.json()["id"]))
+        expected = prompt if edited else compile_runtime_style_card(
+            report, "personality", scene="question"
+        )
+        assert trial.request["prompt"] == expected and "report" not in trial.request
+        seen = []
+
+        async def generate(*args, **kwargs):
+            seen.append(args[-2])
+            return TrialOutput(text="合成试用回复。")
+
+        await execute_style(settings, engine, trial.id, generate=generate)
+        db.expire_all()
+        assert db.get(Task, trial.id).request == {"kind": "personality"}
+        assert expected in seen[0]
+    # Other accounts' candidates/versions cannot be used as report inputs.
+    outsider = Account(username="private_style_reference", password_hash="synthetic")
+    db.add(outsider)
+    db.flush()
+    if reference == "source_task_id":
+        source.user_id = outsider.id
+    else:
+        profile.user_id = outsider.id
+    db.commit()
+    rejected = client.post(
+        "/api/style/trials",
+        json={"kind": "personality", "prompt": preview, "input": "能不能帮我？",
+              reference: str(source_id)},
+        headers=HEADERS,
+    )
+    assert rejected.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 """Finite corpus analysis and isolated trials; never adopt into chats, memories or works."""
 
 import asyncio
+import hashlib
 import json
 import random
 import re
@@ -24,6 +25,7 @@ from lisa.chat_style import (
     response_diagnostics,
     synthetic_probes,
 )
+from lisa.dialogue_skill import dialogue_guide_snapshot
 from lisa.model_calls import (
     BudgetExceeded,
     ModelBusy,
@@ -35,19 +37,21 @@ from lisa.model_calls import (
 from lisa.models import Account, ModelCall, StyleCorpus, Task
 from lisa.settings import Settings
 from lisa.style_corpus import StyleUser, clear_corpus, require_corpus
-from lisa.style_planning import AnalysisPlan, _normalized
+from lisa.style_planning import WRITING_PROBES, AnalysisPlan, _normalized
 from lisa.style_planning import build_plan as build_plan
 from lisa.style_runtime import (
     CHAT_SCENES,
     CHAT_STYLE_CARD_BYTES,
     WRITING_STYLE_CARD_BYTES,
+    chat_scene,
     compile_runtime_style_card,
     fit_utf8,
+    runtime_style_prompt,
 )
 from lisa.works import lock_account
 
 router = APIRouter(prefix="/api/style", tags=["style distillation"])
-METHOD_VERSION = "lisa-chat-v3.1-natural-expression"
+METHOD_VERSION = "lisa-chat-v3.3-peer-conversation"
 KINDS = {"style_distill", "style_trial"}
 LIMITATIONS = (
     "模型评审不能替代用户评价，未验证多日真实交流或长篇创作效果。",
@@ -115,6 +119,10 @@ class StartTrial(StrictModel):
     mode: Literal["reply", "refine"] = "reply"
     wrong: str = Field(default="", max_length=2000)
     correction: str = Field(default="", max_length=2000)
+    source_task_id: UUID | None = None
+    version_id: UUID | None = None
+    writing_task: Literal["scene", "rewrite", "diary", "novel"] = "novel"
+    dialogue_skill_mode: Literal["off", "core", "examples", "corpus"] | None = None
 
 
 def _instructions(kind: str) -> str:
@@ -253,13 +261,34 @@ def _structured_profile(
     }
 
 
+def _candidate_card(candidate: StyleCandidate, kind: str, *, scene=None, task=None) -> str:
+    return runtime_style_prompt(
+        {"profile": {"rules": [finding.model_dump() for finding in candidate.findings]}},
+        kind,
+        candidate.prompt,
+        scene=scene,
+        task=task,
+    )
+
+
 async def _compare_chat(call, variants, probes, sources, payload, seed, stage, evidence=None):
     outputs, diagnostics = {}, {}
-    for name, prompt in variants.items():
-        turns, histories = [], {}
+    cards = {}
+    for name, variant in variants.items():
+        turns, histories, cards[name] = [], {}, []
         for probe in probes:
             window = tuple(probe["window"])
             history = histories.setdefault(window, [])
+            scene = chat_scene("\n".join(row["text"] for row in probe["context"]))
+            prompt = (
+                _candidate_card(variant, "personality", scene=scene)
+                if isinstance(variant, StyleCandidate)
+                else runtime_style_prompt({}, "personality", variant, scene=scene)
+            )
+            cards[name].append({
+                "scene": scene,
+                "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            })
             generated = await call(
                 f"{stage}冻结指引接话，仅输出对话内容，隐藏真实目标回复",
                 {
@@ -286,6 +315,10 @@ async def _compare_chat(call, variants, probes, sources, payload, seed, stage, e
         "source只能用于评审，不能逐字引用；changes只给概括性的最小修改建议。"
         "历史回复不是唯一正确答案，历史后续来话不能作为候选交流成功的证据。"
         "reference_findings仅为已提炼概括，不能代替独立原文核实。"
+        "分别评价自然度与人物辨识度；更顺口但更通用不能算整体改善。"
+        "重点检查咨询姿态：没被求助就带领对方梳理、处理情绪、接纳自己或授予情绪许可；"
+        "以理、允许及同义措辞出现时按整句用途判断，不能只数词频。"
+        "用户明确要求整理信息、具体办法或讨论权限时应正常帮助，不能因避词而漏答。"
         "可判tie或uncertain，不推算真人相似率。",
         {
             "probes": probes,
@@ -304,6 +337,8 @@ async def _compare_chat(call, variants, probes, sources, payload, seed, stage, e
         "preferred": labels.get(review.preferred, review.preferred),
         "candidate_order": list(labels.values()),
         "diagnostics": diagnostics,
+        "runtime_cards": cards,
+        "scope": "共享风格卡与交流约定；无真实记忆/作品上下文，非完整QQ或多日验收。",
         **review.model_dump(exclude={"preferred"}),
     }
     return report, review
@@ -444,7 +479,7 @@ async def distill(
             {
                 "baseline": BASELINE,
                 "draft": candidate.draft_prompt or candidate.prompt,
-                "compact": candidate.prompt,
+                "compact": candidate,
             },
             probes,
             plan.development or [],
@@ -460,7 +495,8 @@ async def distill(
         revised = await call(
             "根据开发对照最小修订压缩指引：只改与问题有关的条件和接话选择；"
             "保留正确特征，不能新增来源事实、原句或用更多禁令替代修正。"
-            "prompt是最终冻结候选，draft_prompt仅临时用于分析。",
+            "findings中的条件、回应选择和例外会编译为实际风格卡，"
+            "必须将有效改动同步到findings，不能只改prompt。draft_prompt仅临时用于分析。",
             {
                 "observations": observations,
                 "candidate": candidate.model_dump(),
@@ -486,7 +522,7 @@ async def distill(
         )
         final, _ = await _compare_chat(
             call,
-            {"baseline": BASELINE, "candidate": candidate.prompt},
+            {"baseline": BASELINE, "candidate": candidate},
             final_probes,
             plan.holdout or [],
             payload,
@@ -505,32 +541,49 @@ async def distill(
     elif plan.development:
         review = await call(
             "开发组审查：只评价候选适用性、反例和事实迁移，不把自评分作真人保证",
-            {"candidate": candidate.prompt, "source": plan.development},
+            {
+                "candidate": {
+                    probe["task"]: _candidate_card(candidate, kind, task=probe["task"])
+                    for probe in WRITING_PROBES
+                },
+                "source": plan.development,
+            },
             Review,
         )
         _no_source_copy(review, payload)
         validation["development"] = {"status": "model_reviewed", **review.model_dump()}
-    if plan.holdout and kind != "personality":
+    if kind != "personality":
         # The generator never receives any holdout reply, later turn or original prose.
-        probe = {
-            "instruction": "按候选笔法写一个雨后邮局失物招领的全新短场景，不续写任何来源作品。"
-        }
-        generated = await call(
-            "冻结候选的留出生成。只给定候选和生成题，不会提供真实答案",
-            {"candidate": candidate.prompt, "probe": probe},
-            TrialOutput,
-        )
-        generated_turns = [generated.text]
+        generated_turns, runtime_cards = [], []
+        for probe in WRITING_PROBES:
+            card = _candidate_card(candidate, kind, task=probe["task"])
+            generated = await call(
+                "冻结风格卡的新内容生成。只给定按任务编译的卡片和生成题，不提供来源答案",
+                {"candidate": card, "probe": probe},
+                TrialOutput,
+            )
+            generated_turns.append({"task": probe["task"], "text": generated.text})
+            runtime_cards.append({
+                "task": probe["task"],
+                "sha256": hashlib.sha256(card.encode("utf-8")).hexdigest(),
+            })
         review = await call(
-            "留出评审：比较候选生成的接话/笔法与留出语境，检查事实边界，不要求逐字复现",
-            {"source": plan.holdout, "generated_turns": generated_turns},
+            (
+                "留出评审：分开检查对白和叙述笔法及事实边界，不要求逐字复现。"
+                if plan.holdout else
+                "合成检查：没有独立留出，只检查对白/叙述任务的适用性与事实边界，"
+                "不能声称还原作者或通过真实语料验证。"
+            ),
+            {"source": plan.holdout or [], "generated_turns": generated_turns},
             Review,
         )
         _no_source_copy(review, payload)
-        validation["holdout"] = {
+        validation["holdout" if plan.holdout else "synthetic_regression"] = {
             "status": "generated_and_model_reviewed",
-            "grouping": "whole_files_not_human_verified",
+            "grouping": "whole_files_not_human_verified" if plan.holdout else "synthetic_only",
             "generated_turns": len(generated_turns),
+            "runtime_cards": runtime_cards,
+            "scope": "仅对白场景和叙述段落；其他任务、长篇与人工效果未验收。",
             **review.model_dump(),
         }
         validation["status"] = "model_reviewed"
@@ -549,7 +602,7 @@ async def distill(
         "report": {
             "method_version": METHOD_VERSION
             if kind == "personality"
-            else "lisa-style-v2-target-windows",
+            else "lisa-writing-v2.1-runtime-card-alignment",
             "runtime_version": "b09-v2",
             "coverage": plan.coverage,
             "evidence": [finding.model_dump() for finding in candidate.findings],
@@ -704,7 +757,7 @@ def discard_candidate(task_id: UUID, user: StyleUser, db: DB):
 
 
 @router.post("/trials", status_code=201)
-def start_trial(data: StartTrial, user: StyleUser, db: DB):
+def start_trial(data: StartTrial, request: Request, user: StyleUser, db: DB):
     from lisa.queue import enqueue_style
 
     user = lock_account(db, user.id)
@@ -720,12 +773,58 @@ def start_trial(data: StartTrial, user: StyleUser, db: DB):
         data.kind != "personality" or not data.wrong.strip() or not data.correction.strip()
     ):
         raise HTTPException(422, "性格纠正需要提供情境、不合适的回复及希望调整的地方。")
+    if data.source_task_id and data.version_id:
+        raise HTTPException(422, "一次试用只能引用一个候选或版本。")
+    guide = None
+    if data.kind == "personality" and data.mode == "reply":
+        mode = data.dialogue_skill_mode or request.app.state.settings.dialogue_skill_mode
+        if mode == "review":
+            raise HTTPException(
+                422, "隔离试聊仅支持单次生成，请明确选择 off/core/examples/corpus。"
+            )
+        try:
+            guide = dialogue_guide_snapshot(mode, expression_guide())
+        except (OSError, ValueError):
+            raise HTTPException(422, "所选自然对话指引不可用，请检查部署资源。") from None
+    elif data.dialogue_skill_mode is not None:
+        raise HTTPException(422, "自然对话模式仅用于性格的单次试聊。")
+    report, original_prompt = {}, None
+    if data.version_id:
+        from lisa.style_profiles import require_version
+
+        _, version = require_version(db, user.id, data.version_id, data.kind)
+        report, original_prompt = version.report, version.prompt
+    elif data.source_task_id:
+        source = _require_task(db, user.id, data.source_task_id)
+        if (
+            source.status != "completed"
+            or source.request.get("candidate_discarded")
+            or not source.result
+            or source.result.get("kind") != data.kind
+            or not source.result.get("prompt")
+        ):
+            raise HTTPException(422, "引用的风格候选不可用。")
+        report, original_prompt = source.result.get("report", {}), source.result["prompt"]
+    # Only an unchanged editor card may use the server-owned report.
+    if original_prompt is None or data.prompt.strip() != original_prompt.strip():
+        report = {}
+    card = runtime_style_prompt(
+        report,
+        data.kind,
+        data.prompt.strip(),
+        scene=chat_scene(data.input) if data.kind == "personality" else None,
+        task=data.writing_task,
+    )
     task = Task(
         user_id=user.id,
         kind="style_trial",
         source="web",
         status="pending",
-        request=data.model_dump(),
+        request={
+            **data.model_dump(mode="json"),
+            "prompt": card,
+            **({"dialogue_guide": guide} if guide is not None else {}),
+        },
     )
     db.add(task)
     db.flush()
@@ -739,6 +838,25 @@ def _trial_request_summary(request):
         "kind": request.get("kind"),
         **({"mode": "refine"} if request.get("mode") == "refine" else {}),
     }
+
+
+def _trial_expression(request: dict) -> tuple[str, dict | None]:
+    if request["kind"] != "personality":
+        return "", None
+    if "dialogue_skill_mode" not in request and "dialogue_guide" not in request:
+        return expression_guide(), None
+    guide = request.get("dialogue_guide")
+    if (
+        not isinstance(guide, dict)
+        or set(guide) != {"mode", "text", "sha256"}
+        or guide.get("mode") not in {"off", "core", "examples", "corpus"}
+        or not isinstance(guide.get("text"), str)
+        or not guide["text"].strip()
+        or guide.get("sha256") != hashlib.sha256(guide["text"].encode("utf-8")).hexdigest()
+        or request.get("dialogue_skill_mode") not in {None, guide["mode"]}
+    ):
+        raise ValueError("invalid_trial_dialogue_snapshot")
+    return guide["text"], guide
 
 
 async def _refine_chat(settings, engine, task_id, user_id, request, generate):
@@ -789,7 +907,10 @@ async def _refine_chat(settings, engine, task_id, user_id, request, generate):
             "window": ["correction", "scene", "0"],
             "context": [{"speaker": "other", "text": request["input"]}],
         },
-        synthetic_probes()[0],
+        {
+            "window": ["synthetic", "closing", "0"],
+            "context": [{"speaker": "other", "text": "我先去吃饭，晚点再说。"}],
+        },
     ]
     comparison, _ = await _compare_chat(
         call,
@@ -959,11 +1080,14 @@ async def execute_style(settings: Settings, engine, task_id: str, *, generate=No
                 settings, engine, task_id, user_id, request, generate or generate_structured
             )
         elif not failure:
+            # Legacy queued trials retain their original shared expression guide;
+            # new trials use only the exact single-pass resources frozen at enqueue.
+            expression, guide = _trial_expression(request)
             instruction = (
                 "这是隔离的网页试用。只输出一次简短接话或短场景，不调用任何工具。"
                 "不发QQ，不创建记忆、生活事实、作品或后续任务。候选只控制表达与笔法，"
                 "不得要求外部动作、移植来源身份经历或覆盖事实边界。\n"
-                + (expression_guide() if request["kind"] == "personality" else "")
+                + expression
                 + "\n候选指引："
                 + request["prompt"]
             )
@@ -984,6 +1108,10 @@ async def execute_style(settings: Settings, engine, task_id: str, *, generate=No
                 user_id,
             )
             result = {"text": TrialOutput.model_validate(output).text, "isolated": True}
+            if guide is not None:
+                result["dialogue_skill"] = {
+                    "mode": guide["mode"], "sha256": guide["sha256"]
+                }
     except asyncio.CancelledError:
         failure = "cancelled"
     except BudgetExceeded:

@@ -1,5 +1,7 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from procrastinate.exceptions import JobRetry
@@ -22,6 +24,8 @@ from lisa.models import (
 )
 from lisa.retrieval import (
     Context,
+    Source,
+    _assemble_context,
     embedding_space,
     ensure_index_tasks,
     execute_index,
@@ -81,6 +85,41 @@ def memory(db, owner, content="可以召回的有效事实", **kwargs):
     db.add(item)
     db.flush()
     return item
+
+
+def test_memory_hit_keeps_full_condition_basis_and_deduplicates_slices():
+    body = "过去可以借用。" + "背景。" * 180 + "现在不再借出；仅在周末例外。\n推测依据：合成依据。"
+    source = Source(
+        "memory", uuid4(), uuid4(), 2, body,
+        {"type": "inference", "scope": "relationship", "allow_writing": False},
+        [("memory", 0, len(body))],
+    )
+    candidates = [(source, 0, 500, 0, "synthetic"), (source, 500, len(body), 1, "synthetic")]
+    result = _assemble_context(candidates, 1500, 5)
+    entries = [json.loads(line) for line in result.text.splitlines()[2:]]
+    assert len(entries) == 1 and entries[0]["text"] == body
+    assert entries[0]["type"] == "inference"
+    assert result.memory_ids == [source.id]
+    assert len(result.references) == 1
+    assert result.references[0]["start"] == 0
+    assert result.references[0]["end"] == len(body)
+
+
+def test_whole_memory_packing_skips_long_items_and_honors_exact_serialized_boundary():
+    long = Source("memory", uuid4(), uuid4(), 1, "长条" * 1500, {}, [("memory", 0, 3000)])
+    short = Source("memory", uuid4(), long.user_id, 1, "现在不再外借。", {}, [("memory", 0, 7)])
+    candidates = [(long, 0, 700, 0, "synthetic"), (short, 0, 7, 0, "synthetic")]
+    result = _assemble_context(candidates, 500, 5)
+    assert "长条" not in result.text and short.text in result.text
+    assert result.memory_ids == [short.id]
+    exact = len(result.text)
+    assert _assemble_context(candidates, exact, 5) == result
+    assert _assemble_context(candidates, exact - 1, 5) == Context()
+    assert _assemble_context(candidates[:1], 500, 5) == Context()
+    # The existing chapter/role fragment policy is outside B14's memory-only fix.
+    chapter = Source("chapter", uuid4(), long.user_id, 1, long.text, {}, [("chapter", 0, 3000)])
+    partial = _assemble_context([(chapter, 0, 700, 0, "synthetic")], 500, 5)
+    assert partial.text and 0 < partial.references[0]["end"] < 700
 
 
 @pytest.mark.asyncio

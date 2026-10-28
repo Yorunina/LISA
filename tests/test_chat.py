@@ -73,6 +73,79 @@ def count(db, model):
     return db.scalar(select(func.count()).select_from(model))
 
 
+@pytest.mark.asyncio
+async def test_picture_clarification_continues_from_sent_reply_in_one_chat_call_per_turn(
+    settings, engine, db, user_id
+):
+    from lisa.images import ImageAction
+    from lisa.models import ChatTurn
+
+    configured = settings.model_copy(update={
+        "image_model": "synthetic-image", "image_base_url": "https://image.invalid/v1",
+        "image_api_key": SecretStr("synthetic"),
+    })
+    request = "请给我生成一张图"
+    first = ingest(db, "continuity-1", content=request)
+    seen = []
+
+    async def generate(*args):
+        seen.append(args[-1])
+        if len(seen) == 1:
+            return Conversation(reply="想画什么？")
+        assert any(m["role"] == "user" and request in m["content"] for m in args[-1])
+        assert any(m["role"] == "assistant" and "想画什么？" in m["content"]
+                   for m in args[-1])
+        return Conversation(reply="好。", image_action=ImageAction(
+            target="chat", goal="窗边的一盆绿植", requested=True, evidence=request,
+            source_task_id=first, current_evidence="窗边的一盆绿植",
+            send_text_reply=False,
+        ))
+
+    await execute_chat(configured, engine, first, generate=generate)
+    db.expire_all()
+    outgoing = claim_outbound(db, QQ)
+    assert outgoing is not None
+    finish_delivery(db, outgoing.id, "sent", "synthetic-question")
+    db.commit()
+    second = ingest(db, "continuity-2", content="窗边的一盆绿植")
+    await execute_chat(configured, engine, second, generate=generate)
+    db.expire_all()
+    assert len(seen) == 2
+    assert db.get(Task, second).status == "completed"
+    pictures = list(db.scalars(select(Task).where(Task.kind == "image")))
+    assert len(pictures) == 1
+    assert pictures[0].request["commission_task_id"] == str(first)
+    assert db.get(Task, second).result["outbound_count"] == 0
+    assert db.get(ChatTurn, second) is not None
+    assert count(db, ChatMessage) == 0
+
+
+@pytest.mark.asyncio
+async def test_new_user_turn_during_generation_prevents_starting_the_old_picture(
+    settings, engine, db, user_id
+):
+    from lisa.images import ImageAction
+
+    configured = settings.model_copy(update={
+        "image_model": "synthetic-image", "image_base_url": "https://image.invalid/v1",
+        "image_api_key": SecretStr("synthetic"),
+    })
+    request = "画一盆绿植"
+    first = ingest(db, "interrupted-picture-1", content=request)
+
+    async def generate(*args):
+        ingest(db, "interrupted-picture-2", content="算了，不画了")
+        return Conversation(reply="好。", image_action=ImageAction(
+            target="chat", goal="一盆绿植", requested=True, evidence=request,
+            send_text_reply=False,
+        ))
+
+    await execute_chat(configured, engine, first, generate=generate)
+    db.expire_all()
+    assert db.get(Task, first).status == "completed"
+    assert db.scalar(select(Task.id).where(Task.kind == "image")) is None
+
+
 def test_ingest_merges_persists_queue_and_does_not_refresh_replays(db, user_id):
     original_time = datetime.now(UTC) - timedelta(hours=2)
     task_id = ingest(db, 1, sent_at=original_time)
@@ -332,7 +405,7 @@ def test_uninitialized_disabled_and_future_events_do_not_queue(db, user_id):
 
 
 @pytest.mark.asyncio
-async def test_bounded_batches_run_in_order_without_replaying_completed_chat(
+async def test_bounded_batches_run_in_order_with_recent_user_context(
     settings, engine, db, user_id
 ):
     first = None
@@ -353,15 +426,16 @@ async def test_bounded_batches_run_in_order_without_replaying_completed_chat(
     assert all("second batch" not in message["content"] for message in calls[0])
     await execute_chat(settings, engine, str(second), generate=generate)
     assert len(calls[0]) == 20
-    assert len(calls[1]) == 1 and calls[1][0]["role"] == "user"
-    assert calls[1][0]["content"].endswith("second batch")
-    assert all("first batch" not in message["content"] for message in calls[1])
+    assert len(calls[1]) == 21 and calls[1][-1]["role"] == "user"
+    assert calls[1][-1]["content"].endswith("second batch")
+    assert "first batch 0" in calls[1][0]["content"]
+    assert all(message["role"] == "user" for message in calls[1])
     assert count(db, ChatMessage) == 0
     assert count(db, OutboundMessage) == 2
 
 
 @pytest.mark.asyncio
-async def test_only_current_batch_enters_chat_after_prior_success_and_oversize_failure(
+async def test_recent_successful_input_enters_chat_but_failed_and_unsent_text_do_not(
     settings, engine, db, user_id
 ):
     settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
@@ -386,10 +460,11 @@ async def test_only_current_batch_enters_chat_after_prior_success_and_oversize_f
 
     instructions, messages = calls[-1]
     assert "chat_reader的独立合成性格" in instructions
-    assert [message["role"] for message in messages] == ["user", "user"]
-    assert messages[0]["content"].endswith("当前批次第一条")
-    assert messages[1]["content"].endswith("当前批次第二条")
-    assert all("最新历史" not in message["content"] for message in messages)
+    assert [message["role"] for message in messages] == ["user", "user", "user"]
+    assert messages[0]["content"].endswith("最新历史问题")
+    assert messages[1]["content"].endswith("当前批次第一条")
+    assert messages[2]["content"].endswith("当前批次第二条")
+    assert all("最新历史回答" not in message["content"] for message in messages)
     assert old_content not in instructions
     db.expire_all()
     assert db.get(Task, current).status == "completed"
@@ -461,9 +536,9 @@ async def test_new_message_during_generation_gets_next_task_and_other_user_runs(
         await running
     await execute_chat(settings, engine, str(second), generate=generate)
     assert calls[-1][0] == user_id
-    assert len(calls[-1][2]) == 1
-    assert calls[-1][2][0]["role"] == "user"
-    assert calls[-1][2][0]["content"].endswith("first user's follow up")
+    assert len(calls[-1][2]) == 2
+    assert calls[-1][2][-1]["role"] == "user"
+    assert calls[-1][2][-1]["content"].endswith("first user's follow up")
     assert all("other user's" not in message["content"] for message in calls[-1][2])
     assert count(db, ChatMessage) == 0
 

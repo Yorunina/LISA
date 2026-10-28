@@ -217,11 +217,11 @@ async def test_config_saved_during_embedding_controls_returned_context(
 
 
 @pytest.mark.asyncio
-async def test_reference_reads_exact_provided_slice_after_config_and_space_change(
+async def test_reference_reads_complete_memory_after_config_and_space_change(
     client, db, engine, vector_settings, owner, project
 ):
     project_id = UUID(project["id"])
-    item = memory(db, owner, "句首。" + "可追溯的资料。" * 150, allow_writing=True)
+    item = memory(db, owner, "句首。" + "可追溯的资料。" * 120, allow_writing=True)
     task = task_for(db, owner, project_id)
     db.commit()
     await index_all(engine, vector_settings)
@@ -232,7 +232,7 @@ async def test_reference_reads_exact_provided_slice_after_config_and_space_chang
         project_id,
         "writing",
         [1, 0, 0],
-        max_chars=400,
+        max_chars=1500,
         limit=1,
         sources=["memory"],
     )
@@ -240,7 +240,7 @@ async def test_reference_reads_exact_provided_slice_after_config_and_space_chang
     record_references(db, task.id, context)
     db.commit()
     ref = context.references[0]
-    assert ref["end"] - ref["start"] < len(item.content)
+    assert ref["start"] == 0 and ref["end"] == len(item.content)
     path = f"/api/tasks/{task.id}/references"
     before = client.get(path)
     assert before.status_code == 200

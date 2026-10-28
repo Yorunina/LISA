@@ -1,0 +1,149 @@
+{
+  "scope": "Human-feedback targeted regression; F01 is known, remaining examples synthetic; not general naturalness confirmation.",
+  "cases": [
+    {
+      "id": "F01",
+      "turns": [
+        "不想再复盘了，我去吃饭。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "收尾。简短承接即可，不逐项重复拒绝复盘和吃饭。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F01"
+    },
+    {
+      "id": "F02",
+      "turns": [
+        "这版先不争了，我去洗澡。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "主要是结束当前争论。允许简短回应；不复述争论+洗澡两项，也不约回来继续。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F02"
+    },
+    {
+      "id": "F03",
+      "turns": [
+        "不想再聊工作，我先睡了。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "结束话题，可以道晚安；不逐项确认、不接着安慰或安排明天。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F03"
+    },
+    {
+      "id": "F04",
+      "turns": [
+        "这盘输了也没什么，刚好外卖到了哈哈。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "转场到外卖，轻松接话即可，无需同时安慰输局和安排吃饭。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F04"
+    },
+    {
+      "id": "F05",
+      "turns": [
+        "地铁晚了五分钟，不过已经上车了，窗外夕阳好漂亮。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "重心是夕阳分享，晚点已解决；不逐项复述、诊断或迟到指导。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F05"
+    },
+    {
+      "id": "F06",
+      "turns": [
+        "昨天键盘坏了，换新的已经装好。现在终于能打字了哈哈。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "接终于能用了的轻松感，不从坏键盘重新展开排障，不复述整个经过再肯定。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F06"
+    },
+    {
+      "id": "F07",
+      "turns": [
+        "总算交了，先让我躺一会。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "接解放或短暂收尾，无需两项确认、休息教学或后续安排；自然延展不强制最短。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F07"
+    },
+    {
+      "id": "F08",
+      "turns": [
+        "不是后天，是周五。场地也定下来了。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "沿用纠正后的信息，按语境选一个落点；不把所有信息机械复述，也不因简短说错日期。",
+      "critical": false,
+      "category": "focus",
+      "episode": "F08"
+    },
+    {
+      "id": "T01",
+      "turns": [
+        "不用安慰我。先把“你们怎么又迟交”改客气些，再给我两条后续催办建议。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "须交付客气改写及两条建议，不能只接最后一项或只表示理解。",
+      "critical": true,
+      "category": "task",
+      "episode": "T01"
+    },
+    {
+      "id": "T02",
+      "turns": [
+        "按时间排：18点20出门，18点05到家，18点10充电。只列顺序。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "三件事排序正确，保留时间，不增加解释；不是只回应最后一件。",
+      "critical": true,
+      "category": "task",
+      "episode": "T02"
+    },
+    {
+      "id": "T03",
+      "turns": [
+        "请帮我逐项确认：是姐姐，不是妹妹；周五下午三点；东门碰面。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "明确要求逐项核对，须给姐姐、周五下午三点、东门，不误删主信息。",
+      "critical": true,
+      "category": "task",
+      "episode": "T03"
+    },
+    {
+      "id": "T04",
+      "turns": [
+        "详细说两种角色在对白中隐瞒事实的写法，每种给一句例子和适用情境。"
+      ],
+      "history": [],
+      "reference": "",
+      "expected": "两种方法均有解释、例句及情境，内部一致，不因闲聊留白规则省略要求。",
+      "critical": true,
+      "category": "task",
+      "episode": "T04"
+    }
+  ]
+}

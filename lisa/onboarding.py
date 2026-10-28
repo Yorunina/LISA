@@ -130,6 +130,9 @@ def confirm_binding(body: BindingConfirmation, user: User, db: DB):
         raise HTTPException(400, "核对的 QQ 与服务码不一致，请重新核对。")
     if db.get(QQBinding, user.id):
         raise HTTPException(409, "当前账号已绑定 QQ，更换绑定请联系管理员核实。")
+    from lisa.chat_context import clear_context
+
+    clear_context(db, user.id)
     code.used_at = datetime.now(UTC)
     db.add(QQBinding(user_id=user.id, qq_id=code.qq_id))
     try:

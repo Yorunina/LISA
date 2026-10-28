@@ -13,7 +13,7 @@ from test_works import owner as owner
 from test_works import project as project
 
 from lisa.author import execute_author
-from lisa.models import Project
+from lisa.models import Memory, Project
 from lisa.recall import retrieve_context
 from lisa.retrieval import recall, recall_titles
 
@@ -129,6 +129,9 @@ async def test_author_passes_only_selected_entries_and_references_show_title(
     work.worldbook = "不可穿越时间。"
     selected = entry()
     work.worldbook_entries = [selected, entry("其他地点", "不应全文注入的设定。")]
+    db.add(Memory(
+        user_id=owner, kind="fact", content="近期兜底不能挤占标题结果。", allow_writing=True
+    ))
     task_id = pending_task(db, owner, project)
     with Session(engine) as current, current.begin():
         from lisa.models import Task
@@ -141,6 +144,7 @@ async def test_author_passes_only_selected_entries_and_references_show_title(
         assert "worldbook_entries" not in payload
         assert "持证医师" in instructions and "旧历320年" in instructions
         assert "不应全文注入" not in instructions
+        assert "近期兜底不能挤占" not in instructions
         return RESULT
 
     await execute_author(settings, engine, task_id, generate=generate)

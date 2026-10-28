@@ -70,7 +70,13 @@ STYLES = {
 IMAGE_INSTRUCTIONS = (
     "\nimage_action默认null。图片只在有必要时偶尔使用，普通交流以文字为主，"
     "不要连续多轮配图，也不用图片填补回复。operation=generate生成一张图片；"
-    "小说插图/封面必须用户本轮明确委托且目标清楚，requested=true且evidence逐字引用委托；"
+    "明确图片委托使用requested=true且evidence逐字引用用户委托，不能引用你自己的提议或长期偏好；"
+    "本轮直接委托时source_task_id=null，evidence引用本轮用户消息。"
+    "用户正在回答上轮图片澄清时，可接续近期窗口内的原委托：source_task_id填写原委托消息"
+    "标注的来源任务ID，evidence逐字引用该轮用户委托，current_evidence逐字引用本轮补充或确认；"
+    "不能仅因历史出现过画图请求就再次生成，转题、撤销或无关闲聊不算当前确认。"
+    "目标已经清楚即可执行，不为可采用默认值的画风、颜色或构图追加问题。"
+    "小说插图/封面必须用户明确委托且目标清楚；"
     "用提供的project_id和chapter_id，不猜不存在的章节。目标不清则image_action=null并先问清。"
     "target=cover书封、illustration章节插图、chat本轮私聊小图；聊天小图不关联作品。"
     "goal只写必要绘图内容（主体、已知外观、场景、动作、构图），不要复制原始对话或无关私人资料，"
@@ -83,6 +89,9 @@ IMAGE_INSTRUCTIONS = (
     "用户明确指定本轮所发图片作为LISA人设或作品画风参考时operation=reference，"
     "target=chat表示本账号LISA人设，cover/illustration表示该作品画风；不要把普通上传自动设为参考。"
     "用户明确取消正在绘图时operation=cancel，target和作品/章节指定要取消的范围。"
+    "已受理的图片不要因后续聊天重复发起；只有用户明确要求再画一张才使用本轮新委托。"
+    "近期语境中的拍一张、照一张也可表达生成图片；真实现场拍摄不在能力范围内，"
+    "不能把合成图声称为真实拍摄。"
     "生成是异步委托，不声称图片已经完成。send_text_reply控制是否另发本轮文字回复，"
     "caption独立控制图片完成后的短配文，两者互不绑定。"
     "只需绘图、无需说明时，send_text_reply=false且caption为空，直接交付裸图；"
@@ -108,6 +117,12 @@ class ImageAction(BaseModel):
     depicts_lisa: bool = False
     requested: bool = False
     evidence: str = Field(default="", max_length=1000)
+    source_task_id: UUID | None = Field(
+        default=None, description="接续近期用户委托时的来源任务；本轮直接委托为null。"
+    )
+    current_evidence: str = Field(
+        default="", max_length=1000, description="跨轮接续时逐字引用本轮用户的补充或确认。"
+    )
     send_text_reply: bool = Field(
         default=True, description="是否另发本轮文字回复，与图片配文独立；纯绘图可false。"
     )
@@ -169,8 +184,12 @@ def image_context(db, user_id):
                 "lisa_reference_available": bool(preference and preference.lisa_reference_id),
                 "projects": rows,
                 "recent_drawing": {
+                    "id": str(recent.id),
                     "status": recent.status,
                     "target": recent.request.get("target"),
+                    "goal": recent.request.get("goal"),
+                    "source_task_id": recent.request.get("source_task_id"),
+                    "commission_task_id": recent.request.get("commission_task_id"),
                     "time": recent.created_at.isoformat(),
                 }
                 if recent
@@ -184,6 +203,22 @@ def image_context(db, user_id):
 async def prepare_image_action(settings, engine, task_id, user_id, texts):
     with Session(engine) as db:
         context = image_context(db, user_id)
+        binding = db.get(QQBinding, user_id)
+        from lisa.chat_context import context_messages
+
+        recent = context_messages(
+            db, user_id, binding.qq_id, exclude_task_id=UUID(str(task_id))
+        ) if binding else []
+        history = [
+            {
+                "role": message["role"],
+                "content": (
+                    f"[近期用户消息 来源任务 {message['task_id']}]\n"
+                    if message["role"] == "user" else "[已送达的近期回复]\n"
+                ) + message["content"],
+            }
+            for message in recent
+        ]
     return await generate_structured(
         settings,
         engine,
@@ -192,7 +227,7 @@ async def prepare_image_action(settings, engine, task_id, user_id, texts):
         "仅准备图片委托，不做普通聊天、写作、记忆或事实更新。没有明确图片委托/选择/取消时"
         "image_action=null、clarification为空。目标/关键外观不明时只用clarification简短澄清。"
         + context,
-        [{"role": "user", "content": "\n".join(texts)}],
+        [*history, {"role": "user", "content": "\n".join(texts)}],
         schema=ImagePreparation,
         image_description=True,
         output_tokens=1800,
@@ -317,15 +352,45 @@ def illustration_info(chapter_id: UUID, db: DB, user: User):
     return {"image_id": str(item.illustration_image_id) if item.illustration_image_id else None}
 
 
+def _commission_source(db, user, source_task, action, current_texts):
+    """Verify quoted user inputs; semantic intent still belongs to the chat model."""
+    if not action.requested:
+        return None
+    evidence = action.evidence
+    if not evidence.strip():
+        return None
+    if action.source_task_id in {None, source_task.id}:
+        return source_task.id if any(evidence in value for value in current_texts) else None
+    if not action.current_evidence.strip() or not any(
+        action.current_evidence in value for value in current_texts
+    ):
+        return None
+    binding = db.get(QQBinding, user.id)
+    if binding is None:
+        return None
+    from lisa.chat_context import context_messages
+
+    history = context_messages(
+        db, user.id, binding.qq_id, exclude_task_id=source_task.id
+    )
+    if any(
+        message["role"] == "user"
+        and str(message["task_id"]) == str(action.source_task_id)
+        and evidence in message["content"]
+        for message in history
+    ):
+        return action.source_task_id
+    return None
+
+
 def apply_image_action(db, settings, user, source_task, action, current_texts, reference_data=None):
     """Account lock is held by the chat adopter. Persist only the necessary drawing brief."""
     if action is None:
         return ""
-    explicit = (
-        action.requested
-        and action.evidence.strip()
-        and any(action.evidence in text for text in current_texts)
-    )
+    commission_task_id = _commission_source(db, user, source_task, action, current_texts)
+    explicit = commission_task_id is not None
+    if action.requested and not explicit:
+        return "这次图片委托的依据已不可用，请重新说明要画什么。"
     if not explicit and (action.operation != "generate" or action.target != "chat"):
         return "图片目标还不明确，请说明要画哪部作品的封面或哪个章节。"
     project, chapter = None, None
@@ -379,6 +444,17 @@ def apply_image_action(db, settings, user, source_task, action, current_texts, r
         return "图片服务尚未配置好，这次没有开始绘图。"
     if not action.goal.strip():
         return "请再说明这张图要表现的场景。"
+    if commission_task_id and db.scalar(
+        select(Task.id).where(
+            Task.user_id == user.id,
+            Task.kind == "image",
+            or_(
+                Task.request["commission_task_id"].astext == str(commission_task_id),
+                Task.request["source_task_id"].astext == str(commission_task_id),
+            ),
+        ).limit(1)
+    ):
+        return "这条绘图委托已经处理，不会重复生成；如需新图，请明确再画一张。"
     if db.scalar(
         select(Task.id)
         .where(
@@ -477,6 +553,7 @@ def apply_image_action(db, settings, user, source_task, action, current_texts, r
             "goal": action.goal,
             "style": style,
             "source_task_id": str(source_task.id),
+            "commission_task_id": str(commission_task_id) if commission_task_id else None,
             "requested": bool(explicit),
             "qq_id": binding.qq_id,
             "slot_revision": slot.image_revision if slot else None,
