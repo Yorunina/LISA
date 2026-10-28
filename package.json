@@ -8,7 +8,6 @@
   },
   "description": "LISA private study web application",
   "scripts": {
-    "check:env": "node scripts/check-web.mjs",
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "build": "tsc --noEmit && vite build",

@@ -276,8 +276,8 @@ git diff --check
 # 登录后只读检查 OneBot 版本和登录状态，不发送消息
 .\scripts\dev.ps1 CheckQQ
 
-# 前端工具与无界面 Chromium 检查，不是 LISA 功能验收
-npm.cmd run check:env
+# 前端类型检查与构建；浏览器流程使用上方隔离回归入口
+npm.cmd run build
 
 # 停止服务，保留数据库与会话数据
 .\scripts\dev.ps1 StopQQ
@@ -318,7 +318,7 @@ Windows Server 未必已有 winget，可通过微软官方 Build Tools 安装器
 .\scripts\dev.ps1 Setup
 .\scripts\dev.ps1 Start
 .\scripts\dev.ps1 Check
-npm.cmd run check:env
+npm.cmd run build
 .\scripts\dev.ps1 StartQQ
 ```
 
