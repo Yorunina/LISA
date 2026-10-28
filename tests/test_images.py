@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 from datetime import UTC, datetime, timedelta
@@ -183,7 +184,8 @@ async def test_commission_generates_in_independent_task_and_saves_correct_slot(
     message = db.scalar(select(OutboundMessage).where(OutboundMessage.task_id == task.id))
     assert message.private_image_id == image_id
     segments = outbound_segments(db, message)
-    assert segments[1]["type"] == "image" and "base64://" in segments[1]["data"]["file"]
+    assert [segment["type"] for segment in segments] == ["image"]
+    assert "base64://" in segments[0]["data"]["file"]
 
 
 @pytest.mark.asyncio
@@ -598,3 +600,233 @@ async def test_large_image_catalog_does_not_block_ordinary_chat(
     await execute_chat(image_settings, engine, source, generate=reply)
     db.expire_all()
     assert db.get(Task, source).status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", ["chat", "cover", "illustration"])
+async def test_explicit_drawing_can_reply_with_one_image_and_no_acknowledgement(
+    db, engine, image_settings, owner, project, chapter, monkeypatch, target
+):
+    proposal = action(project if target != "chat" else None).model_copy(
+        update={
+            "target": target,
+            "chapter_id": chapter if target == "illustration" else None,
+            "send_text_reply": False,
+            "caption": "",
+        }
+    )
+    source = ingest(db, "only-image", qq_id="720000001", content="请画一张图，只发图片不用文字")
+    monkeypatch.setattr(
+        "lisa.images.prepare_image_action",
+        AsyncMock(return_value=ImagePreparation(image_action=proposal, clarification="")),
+    )
+    configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
+    await execute_chat(configured, engine, source)
+    db.expire_all()
+    assert db.get(Task, source).status == "completed"
+    assert db.get(Task, source).result["outbound_count"] == 0
+    assert not db.scalar(select(OutboundMessage.id))
+    image_task = db.scalar(select(Task).where(Task.kind == "image"))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    messages = db.scalars(select(OutboundMessage)).all()
+    assert len(messages) == 1 and messages[0].content == ""
+    assert [item["type"] for item in outbound_segments(db, messages[0])] == ["image"]
+    assert not db.scalar(select(ChatMessage.id))
+    assert db.get(Task, image_task.id).input_snapshot is None
+    assert "caption" not in db.get(Task, image_task.id).request
+
+
+@pytest.mark.asyncio
+async def test_natural_image_only_reply_does_not_adopt_unsent_text(
+    db, engine, image_settings, owner, monkeypatch
+):
+    source = ingest(db, "natural-only-image", qq_id="720000001", content="合成闲聊")
+
+    async def reply(*_args):
+        return Conversation(
+            reply="这段内部文字不应发送或成为已分享事实。",
+            image_action=action().model_copy(
+                update={"requested": False, "evidence": "", "send_text_reply": False}
+            ),
+        )
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("Unsent reply text must not be adopted")
+
+    monkeypatch.setattr("lisa.chat.adopt_life_events", unexpected)
+    await execute_chat(image_settings, engine, source, generate=reply)
+    db.expire_all()
+    assert db.get(Task, source).result["outbound_count"] == 0
+    assert not db.scalar(select(OutboundMessage.id))
+    image_task = db.scalar(select(Task).where(Task.kind == "image"))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    assert [item["type"] for item in outbound_segments(db, db.scalar(select(OutboundMessage)))] == [
+        "image"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("caption", ["", "送你一片安静的夜色。"])
+async def test_optional_caption_is_delivered_only_when_supplied(
+    db, engine, image_settings, owner, caption
+):
+    image_task, _ = commission(db, image_settings, owner, action(caption=caption))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    message = db.scalar(select(OutboundMessage))
+    assert message.content == caption
+    assert [item["type"] for item in outbound_segments(db, message)] == (
+        ["text", "image"] if caption else ["image"]
+    )
+    assert db.get(Task, image_task.id).input_snapshot is None
+    assert "caption" not in db.get(Task, image_task.id).request
+
+
+@pytest.mark.asyncio
+async def test_requested_poem_can_accompany_picture_without_an_extra_ack(
+    db, engine, image_settings, owner, monkeypatch
+):
+    source = ingest(db, "poem-with-image", qq_id="720000001", content="请画一张图，配一句短诗")
+    monkeypatch.setattr(
+        "lisa.images.prepare_image_action",
+        AsyncMock(
+            return_value=ImagePreparation(
+                image_action=action(send_text_reply=False, caption="落日沉入海，晚风吻过浪。"),
+                clarification="",
+            )
+        ),
+    )
+    configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
+    await execute_chat(configured, engine, source)
+    db.expire_all()
+    assert not db.scalar(select(OutboundMessage.id))
+    image_task = db.scalar(select(Task).where(Task.kind == "image"))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    messages = db.scalars(select(OutboundMessage)).all()
+    assert len(messages) == 1 and messages[0].content == "落日沉入海，晚风吻过浪。"
+    assert [item["type"] for item in outbound_segments(db, messages[0])] == ["text", "image"]
+
+
+@pytest.mark.asyncio
+async def test_old_pending_image_task_keeps_legacy_delivery_text(db, engine, image_settings, owner):
+    image_task, _ = commission(db, image_settings, owner, action())
+    snapshot = dict(image_task.input_snapshot)
+    snapshot.pop("caption")
+    image_task.input_snapshot = snapshot
+    db.commit()
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    assert db.scalar(select(OutboundMessage)).content == "刚才那张图画好了。"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [True, False])
+async def test_rejected_image_only_request_still_explains_the_problem(
+    db, engine, image_settings, owner, monkeypatch, explicit
+):
+    proposal = action(send_text_reply=False).model_copy(update={"goal": ""})
+    source = ingest(db, "rejected-image", qq_id="720000001", content="请画一张图，只发图片")
+    monkeypatch.setattr(
+        "lisa.images.prepare_image_action",
+        AsyncMock(return_value=ImagePreparation(image_action=proposal, clarification="")),
+    )
+
+    async def reply(*_args):
+        return Conversation(reply="需要先明确画面。", image_action=proposal)
+
+    configured = image_settings.model_copy(update={"model_api_key": SecretStr("synthetic")})
+    await execute_chat(configured, engine, source, generate=None if explicit else reply)
+    db.expire_all()
+    assert not db.scalar(select(Task.id).where(Task.kind == "image"))
+    assert not db.get(Task, source).result.get("suppress_text_reply")
+    message = db.scalar(select(OutboundMessage))
+    assert "请再说明这张图要表现的场景" in message.content
+    assert [item["type"] for item in outbound_segments(db, message)] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_missing_reference_reports_failure_without_an_ack(
+    db, engine, image_settings, owner
+):
+    image_task, _ = commission(db, image_settings, owner, action(send_text_reply=False))
+    image_task.input_snapshot = {**image_task.input_snapshot, "reference_id": str(uuid4())}
+    db.commit()
+    generate = AsyncMock()
+    await execute_image(image_settings, engine, image_task.id, generate=generate)
+    db.expire_all()
+    assert generate.await_count == 0
+    assert db.get(Task, image_task.id).error == "reference_unavailable"
+    assert db.get(Task, image_task.id).input_snapshot is None
+    message = db.scalar(select(OutboundMessage))
+    assert "参考图已不可用" in message.content
+    assert [item["type"] for item in outbound_segments(db, message)] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_image_only_failure_still_reports_error(db, engine, image_settings, owner):
+    image_task, _ = commission(db, image_settings, owner, action(send_text_reply=False))
+    await execute_image(
+        image_settings, engine, image_task.id, generate=AsyncMock(side_effect=ModelCallUnknown())
+    )
+    db.expire_all()
+    message = db.scalar(select(OutboundMessage))
+    assert "无法确认" in message.content
+    assert [item["type"] for item in outbound_segments(db, message)] == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_onebot_receives_an_image_only_segment_and_no_empty_text(
+    db, engine, image_settings, owner
+):
+    from lisa.gateway import deliver_outbox
+
+    image_task, _ = commission(db, image_settings, owner, action(send_text_reply=False))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    sent = asyncio.Event()
+
+    class Connection:
+        async def call(self, method, params):
+            assert method == "send_private_msg"
+            assert [item["type"] for item in params["message"]] == ["image"]
+            assert params["message"][0]["data"]["file"].startswith("base64://")
+            sent.set()
+            return {"message_id": 987654}
+
+    sender = asyncio.create_task(
+        deliver_outbox(Connection(), engine, None, settings=image_settings)
+    )
+    try:
+        await asyncio.wait_for(sent.wait(), timeout=5)
+    finally:
+        sender.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await sender
+    db.expire_all()
+    assert db.scalar(select(OutboundMessage)).status == "sent"
+
+
+@pytest.mark.asyncio
+async def test_missing_image_cancels_delivery_without_sending_empty_payload(
+    db, engine, image_settings, owner
+):
+    from lisa.gateway import deliver_outbox
+
+    image_task, _ = commission(db, image_settings, owner, action(send_text_reply=False))
+    await execute_image(image_settings, engine, image_task.id, generate=fake_image)
+    db.expire_all()
+    message = db.scalar(select(OutboundMessage))
+    db.get(PrivateImage, message.private_image_id).expires_at = datetime.now(UTC) - timedelta(
+        seconds=1
+    )
+    db.commit()
+    connection = type("Connection", (), {"call": AsyncMock()})()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            deliver_outbox(connection, engine, None, settings=image_settings), 0.2
+        )
+    db.expire_all()
+    assert connection.call.await_count == 0
+    assert db.get(OutboundMessage, message.id).status == "cancelled"

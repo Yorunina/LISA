@@ -213,13 +213,15 @@ D19迁移 `d8193f6a20b4` 保留原worldbook为固定核心，JSONB详细条目�
 
 B15 当前工程入口：[`lisa/images.py`](../lisa/images.py) 复用现有 `Task`、队列及 OneBot 出站，迁移为 `b15e8a102810`；`PrivateImage` 二进制随账号级联清理，和共有表情 `SharedAsset` 分开。独立 `LISA_IMAGE_MODEL/BASE_URL/API_KEY` 沿用本地配置；`LISA_IMAGE_TIMEOUT_SECONDS=180`，medium/1024×1024/n=1/PNG，无 SDK 自动重试。没有参考用 `/images/generations`，明确参考用 multipart `/images/edits`。上传支持 PNG/JPEG/WebP，最多 12 MB、8192px 单边与 3200 万像素，解码后去除元数据并存 PNG；这些是文件有效性限制，不是图片消费额度。
 
+纯图片回复：`ImageAction.send_text_reply=false` 可省略本轮额外文字确认，`caption` 独立决定图片配文；send_text_reply=false 且 caption 为空时只交付裸图，也允许不先确认、只发图片加短配文，默认不附完成套话。配文只在图片任务临时快照及待投递消息中保存，终态清理；不写入永久回复历史。OneBot 出站省略空文本段，图片缺失时取消空投递；纯图轮的未发送文字不提升为已分享生活事实。2026-10-28 已通过 219 项相关隔离回归及两条真实合成描述验证，空闲重载 worker/网关后已加载；网关 normal 连接和 API 健康已核对，现有 corpus 模式不变，无需迁移。提交前独立纯图快照完整后端 855 项通过，补齐参考失效的文字反馈；该最终修复未再次重载。本轮未实际生图/QQ 实发，交互实效继续验收。
+
 明确绘图话题用专用 `ImagePreparation` 准备有限绘图描述，不经过普通聊天/检索额度；正常聊天可选择一张契合语境的小图。生图和描述台账均标记 `budget_exempt`，不增加文本日账；生图有独立执行槽。LISA 出镜必须先由该账号明确指定参考，测试参考不自动设给正式账号。新消息不取消独立成图；QQ 失败只重发已有图片，unknown 不自动重画；聊天图片约 24 小时后由现有 recovery sweep 清理，已替换且无需投递的作品旧图不作历史保留。
 
 接口：`GET/PUT /api/projects/{id}/cover`、`GET/PUT /api/chapters/{id}/illustration`，上传 JSON 含 `content_base64`；`GET /api/private-images/{id}` 要求本人登录，公开阅读页不引用它。取消复用 `/api/tasks/{id}/cancel` 或对话明确取消，作品任务列表显示图片状态，不提供网页生图面板。
 
 2026-10-28 新业务在临时库中实际完成合成封面/章节及指定参考人设图，耗时 99.147 / 34.012 / 99.837 秒（含描述与生成），保存/出站段正确；文字日账预置 999 元仍为 999 元。usage 全零仅记价格未知。脱敏参数/台账及输出在 `runtime/reports/b15-images-20261028/{result.json,recheck.json,cover.png,illustration.png,chat.png}`；章节首次被解释成仅保存画风，修正操作优先级后复验成功。图片版网页构建保留于该目录的 `dist/`，当前 `runtime/dist/` 恢复为接入图片前的作品页，避免未重载 API 显示不可用入口；源码保留完整新界面。
 
-本轮没有迁移个人库、重启正式进程、启用对话 skill 或连接真实 QQ。正式接入时在合适空闲窗口运行 `runtime/venv/Scripts/python.exe -m lisa migrate`，使用包含 `lisa_image` consumer 的 worker/网关并重新构建网页；不能只复制新网页。全部源码仍含其他任务未提交改动，加载前需核对这些任务的生效范围。测试/限制详见 [B15](DEVELOPMENT_TASKS.md#b15-小说插图预研)。以下早期预研记录仅表示当时结果。
+首轮业务交付时没有迁移个人库、重启正式进程或发送真实 QQ；本轮纯图加载记录见上方。新环境接入时在合适空闲窗口运行 `runtime/venv/Scripts/python.exe -m lisa migrate`，使用包含 `lisa_image` consumer 的 worker/网关并重新构建网页；不能只复制新网页。全部源码仍含其他任务未提交改动，加载前需核对这些任务的生效范围。测试/限制详见 [B15](DEVELOPMENT_TASKS.md#b15-小说插图预研)。以下早期预研记录仅表示当时结果。
 
 当前模型为 `gpt-image-2`，独立密钥/端点保存在 `runtime/.env` 的 `LISA_IMAGE_*`。按用户本轮提供参考图的明确授权，已向 `https://drc.totokens.cc/v1/images/edits` 实际上传 PNG，medium、1024×1024、n=1、PNG 输出，HTTP 200，24.895 秒，返回模型 `gpt-image-2`，得到一张挥手半身插画。已目视检查，主要发型、红眼、头饰及服装主配色与参考图相近，构图和动作变化；符合用户仅锚定基础风格的目标，不做严格身份一致性判定。usage 所有字段为 0，不能据此判定免费。
 

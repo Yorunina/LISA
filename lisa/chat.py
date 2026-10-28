@@ -349,6 +349,10 @@ def _adopt_chat_decision(
         notice = apply_image_action(
             db, settings, user, task, decision.image_action, current_texts
         )
+        if (task.result or {}).get("suppress_text_reply"):
+            # No textual reply was delivered: do not promote its invented life
+            # events, mentions or other reply-dependent effects as already shared.
+            return ""
         if notice:
             reply += "\n\n" + notice
             reply_parts[-1] += "\n\n" + notice
@@ -683,21 +687,25 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                 project_id=project_id, source_ids=source_ids, current_texts=current_texts,
                 memory_ids=memory_ids, share_ids=share_ids, context_limited=context_limited,
             )
-        meme = (
-            select_meme(db, user_id, decision.meme_id, recalled) if decision and not error else None
-        )
-        outbound_parts = reply_parts if error is None else [reply]
-        outbound_intervals = reply_intervals if error is None else [0.0]
-        _outbound(
-            db,
-            task,
-            qq_id,
-            reply,
-            meme,
-            parts=outbound_parts,
-            intervals=outbound_intervals,
-            chat_message_ids=None,
-        )
+        if error is None and (task.result or {}).get("suppress_text_reply"):
+            task.result = {**task.result, "outbound_count": 0}
+        else:
+            meme = (
+                select_meme(db, user_id, decision.meme_id, recalled)
+                if decision and not error else None
+            )
+            outbound_parts = reply_parts if error is None else [reply]
+            outbound_intervals = reply_intervals if error is None else [0.0]
+            _outbound(
+                db,
+                task,
+                qq_id,
+                reply,
+                meme,
+                parts=outbound_parts,
+                intervals=outbound_intervals,
+                chat_message_ids=None,
+            )
         # The rows above are only a transactional inbox for debounce, retries,
         # and image processing.  Once this task has produced its result, remove
         # every raw user input so LISA cannot maintain a parallel chat archive.

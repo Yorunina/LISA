@@ -392,15 +392,18 @@ async def deliver_outbox(
             continue
         status, gateway_id = "unknown", None
         try:
-            result = await connection.call(
-                "send_private_msg",
-                {
-                    "user_id": int(message.qq_id),
-                    "message": segments,
-                },
-            )
-            if result.get("message_id") is not None:
-                status, gateway_id = "sent", str(result["message_id"])
+            if not segments:
+                status = "cancelled"
+            else:
+                result = await connection.call(
+                    "send_private_msg",
+                    {
+                        "user_id": int(message.qq_id),
+                        "message": segments,
+                    },
+                )
+                if result.get("message_id") is not None:
+                    status, gateway_id = "sent", str(result["message_id"])
         except OneBotFailure:
             status = "failed"
         except OneBotUnknown:

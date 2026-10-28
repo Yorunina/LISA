@@ -83,7 +83,16 @@ IMAGE_INSTRUCTIONS = (
     "用户明确指定本轮所发图片作为LISA人设或作品画风参考时operation=reference，"
     "target=chat表示本账号LISA人设，cover/illustration表示该作品画风；不要把普通上传自动设为参考。"
     "用户明确取消正在绘图时operation=cancel，target和作品/章节指定要取消的范围。"
-    "生成是异步委托，文字可告知稍后送达，不声称图片已经完成。"
+    "生成是异步委托，不声称图片已经完成。send_text_reply控制是否另发本轮文字回复，"
+    "caption独立控制图片完成后的短配文，两者互不绑定。"
+    "只需绘图、无需说明时，send_text_reply=false且caption为空，直接交付裸图；"
+    "用户明确只发图/不要文字时必须采用这一组合。"
+    "用户要求配一句诗等配文时，caption填写相应文字，通常仍send_text_reply=false，"
+    "这样只发图片加配文，不另发确认。用户要求先确认或另有需要回答的问题时，"
+    "send_text_reply=true。不要固定添加已画好等套话，不能隐藏澄清或其他问题的回答。"
+    "例如只发图片：send_text_reply=false,caption=空字符串；"
+    "画好配一句诗：send_text_reply=false,caption=短诗；先说一声再画：send_text_reply=true。"
+    "普通聊天中send_text_reply=false会使reply/messages不投递，也不作为已交流的生活事实采用。"
 )
 
 
@@ -99,6 +108,12 @@ class ImageAction(BaseModel):
     depicts_lisa: bool = False
     requested: bool = False
     evidence: str = Field(default="", max_length=1000)
+    send_text_reply: bool = Field(
+        default=True, description="是否另发本轮文字回复，与图片配文独立；纯绘图可false。"
+    )
+    caption: str = Field(
+        default="", max_length=300, description="图片完成后的可选配文；只发图片时为空。"
+    )
 
 
 class ImagePreparation(BaseModel):
@@ -466,13 +481,21 @@ def apply_image_action(db, settings, user, source_task, action, current_texts, r
             "qq_id": binding.qq_id,
             "slot_revision": slot.image_revision if slot else None,
         },
-        input_snapshot={"prompt": prompt, "reference_id": str(reference.id) if reference else None},
+        input_snapshot={
+            "prompt": prompt,
+            "reference_id": str(reference.id) if reference else None,
+            "caption": action.caption.strip(),
+        },
     )
     db.add(task)
     db.flush()
     from lisa.queue import enqueue_image
 
     task.queue_job_id = enqueue_image(db, task.id, user.id)
+    source_task.result = {
+        **(source_task.result or {}),
+        "suppress_text_reply": not action.send_text_reply,
+    }
     return "已安排绘图，画好后会发来。"
 
 
@@ -543,7 +566,10 @@ async def execute_image_turn(
                 )
             else:
                 notice = prepared.clarification
-            _outbound(db, task, binding.qq_id, notice or "这次没有发起绘图。")
+            if not error and (task.result or {}).get("suppress_text_reply"):
+                task.result = {**task.result, "outbound_count": 0}
+            else:
+                _outbound(db, task, binding.qq_id, notice or "这次没有发起绘图。")
         else:
             task.status, task.error = "cancelled", "account_unavailable"
         db.execute(delete(ChatMessage).where(ChatMessage.task_id == task.id))
@@ -653,8 +679,18 @@ async def execute_image(settings, engine, task_id, *, generate=None):
         if snapshot.get("reference_id") and reference is None:
             task.status, task.error = "failed", "reference_unavailable"
             task.finished_at, task.input_snapshot = datetime.now(UTC), None
+            db.add(
+                OutboundMessage(
+                    user_id=user_id, task_id=task.id, qq_id=binding.qq_id,
+                    content="这次绘图的参考图已不可用，请重新指定后再试。",
+                )
+            )
             return
         prompt, reference_data = snapshot.get("prompt", ""), reference.data if reference else None
+        caption = snapshot.get(
+            "caption",
+            "刚才那张图画好了。" if target == "chat" else "图片画好了，已保存到对应作品。",
+        )
         task.status, task.started_at = "running", datetime.now(UTC)
     error, data = None, None
     try:
@@ -729,9 +765,7 @@ async def execute_image(settings, engine, task_id, *, generate=None):
                 user_id=user_id,
                 task_id=task.id,
                 qq_id=binding.qq_id,
-                content="刚才那张图画好了。"
-                if target == "chat"
-                else "图片画好了，已保存到对应作品。",
+                content=caption,
                 private_image_id=item.id,
             )
         )
