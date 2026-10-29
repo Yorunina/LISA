@@ -9,7 +9,8 @@ from test_proactive import contact_user as contact_user
 from test_proactive import queued
 
 from lisa.chat import execute_chat
-from lisa.dialogue import Dialogue, apply_decision, creative_context
+from lisa.dialogue import Conversation, Dialogue, apply_decision, creative_context
+from lisa.model_calls import _reply_request, request_size
 from lisa.models import Account, OutboundMessage, Project, Task
 from lisa.proactive import execute_contact
 from lisa.topics import DEFAULT_MARKER, DefaultDesign, adopt_default_design, topic_context
@@ -219,9 +220,11 @@ async def test_optional_memories_do_not_crowd_out_current_chat_input(
 ):
     create_user(db)
     task_id = ingest(db, "observation-budget", content="你好，今天聊点轻松的。")
-    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
+    schema_bytes = request_size(_reply_request(settings, "", [], Conversation))
+    settings = settings.model_copy(update={"model_max_input_bytes": schema_bytes + 8000})
+    optional = "过长的可选记忆" * 3000
     monkeypatch.setattr(
-        "lisa.recall.memory_context", lambda *args, **kwargs: "过长的可选记忆" * 3000
+        "lisa.recall.memory_context", lambda *args, **kwargs: optional
     )
     generate = AsyncMock(return_value="好，我们轻松聊聊。")
     await execute_chat(settings, engine, task_id, generate=generate)
@@ -229,3 +232,9 @@ async def test_optional_memories_do_not_crowd_out_current_chat_input(
     assert db.get(Task, task_id).status == "completed"
     assert "过长的可选记忆" not in generate.call_args.args[4]
     assert "你好，今天聊点轻松的。" in generate.call_args.args[5][-1]["content"]
+    instructions, messages = generate.call_args.args[4:6]
+    assert request_size(_reply_request(settings, instructions, messages, Conversation)) <= (
+        settings.model_max_input_bytes
+    )
+    with_optional = _reply_request(settings, instructions + optional, messages, Conversation)
+    assert request_size(with_optional) > settings.model_max_input_bytes

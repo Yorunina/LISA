@@ -1,14 +1,39 @@
 """Small, expiring context for one account and its current QQ binding."""
 
+import re
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import delete, exists, select
 
 from lisa.models import Account, ChatTurn, QQBinding, Task
 
-MAX_TURNS = 6
+MAX_TURNS = 50
 MAX_CONTEXT_BYTES = 6000
-CONTEXT_TTL = timedelta(minutes=30)
+CONTEXT_TTL = timedelta(hours=24)
+
+_FOLLOWUP_REFERENCE = re.compile(
+    r"那里|那边|那位|刚才那个|刚才说的|之前说的|上次说的|那个(?:地方|人|角色|项目|东西|事)"
+)
+
+
+def recall_query(current: str, history: list[dict]) -> str:
+    """Add nearby reference clues only for explicit follow-ups, within one query."""
+    query = current[-1500:]
+    if not _FOLLOWUP_REFERENCE.search(query) or any(
+        marker in query for marker in ("换个话题", "说点别的")
+    ):
+        return query
+    remaining = min(400, 1500 - len(query))
+    messages = list(reversed(history[-2:]))
+    for index, message in enumerate(messages):
+        heading = f"\n[近期{message['role']} 时间 {message['time']}，仅指代线索]\n"
+        budget = remaining // (len(messages) - index)
+        if budget <= len(heading):
+            break
+        content = message["content"][:budget - len(heading)]
+        query += heading + content
+        remaining -= len(heading) + len(content)
+    return query
 
 
 def clear_context(db, user_id):

@@ -1,10 +1,10 @@
 # 本地开发环境
 
-更新：2026 年 10 月 28 日。Windows 原生运行；本机已有 Windows 11 x64 实施证据，Windows 10/Server、正式服务和容量仍待验收。本页维护当前运行方法、配置与验证边界；逐轮测试、故障诊断、模型费用样本和服务重载日志已归入 [环境历史](archive/2026-10-24/DEVELOPMENT.md)，默认不读。功能状态查 [开发任务](DEVELOPMENT_TASKS.md)。
+更新：2026 年 10 月 29 日。Windows 原生运行；本机已有 Windows 11 x64 实施证据，Windows 10/Server、正式服务和容量仍待验收。本页维护当前运行方法、配置与验证边界；逐轮测试、故障诊断、模型费用样本和服务重载日志已归入 [环境历史](archive/2026-10-24/DEVELOPMENT.md)，默认不读。功能状态查 [开发任务](DEVELOPMENT_TASKS.md)。
 
 ## 当前环境
 
-需求与运行差异（2026年10月28日）：D09已取消普通聊天及其他文本生成消费额度，D26首版仪表盘需求已确认，见[B16](DEVELOPMENT_TASKS.md#b16-第一版运行仪表盘与消费额度调整)。本轮仅需求，以下旧额度配置/已验证行为仍描述实际运行基线，尚未移除或重载；需求确认不代表运行态已经无限额。
+需求与运行差异（2026年10月28日）：D09已取消普通聊天及其他文本生成消费额度，D26首版仪表盘需求已确认，见[B16](DEVELOPMENT_TASKS.md#b16-第一版运行仪表盘与消费额度调整)。B16源码已实现并通过隔离验收；本轮未改runtime/.env、迁移个人库或重载，旧额度配置/历史验证不能作为现行产品要求。正式启用见[仪表盘说明](#运行仪表盘与文本无消费额度)。
 
 | 组件 | 本机版本／位置 | 用途 |
 | --- | --- | --- |
@@ -70,7 +70,31 @@ runtime\venv\Scripts\python.exe -m lisa.worker --once
 
 worker 同时消费 `lisa`、`lisa_author`、`lisa_index`、`lisa_style`；聊天与慢作者分队列，调用仍共用全局预算与并发。API/worker/gateway 的逐项命令为前台运行，Ctrl+C 停止；launcher 为后台编排入口。日常启动依实际配置工作，可能产生模型调用和 QQ 投递。
 
+## 运行仪表盘与文本无消费额度
+
+2026年10月29日B16源码已接通，迁移版本 `b16a9c102901`（接 `b17a8c102801`）。个人库/服务尚未执行本批迁移或重载；本轮使用独立测试库及构建目录，没有覆盖 `runtime/dist/`。正式启用需确认无在途任务、调用或发送后，按既有停机/启动流程一起加载迁移、API、worker、gateway和网页，保留个人数据与QQ会话。
+
+在本机忽略配置 `runtime/.env` 设置 `LISA_OPERATIONS_MAINTAINERS=<已有用户名>`；支持逗号分隔用户名或账号UUID，默认空时包括旧is_admin在内均无权限。不写密码或密钥到此配置项。指定账号登录可见独立“运行仪表盘”入口，普通用户仅能查询自身入口资格，数据API返回403。
+
+默认参数：`LISA_OPERATIONS_TIMEZONE=Asia/Shanghai`，刷新30秒、心跳20秒、90秒判过期、可执行等待/长任务提示300秒、新检索观测及评测结果保留30天。完整参数名见[配置模板](../.env.example)；API启动及运行期间每小时清理过期观测，现有业务台账不随之删除。组件/队列/索引覆盖是当前全局快照；筛选用于相应历史任务、调用和检索。
+
+旧 `MODEL_DAILY_USD` / `MODEL_TASK_USD` 兼容配置但不限制文本或个人向量。输入/输出容量、有限阶段、并发、取消、未知结果及自主/联系规则保留。模型价格0或空表示未知，不表示免费；D20仅共有表情视觉/公共向量维护保留独立1元，未知价延后，不阻断普通文本或个人索引。
+
+RAG基准默认隔离，不消费真实模型/QQ，不写个人库：
+
+```powershell
+runtime\venv\Scripts\python.exe scripts\benchmark_rag.py --output runtime\reports\rag-dashboard-baseline.json
+```
+
+CLI创建/清理独立 `lisa_test_<uuid>` 库，40题走生产索引、recall、组装与最终装入，使用确定性向量；报告含资料/代码指纹及刻意省略/失效负例，不代表真人语义已验收。页面没有报告时显示未评测。正式加载后可在上述命令加 `--publish`，显式将安全结果写当前库供页面读取；本轮未执行发布。
+
+工程证据与首轮失败修正见[B16记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#b16-运行仪表盘与消费额度调整)。真实QQ、供应商账单、自然数据召回及多日效果继续单列，不由合成工程分数替代。
+
 ## 普通 QQ 私聊入口
+
+记忆首批参数已在源码实现为50轮/6000 UTF-8正文字节/滚动24小时；查询窄指代补充及个人15切片候选仍保持最终5条/1500字符。正式服务未因本批重载，旧进程不因此自动生效；产品规则查[短期连续性](PROJECT_PLAN.md#短期对话连续性与图片委托补全)，交付证据查[记忆首批记录](archive/2026-10-24/DEVELOPMENT_TASKS.md#2026-10-29-对话窗口与个人召回首批改进)。
+
+轻量查询/候选评测：`runtime/venv/Scripts/python.exe scripts/benchmark_memory.py` 默认仅离线校验24题，无数据库或模型访问；显式加 `--live --output runtime/reports/memory-retrieval-comparison.json` 才会创建/迁移/删除独立临时库并调用配置的真实embedding。失败或unknown停止，不盲重放；不调用聊天模型、不发QQ、不写个人库。三臂复用同题已成功查询向量以减费，因此耗时不能用于端到端延迟对比。样本与账目/报告均与线上效果分开解释。
 
 `runtime/.env` 的 `LISA_CHAT_ENABLED=true` 开放普通私聊，`LISA_WEB_URL` 指向实际网页。已绑定且选定性格后直接发普通消息；`绑定`/`找回` 优先走不调用模型的一次性码服务。未初始化固定引导按五分钟节流，初始化后不补答旧消息；去重后按可信时间更新活跃，正常发送按账号有序并复查当前绑定。
 
@@ -359,6 +383,14 @@ npm.cmd run build
 密码与两个不同的令牌由 `init` 随机生成，只保存在本地 `runtime/.env` 与 NapCat 运行配置中。数据库超级用户为 `postgres`，应用使用非超级用户 `lisa`。本地服务仅监听回环地址，不需要添加公网防火墙放行规则。
 
 `Start` 会保留已有数据，`init` 不覆盖现有 `runtime/.env` 和 NapCat 配置。修改数据库密码不能只改 `runtime/.env`，还须同步数据库角色；修改 OneBot／WebUI 令牌须同步 `runtime/napcat/config/` 中的实际配置，必要时也检查 NapCat 创建的账号专属配置。数据库端口由 `runtime/.env` 控制；QQ 端口当前固定为上述开发端口，若调整须同步配置与客户端。
+
+### 仪表盘中的 NapCat 状态与管理入口
+
+维护者仪表盘提供独立 NapCat 状态卡，与 OneBot 网关、QQ 登录分别显示。本机进程探测只识别 runtime/tools/napcat/node.exe；管理页探测验证 NapCat WebUI HTML，不登录或发送管理请求。无权限或超时如实显示无法确认。
+
+新增配置：LISA_NAPCAT_WEBUI_PROBE_URL 为 API 所在服务器可访问的探测地址，LISA_NAPCAT_WEBUI_URL 为维护者浏览器可访问的管理地址，默认均为 http://127.0.0.1:6099/webui。手机/其他电脑上 127.0.0.1 指该设备自身，应配置实际可达的受保护地址。两项配置均不接受用户名密码、query或fragment。WebUI令牌已由初始化/启动流程保存在runtime/.env的LISA_NAPCAT_WEBUI_TOKEN及NapCat配置中；本机管理跳转优先读取runtime/napcat/config/webui.json当前token，失败时回退环境SecretStr。远端探测不使用本机配置文件里的token，应给该远端明确配置LISA_NAPCAT_WEBUI_TOKEN。
+
+只有配置了 LISA_OPERATIONS_MAINTAINERS 的 API 才周期采集 NapCat 状态。维护者点击“打开 NapCat 管理台”后，在原界面完成登录或重启；若 NapCat 已停止，先沿用 StartQQ/本机启动器。用户后续已允许自动携带保存token：按钮指向/api/operations/napcat/open，接口再次验证LISA维护资格后303跳转到配置管理地址，并附加NapCat原生token参数。状态接口与页面DOM不含token；跳转禁止缓存/Referer，LISA日志仅记路由模板，令牌轮换后按点击时配置读取，不采集控制台日志。无保存值时仍可在原生界面手动登录；2FA、QQ扫码等继续由NapCat处理，不因自动传token而绕过。源码更新不代表当前服务已重载。
 
 ## NapCat 登录与数据
 

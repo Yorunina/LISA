@@ -79,7 +79,6 @@ def test_index_queue_rolls_back_with_task(enabled_settings, engine, db, owner, m
     "change",
     [
         {"embedding_model": ""},
-        {"embedding_input_per_million": Decimal(0)},
         {"model_api_key": SecretStr("")},
     ],
 )
@@ -96,6 +95,18 @@ def test_disabled_index_sweep_has_no_database_or_provider_work(
     queue.tasks["lisa.index_sweep"].func(timestamp=0)
     ensure.assert_not_called()
     db.flush.assert_not_called()
+
+
+def test_unknown_price_keeps_personal_index_sweep_enabled(enabled_settings, monkeypatch):
+    configured = enabled_settings.model_copy(update={"embedding_input_per_million": Decimal(0)})
+    ensure = Mock(return_value=[])
+    monkeypatch.setattr(retrieval, "ensure_index_tasks", ensure)
+    db = Mock()
+    assert enqueue_pending_indexes(db, configured) == 0
+    ensure.assert_called_once_with(db, configured, limit=20)
+    db.flush.assert_called_once()
+    queue = create_queue(configured)
+    assert ("lisa.index_sweep", "") in queue.periodic_registry.periodic_tasks
 
 
 def test_minute_sweep_registered_and_real_failures_not_retried(enabled_settings):

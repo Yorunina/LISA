@@ -1,7 +1,7 @@
 """Ground creative updates and bounded commissions in the user's current message."""
 
 import json
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -35,6 +35,8 @@ class Commission(BaseModel):
 
 
 class Conversation(Reply):
+    provider_output_default: ClassVar[bool] = True
+
     @classmethod
     def structured_instructions(cls, instructions: str) -> str:
         return _chat_output_instructions(instructions, cls)
@@ -76,7 +78,9 @@ def _chat_output_instructions(instructions: str, schema: type[Conversation]) -> 
         "不加Markdown代码块、解释或JSON之外的文字。性格设定中的普通文字、直接回复、只输出正文等"
         "要求只作用于reply和messages中的用户可见正文，不改变此JSON传输协议。"
         "完整返回所有字段；没有相关证据时，列表用[]、可空字段用null、说明字段用空字符串，"
-        "不得省略字段或编造记忆、意见、委托与生活事件。reply填写实际完整回复，messages按语义分条，"
+        "不得省略字段或编造用户记忆、意见、委托与真实执行结果；"
+        "LISA自己的新虚拟日常及细节补全按生活正式采用规则填写life_events。"
+        "reply填写实际完整回复，messages按语义分条，"
         "message_intervals与messages等长。下列仅示意字段结构，正文必须根据本轮消息生成：\n"
         + json.dumps(shape.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":"))
     )

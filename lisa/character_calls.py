@@ -9,8 +9,9 @@ from sqlalchemy.orm import Session
 from lisa.characters import CharacterDefinition, CharacterRetrievalConfig, KnowledgeObservation
 from lisa.model_calls import generate_structured
 from lisa.models import Character, CharacterParticipation, Task
+from lisa.observability import finalize_context
 from lisa.recall import retrieve_context
-from lisa.retrieval import Context, record_references
+from lisa.retrieval import record_references
 from lisa.works import lock_account
 
 
@@ -108,7 +109,7 @@ async def consult_character(
             if not config.enabled or any(
                 ref["revision"] != current.revision for ref in context.references
             ):
-                context = Context()
+                context = context.discarded("source_changed")
             db.get(CharacterParticipation, (task_id, position)).revision = current.revision
             instructions = (
                 "你只扮演当前角色，提出自身可能的对白、行动与反应，供作者参考。"
@@ -142,6 +143,7 @@ async def consult_character(
                 ),
             }
         ]
+        finalize_context(engine, context)
         result = CharacterSuggestion.model_validate(
             await (generate or generate_character)(
                 settings, engine, task_id, user_id, instructions, messages

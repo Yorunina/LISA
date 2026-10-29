@@ -280,31 +280,30 @@ async def test_public_vectors_reuse_index_tables_without_private_scope(
     assert "新的公开解释" in recall_shared(db, vector_settings, owner, "chat", item["title"]).text
 
 
-def test_platform_ledger_caps_all_maintenance_and_global_budget(db, engine, owner, settings):
+def test_platform_ledger_only_limits_nontext_maintenance(db, engine, owner, settings):
     common = Task(user_id=None, kind="shared_analyze", status="running")
     private = Task(user_id=owner, kind="chat", status="running")
     db.add_all([common, private])
     db.commit()
-    config = settings.model_copy(update={"model_task_usd": Decimal(5), "model_concurrency": 8})
-    call = _reserve(config, engine, common.id, None, Decimal("0.6"))
+    config = settings.model_copy(update={
+        "model_daily_usd": Decimal("0.001"), "model_concurrency": 8,
+    })
+    visual = {"api": "vision", "input_per_million": "1", "output_per_million": "1"}
+    call = _reserve(config, engine, common.id, None, Decimal("0.6"), configuration=visual)
     _finish(engine, call, state="succeeded", charged=Decimal("0.6"))
     another = Task(user_id=None, kind="shared_analyze", status="running")
     db.add(another)
     db.commit()
     with pytest.raises(BudgetExceeded, match="shared maintenance"):
-        _reserve(config, engine, another.id, None, Decimal("0.5"))
+        _reserve(config, engine, another.id, None, Decimal("0.5"), configuration=visual)
     private_call = _reserve(config, engine, private.id, owner, Decimal("0.6"))
     _finish(engine, private_call, state="succeeded", charged=Decimal("0.6"))
-    with pytest.raises(BudgetExceeded, match="Daily model"):
-        _reserve(
-            config.model_copy(update={"model_daily_usd": Decimal("1.3")}),
-            engine,
-            another.id,
-            None,
-            Decimal("0.2"),
-        )
+    text_call = _reserve(config, engine, another.id, None, Decimal("99"))
+    _finish(engine, text_call, state="succeeded", charged=Decimal("99"))
+    visual_call = _reserve(config, engine, another.id, None, Decimal("0.4"), configuration=visual)
+    _finish(engine, visual_call, state="succeeded", charged=Decimal("0.4"))
     db.expire_all()
-    assert db.get(BudgetDay, datetime.now(UTC).date()).spent_usd == Decimal("1.2")
+    assert db.get(BudgetDay, datetime.now(UTC).date()).spent_usd == Decimal("100.6")
 
 
 @pytest.mark.asyncio

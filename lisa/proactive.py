@@ -1,6 +1,7 @@
 """Bounded daily-life contact, using the existing task ledger and QQ outbox."""
 
 from datetime import UTC, datetime, timedelta
+from typing import ClassVar
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,6 +44,7 @@ from lisa.topics import DefaultDesign, adopt_default_design, topic_context
 
 
 class ContactReply(BaseModel):
+    provider_output_default: ClassVar[bool] = True
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     reply: str = Field(min_length=1, max_length=800)
     meme_id: UUID | None = None

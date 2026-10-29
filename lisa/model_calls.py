@@ -17,7 +17,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from lisa.models import Account, BudgetDay, ModelCall, Task
+from lisa.models import Account, BudgetDay, ModelCall, Project, Task
 from lisa.settings import Settings
 from lisa.structured_output import (
     parse_structured_output,
@@ -47,6 +47,10 @@ class ModelBusy(Exception):
 
 class ModelCallFailed(Exception):
     pass
+
+
+class MaintenancePriceUnavailable(ModelCallFailed):
+    """Limited shared visual/index maintenance needs a known price before execution."""
 
 
 class EmbeddingUnavailable(ModelCallFailed):
@@ -87,6 +91,54 @@ def _cost(settings: Settings, input_tokens: int, output_tokens: int) -> Decimal:
     ).quantize(MONEY_UNIT, rounding=ROUND_UP)
 
 
+def _purpose(task_kind: str, config: dict) -> str:
+    api, schema = config.get("api"), config.get("schema", "")
+    if api == "embeddings":
+        return "shared_index" if task_kind == "shared_index" else (
+            "index_embedding" if task_kind == "index" else "query_embedding"
+        )
+    if api == "vision":
+        return "shared_vision" if task_kind == "shared_analyze" else "vision"
+    if schema == "AuthorChoice":
+        return "author_decision"
+    if schema == "CharacterSuggestion":
+        return "role"
+    if task_kind == "style_distill":
+        return {
+            "BatchAnalysis": "style_observe", "StyleCandidate": "style_synthesize",
+        }.get(schema, "style_validate")
+    return {
+        "chat": "chat", "scene": "author", "rewrite": "author", "diary": "diary",
+        "life_plan": "life_plan", "life_plan_generate": "life_plan",
+        "style_trial": "style_trial", "shared_analyze": "shared_text",
+        "proactive": "proactive", "contact": "proactive", "life": "diary",
+    }.get(task_kind, "unknown")
+
+
+def _price_known(config: dict, provider_kind: str) -> bool:
+    if provider_kind == "image":
+        return False
+    try:
+        incoming = Decimal(str(config.get("input_per_million", 0)))
+        outgoing = Decimal(str(config.get("output_per_million", 0)))
+        return incoming > 0 and (provider_kind == "embedding" or outgoing > 0)
+    except Exception:
+        return False
+
+
+def mark_dispatch(engine, call_id: UUID, state: str) -> None:
+    """Persist the send boundary; dispatching/unknown never imply confirmed delivery."""
+    with Session(engine) as db, db.begin():
+        call = db.get(ModelCall, call_id)
+        if call is None or call.state != "reserved":
+            raise ModelCallFailed("Call no longer available")
+        config = dict(call.configuration)
+        config["dispatch_state"] = state
+        if state == "dispatching":
+            config["dispatched_at"] = datetime.now(UTC).isoformat()
+        call.configuration = config
+
+
 def _reserve(
     settings: Settings,
     engine,
@@ -124,44 +176,63 @@ def _reserve(
         calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task_id)).all()
         if any(call.state == "unknown" for call in calls):
             raise ModelCallUnknown("An earlier attempt of this task has an unknown outcome")
-        budgeted_calls = [call for call in calls if not call.budget_exempt]
-        task_cost = sum(
-            (
-                call.charged_usd if call.charged_usd is not None else call.reserved_usd
-                for call in budgeted_calls
-            ),
-            Decimal(0),
+        # D09 removes consumption caps for text and personal/query embeddings.
+        # Only independent D20 visual/public-index maintenance retains its daily cap.
+        provider_kind = (configuration or {}).get("provider_kind") or (
+            "embedding" if (configuration or {}).get("api") == "embeddings"
+            else "vision" if (configuration or {}).get("api") == "vision"
+            else "image" if (configuration or {}).get("purpose") == "image_generation"
+            else "text"
         )
-        max_calls = (
-            settings.style_distillation_max_calls
-            if task.kind == "style_distill"
-            else (6 if task.request.get("mode") == "refine" else 1)
-            if task.kind == "style_trial"
-            else MAX_WRITING_CALLS
-            if task.kind in {"scene", "rewrite"}
-            else MAX_TASK_CALLS
-        )
-        # Ordinary chat interprets image commissions in its single call. D09
-        # removes consumption caps while preserving accounting and concurrency.
-        consumption_limited = not budget_exempt and task.kind != "chat"
-        if consumption_limited and (len(budgeted_calls) >= max_calls or (
-            task.kind != "style_distill" and task_cost + amount > settings.model_task_usd
-        )):
-            raise BudgetExceeded("Task model allowance exhausted")
-        if consumption_limited and (
-            day.spent_usd + day.reserved_usd + amount > settings.model_daily_usd
-        ):
-            raise BudgetExceeded("Daily model allowance exhausted")
-        if platform:
+        if platform and provider_kind in {"vision", "embedding"}:
+            if not _price_known(configuration or {}, provider_kind):
+                raise MaintenancePriceUnavailable("Shared maintenance price unavailable")
             maintenance = db.scalars(select(ModelCall).where(
                 ModelCall.user_id.is_(None), ModelCall.budget_day == day.day
             )).all()
+            if any(
+                (c.configuration.get("provider_kind") in {"vision", "embedding"}
+                 or c.configuration.get("api") in {"vision", "embeddings"})
+                and (
+                    c.configuration.get("price_known") is False
+                    or (c.configuration.get("price_known") is not True and not _price_known(
+                        c.configuration, c.configuration.get("provider_kind") or (
+                            "embedding" if c.configuration.get("api") == "embeddings" else "vision"
+                        )
+                    ))
+                )
+                for c in maintenance
+            ):
+                raise MaintenancePriceUnavailable("Shared maintenance cost pending")
             used = sum((
                 c.charged_usd if c.charged_usd is not None else c.reserved_usd
                 for c in maintenance
+                if c.configuration.get("provider_kind") in {"vision", "embedding"}
+                or c.configuration.get("api") in {"vision", "embeddings"}
             ), Decimal(0))
             if used + amount > settings.shared_daily_usd:
                 raise BudgetExceeded("Daily shared maintenance allowance exhausted")
+        config = dict(configuration or {
+            "model": settings.model_name,
+            "base_url": settings.model_base_url,
+            "max_output_tokens": settings.model_max_output_tokens,
+            "input_per_million": str(settings.model_input_per_million),
+            "output_per_million": str(settings.model_output_per_million),
+        })
+        config["provider_kind"] = provider_kind
+        config.setdefault("purpose", _purpose(task.kind, config))
+        if config["purpose"] == "author" and task.project_id:
+            project_kind = db.scalar(select(Project.kind).where(Project.id == task.project_id))
+            if project_kind == "diary":
+                config["purpose"] = "diary"
+        config.setdefault("price_known", _price_known(config, provider_kind))
+        config.setdefault("dispatch_state", "not_sent")
+        config.setdefault("cost_source", "unknown")
+        config["price_version"] = {
+            "input_per_million": config.get("input_per_million"),
+            "output_per_million": config.get("output_per_million"),
+            "currency": "CNY",
+        }
         image_call = (configuration or {}).get("purpose") == "image_generation"
         inflight = db.scalar(
             select(func.count()).select_from(ModelCall).where(
@@ -181,15 +252,7 @@ def _reserve(
             budget_exempt=budget_exempt,
             reserved_usd=Decimal(0) if budget_exempt else amount,
             started_at=now,
-            configuration=configuration
-            if configuration is not None
-            else {
-                "model": settings.model_name,
-                "base_url": settings.model_base_url,
-                "max_output_tokens": settings.model_max_output_tokens,
-                "input_per_million": str(settings.model_input_per_million),
-                "output_per_million": str(settings.model_output_per_million),
-            },
+            configuration=config,
         )
         db.add(call)
         if not budget_exempt:
@@ -207,6 +270,7 @@ def _finish(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     error: str | None = None,
+    cost_source: str | None = None,
 ) -> bool:
     with Session(engine) as db, db.begin():
         db.execute(text("SELECT pg_advisory_xact_lock(7273101)"))
@@ -223,6 +287,20 @@ def _finish(
         call.state, call.charged_usd = state, amount
         call.input_tokens, call.output_tokens = input_tokens, output_tokens
         call.finished_at, call.error = datetime.now(UTC), error
+        config = dict(call.configuration)
+        if cost_source is None:
+            cost_source = (
+                "unknown" if not config.get("price_known", False) or (
+                    config.get("output_capacity") == "provider_default"
+                    and input_tokens is None and config.get("dispatch_state") != "not_sent"
+                )
+                else "conservative" if state == "unknown" or (
+                    input_tokens is None and config.get("dispatch_state") != "not_sent"
+                )
+                else "estimate"
+            )
+        config["cost_source"] = cost_source
+        call.configuration = config
     return True
 
 
@@ -240,6 +318,7 @@ def _reply_request(
         ]
 
     compiled_schema = structured_schema(schema)
+    provider_output_default = getattr(schema, "provider_output_default", False)
     effort = settings.model_reasoning_effort
     if effort is None and settings.model_name in {"gpt-6-astra", "gpt-6.1-sol"}:
         effort = "low"
@@ -254,9 +333,10 @@ def _reply_request(
                 *[dict(message, role="system" if message["role"] == "developer"
                        else message["role"]) for message in messages],
             ],
-            "max_tokens": settings.model_max_output_tokens,
             "response_format": {"type": "json_object"},
         }
+        if not provider_output_default:
+            request["max_tokens"] = settings.model_max_output_tokens
         if effort is not None:
             request["reasoning_effort"] = effort
         return request
@@ -266,7 +346,6 @@ def _reply_request(
         "instructions": instructions,
         "input": messages,
         "store": False,
-        "max_output_tokens": settings.model_max_output_tokens,
         "text": {
             "format": {
                 "type": "json_schema",
@@ -277,6 +356,8 @@ def _reply_request(
             }
         },
     }
+    if not provider_output_default:
+        request["max_output_tokens"] = settings.model_max_output_tokens
     if effort is not None:
         request["reasoning"] = {"effort": effort}
     return request
@@ -393,8 +474,12 @@ async def _provider_request(
             resource = client
             for name in endpoint.split("."):
                 resource = getattr(resource, name)
-            return await resource.create(**request)
+            mark_dispatch(engine, call_id, "dispatching")
+            result = await resource.create(**request)
+            mark_dispatch(engine, call_id, "sent")
+            return result
     except APIStatusError as exc:
+        mark_dispatch(engine, call_id, "sent")
         request_id = exc.response.headers.get("x-request-id", "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", request_id):
             request_id = "unavailable"
@@ -420,6 +505,7 @@ async def _provider_request(
         cause = exc.__cause__
         # A failure before obtaining a connection cannot have reached model execution.
         not_sent = isinstance(cause, (ConnectError, ConnectTimeout, PoolTimeout))
+        mark_dispatch(engine, call_id, "not_sent" if not_sent else "unknown")
         error = type(exc).__name__ + (f":{type(cause).__name__}" if cause else "")
         chain = []
         current = exc
@@ -473,6 +559,8 @@ async def generate_structured(
     limit = settings.model_max_input_bytes if input_byte_limit is None else input_byte_limit
     if not 1 <= limit <= MAX_INPUT_BYTES_HARD_LIMIT or input_bytes > limit:
         raise ModelInputTooLarge("Model input exceeds development limit")
+    # For uncapped conversations this output allowance is an accounting estimate,
+    # not an execution limit or an upper bound; known usage settles the actual estimate.
     # UTF-8 bytes deliberately overestimate input tokens; include protocol overhead.
     amount = _cost(settings, input_bytes + 512, settings.model_max_output_tokens)
     call_id = _reserve(
@@ -486,7 +574,10 @@ async def generate_structured(
             **({"purpose": "image_description"} if image_description else {}),
             "model": settings.model_name,
             "base_url": settings.model_base_url,
-            "max_output_tokens": settings.model_max_output_tokens,
+            "max_output_tokens": request.get("max_output_tokens", request.get("max_tokens")),
+            **({"output_capacity": "provider_default",
+                "reservation_output_estimate_tokens": settings.model_max_output_tokens}
+               if getattr(schema, "provider_output_default", False) else {}),
             "input_per_million": str(settings.model_input_per_million),
             "output_per_million": str(settings.model_output_per_million),
             "request_bytes": input_bytes,
@@ -577,9 +668,8 @@ async def generate_embeddings(
         not settings.embedding_model
         or not base_url
         or not api_key
-        or settings.embedding_input_per_million <= 0
     ):
-        raise ModelCallFailed("Embedding model and input price must be configured")
+        raise ModelCallFailed("Embedding model must be configured")
     if not texts or len(texts) > settings.embedding_batch_size:
         raise ModelInputTooLarge(
             f"Embedding batch must contain 1 to {settings.embedding_batch_size} texts"

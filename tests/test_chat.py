@@ -435,10 +435,43 @@ async def test_bounded_batches_run_in_order_with_recent_user_context(
 
 
 @pytest.mark.asyncio
+async def test_followup_query_uses_recent_input_without_reclassifying_it_as_current(
+    settings, engine, db, user_id, monkeypatch
+):
+    from lisa.retrieval import Context
+
+    queries, calls = [], []
+
+    async def retrieve(settings, engine, task_id, account_id, project_id, purpose, query):
+        queries.append(query)
+        return Context()
+
+    async def generate(settings, engine, task_id, account_id, instructions, messages):
+        calls.append(messages)
+        return "尚未送达的合成回复"
+
+    monkeypatch.setattr("lisa.chat.retrieve_context", retrieve)
+    first = ingest(db, 1, content="我以前在青岛住过")
+    await execute_chat(settings, engine, str(first), generate=generate)
+    second = ingest(db, 2, content="那里我还挺想去的")
+    await execute_chat(settings, engine, str(second), generate=generate)
+    assert queries[1].startswith("那里我还挺想去的")
+    assert "我以前在青岛住过" in queries[1]
+    assert "尚未送达的合成回复" not in queries[1]
+    assert calls[1][-1]["content"].endswith("那里我还挺想去的")
+    assert "我以前在青岛住过" not in calls[1][-1]["content"]
+    third = ingest(db, 3, content="这个报错怎么处理")
+    await execute_chat(settings, engine, str(third), generate=generate)
+    assert queries[-1] == "这个报错怎么处理"
+
+
+@pytest.mark.asyncio
 async def test_recent_successful_input_enters_chat_but_failed_and_unsent_text_do_not(
     settings, engine, db, user_id
 ):
-    settings = settings.model_copy(update={"model_max_input_bytes": 11_000})
+    # Leave room for the host/schema instructions; the 4000-character source
+    # below must still exceed this request budget by itself with the host.
+    settings = settings.model_copy(update={"model_max_input_bytes": 14_000})
     calls = []
 
     async def generate(settings, engine, task_id, account_id, instructions, messages):
@@ -938,7 +971,7 @@ def test_service_status_requires_login_and_actual_configuration(
         assert "synthetic-key" not in response.text
 
 
-def test_service_status_reports_budget_but_old_unknown_does_not_block_other_users(
+def test_service_status_ignores_old_spending_and_unknown_does_not_block_other_users(
     settings, db, user_id
 ):
     configured = settings.model_copy(
@@ -960,7 +993,7 @@ def test_service_status_reports_budget_but_old_unknown_does_not_block_other_user
     db.commit()
     with TestClient(create_app(configured)) as client:
         client.cookies.set("lisa_session", "synthetic-status-session")
-        assert client.get("/api/service-status").json()["status"] == "budget_exhausted"
+        assert client.get("/api/service-status").json()["status"] == "ready"
         day.spent_usd = Decimal("0")
         other_id = create_user(db, username="private_other_account", qq_id="710000002")
         task = Task(user_id=other_id, status="failed")

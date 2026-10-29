@@ -609,6 +609,45 @@ class ModelCall(Base):
     configuration: Mapped[dict] = mapped_column(JSONB, default=dict)
 
 
+class RuntimeHeartbeat(Base):
+    __tablename__ = "runtime_heartbeats"
+
+    component: Mapped[str] = mapped_column(String(32), primary_key=True)
+    observed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    status: Mapped[str] = mapped_column(String(16))
+    details: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+
+
+class RetrievalObservation(Base):
+    __tablename__ = "retrieval_observations"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    task_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(24))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    metrics: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+
+
+class RagEvaluationRun(Base):
+    __tablename__ = "rag_evaluation_runs"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    configuration: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+    results: Mapped[dict] = mapped_column(JSONB, default=dict, server_default="{}")
+
+
 class OutboundMessage(Base):
     __tablename__ = "outbound_messages"
     __table_args__ = (

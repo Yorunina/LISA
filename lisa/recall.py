@@ -1,5 +1,7 @@
 """Optional semantic context, resolved outside the caller's database transaction."""
 
+from time import perf_counter
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -51,13 +53,14 @@ def _options(db, user_id, project_id, purpose, character_id):
             return None
         return {"character_id": character_id, "limit": config.limit, "max_chars": config.max_chars}
     if purpose == "writing" and project_id:
-        return author_retrieval_config(db, user_id, project_id).model_dump()
+        config = author_retrieval_config(db, user_id, project_id)
+        return config.model_dump() if config.sources else None
     # The main chat agent keeps project identity and delegates full work context
     # to the author agent. Chat retrieval may use memories, never work text.
     return {"sources": ["memory"]} if purpose == "chat" else None
 
 
-async def retrieve_context(
+async def _retrieve_context(
     settings,
     engine,
     task_id,
@@ -72,7 +75,7 @@ async def retrieve_context(
     with Session(engine) as db:
         options = _options(db, user_id, project_id, purpose, character_id)
         if options is None:
-            return Context()
+            return Context(metrics={"state": "disabled", "route": "none"})
         ready = has_ready_context(
             db,
             settings,
@@ -94,6 +97,9 @@ async def retrieve_context(
                 ModelCall.configuration["query_fallback"].as_boolean().is_(True),
             ).limit(1)
         ) is not None
+    embedding_started = perf_counter()
+    embedding_attempted = bool((ready or public_ready) and not used_fallback)
+    degraded = bool(used_fallback)
     try:
         vectors = await (embed or generate_embeddings)(
             settings, engine, task_id, user_id, [query[-1500:]]
@@ -119,11 +125,14 @@ async def retrieve_context(
         # Only this query is optional. Re-read sources below; subsequent model
         # calls still reserve against the same task, including this failed call.
         vectors = None
+        degraded = True
+    embedding_ms = (perf_counter() - embedding_started) * 1000
+    retrieval_started = perf_counter()
     # Reapply live source permissions and revisions after the network request.
     with Session(engine) as db:
         options = _options(db, user_id, project_id, purpose, character_id)
         if options is None:
-            return Context()
+            return Context(metrics={"state": "disabled", "route": "none"})
         result = recall(
             db, settings, user_id, project_id, purpose, vectors[0], query=query, **options
         ) if ready and vectors else recall_titles(
@@ -138,6 +147,7 @@ async def retrieve_context(
                 references=result.memory_ids,
                 limit=options.get("limit"),
             )
+            degraded = degraded or bool(result.text)
             if purpose == "writing":
                 for memory_id in result.memory_ids:
                     source = _source(db, "memory", memory_id, user_id, project_id, purpose)
@@ -153,7 +163,61 @@ async def retrieve_context(
                         })
         public = recall_shared(db, settings, user_id, purpose, query,
                                vectors[0] if vectors else None)
+        from lisa.observability import context_keys
+
+        private_keys = result.metrics.get("candidate_keys", [])
+        assembled_keys = result.metrics.get("assembled_keys", [])
+        route = "semantic" if vectors and ready else (
+            "title" if any(ref.get("space") == "title-match" for ref in result.references)
+            else "none"
+        )
+        if result.memory_ids and not assembled_keys:
+            route = "recent"
+        result.metrics.update(
+            route=route, state=(
+                "fallback" if degraded and result.text else "executed" if result.text
+                else "empty" if ready else "no_sources"
+            ), degraded=degraded,
+            candidates=result.metrics.get("candidates", 0),
+            deduped=result.metrics.get("deduped", 0),
+            candidate_keys=private_keys,
+            assembled=len(context_keys(result)),
+            assembled_chars=len(result.text),
+            public={
+                "candidates": public.metrics.get("candidates", len(public.references)),
+                "assembled": len(public.references),
+                "assembled_chars": len(public.text),
+            },
+        )
+        durations = dict(result.metrics.get("durations_ms", {}))
+        durations.update(embedding=embedding_ms if embedding_attempted else None,
+                         retrieval=max(0, (perf_counter() - retrieval_started) * 1000
+                                       - durations.get("assembly", 0)))
+        result.metrics["durations_ms"] = durations
         result.public_text = public.text
         result.text += public.text
         result.references.extend(public.references)
         return result
+
+
+async def retrieve_context(
+    settings, engine, task_id, user_id, project_id, purpose, query, *, embed=None, character_id=None
+) -> Context:
+    """Observe only IDs/counts while leaving source permissions and failures authoritative."""
+    from lisa.observability import record_retrieval
+
+    began = perf_counter()
+    try:
+        result = await _retrieve_context(
+            settings, engine, task_id, user_id, project_id, purpose, query,
+            embed=embed, character_id=character_id,
+        )
+    except Exception:
+        result = Context(metrics={"state": "failed", "route": "none",
+                                  "durations_ms": {"total": (perf_counter() - began) * 1000}})
+        record_retrieval(engine, result, task_id, user_id, purpose)
+        raise
+    durations = dict(result.metrics.get("durations_ms", {}))
+    durations["total"] = (perf_counter() - began) * 1000
+    result.metrics["durations_ms"] = durations
+    return record_retrieval(engine, result, task_id, user_id, purpose)

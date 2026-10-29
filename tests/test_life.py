@@ -125,6 +125,33 @@ def test_event_and_dream_are_grounded_and_deduplicated(db, owner, chat_source):
     assert '"shared_at": null' in context and str(ids[0]) in context and "2026-01-02" in context
 
 
+def test_virtual_detail_is_adopted_with_original_event_time_and_reused(db, owner, chat_source):
+    vague = "刚才翻动画时，被片头曲勾住，停下来听完了。"
+    chat_source.content = vague
+    db.commit()
+    original = event(content="翻动画时听完了片头曲。", evidence=vague)
+    original_id = adopt_life_events(
+        db, owner, [original], vague, source_message_id=chat_source.id
+    )[0]
+    reply = "刚才看的是《风里的邮局》，片头曲听完了。"
+    task = Task(user_id=owner, kind="chat", status="completed")
+    db.add(task)
+    db.flush()
+    detail = event(content="看动画《风里的邮局》，听完了片头曲。", evidence=reply)
+    detail_id = adopt_life_events(
+        db, owner, [detail], reply, source_task_id=task.id
+    )[0]
+    db.commit()
+
+    assert detail_id != original_id
+    assert db.get(Memory, original_id).content == original.content
+    saved = db.get(Memory, detail_id)
+    assert saved.occurred_at == EVENT_TIME and saved.source_task_id == task.id
+    assert saved.shared_at is None
+    assert "风里的邮局" in memory_context(db, owner, purpose="chat", max_chars=1500)
+    assert adopt_life_events(db, owner, [detail], reply, source_task_id=task.id) == [detail_id]
+
+
 def test_missing_evidence_future_event_and_wrong_source_rejected(db, owner, chat_source):
     invalid = [event(evidence="原文没有"), event(occurred_at=datetime.now(UTC) + timedelta(days=1))]
     assert adopt_life_events(db, owner, invalid, TEXT, source_message_id=chat_source.id) == []

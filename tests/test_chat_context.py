@@ -82,10 +82,25 @@ def test_round_limit_evicts_whole_oldest_turns_and_parts_share_one_round(db):
         task, _ = turn(db, user, f"问题{number}", when)
         for sequence in range(3):
             delivery(db, task, f"回复{number}-{sequence}", when, sequence=sequence)
-    messages = context_messages(db, user.id, "710000001", now=now + timedelta(seconds=7))
+    messages = context_messages(
+        db, user.id, "710000001", now=now + timedelta(seconds=MAX_TURNS + 1)
+    )
     assert len(messages) == MAX_TURNS * 4
     assert all(m["content"] not in {"问题0", "回复0-0", "回复0-1", "回复0-2"} for m in messages)
     assert db.scalar(select(func.count()).select_from(ChatTurn)) == MAX_TURNS
+
+
+def test_many_short_turns_remain_available_across_hour_long_gaps(db):
+    now = datetime.now(UTC)
+    user = owner(db)
+    for number in range(30):
+        when = now - timedelta(hours=23) + timedelta(minutes=number)
+        task, _ = turn(db, user, f"这是今天聊天的第{number}轮", when)
+        delivery(db, task, "这一轮我已经收到了。", when)
+    messages = context_messages(db, user.id, "710000001", now=now)
+    assert len(messages) == 60
+    assert messages[0]["content"] == "这是今天聊天的第0轮"
+    assert messages[-2]["content"] == "这是今天聊天的第29轮"
 
 
 def test_context_byte_budget_counts_utf8_and_does_not_truncate_turns(db):
@@ -114,9 +129,12 @@ def test_context_expiry_is_not_extended_by_new_turn_or_delivery(db):
     now = datetime.now(UTC)
     user = owner(db)
     original, _ = turn(db, user, "即将过期的对象", now)
-    late = now + CONTEXT_TTL - timedelta(seconds=1)
+    late = now + CONTEXT_TTL - timedelta(minutes=1)
     delivery(db, original, "晚一点送达", late)
     turn(db, user, "新的对象", late)
+    assert [m["content"] for m in context_messages(
+        db, user.id, "710000001", now=now + timedelta(hours=23, minutes=59)
+    )] == ["即将过期的对象", "晚一点送达", "新的对象"]
     messages = context_messages(db, user.id, "710000001", now=now + CONTEXT_TTL)
     assert [m["content"] for m in messages] == ["新的对象"]
     assert db.get(ChatTurn, original.id) is None

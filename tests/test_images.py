@@ -30,7 +30,7 @@ from lisa.images import (
     normalize_image,
     store_image,
 )
-from lisa.model_calls import BudgetExceeded, ModelBusy, ModelCallUnknown, _finish, _reserve
+from lisa.model_calls import ModelBusy, ModelCallUnknown, _finish, _reserve
 from lisa.models import (
     Account,
     BudgetDay,
@@ -316,12 +316,14 @@ def test_budget_exempt_description_and_generation_do_not_consume_text_budget(
     db.expire_all()
     day = db.get(BudgetDay, datetime.now(UTC).date())
     assert day.spent_usd == 100 and day.reserved_usd == 0
-    # Other text task kinds retain their old consumption gate until B16.
+    # B16 text tasks ignore the old consumption gate and still keep accounting.
     other = Task(user_id=owner, kind="scene", status="running")
     db.add(other)
     db.commit()
-    with pytest.raises(BudgetExceeded):
-        _reserve(image_settings, engine, other.id, owner, Decimal("0.01"))
+    text_call = _reserve(image_settings, engine, other.id, owner, Decimal("0.01"))
+    _finish(engine, text_call, state="succeeded", charged=Decimal("0.01"))
+    db.expire_all()
+    assert db.get(BudgetDay, datetime.now(UTC).date()).spent_usd == Decimal("100.01")
     call_id = _reserve(
         image_settings,
         engine,
@@ -332,8 +334,7 @@ def test_budget_exempt_description_and_generation_do_not_consume_text_budget(
         budget_exempt=True,
     )
     # Image transport occupies its own slot and cannot block normal chat calls.
-    under_budget = image_settings.model_copy(update={"model_daily_usd": Decimal("1000")})
-    regular = _reserve(under_budget, engine, source.id, owner, Decimal("0.01"))
+    regular = _reserve(image_settings, engine, source.id, owner, Decimal("0.01"))
     _finish(engine, regular, state="failed", charged=Decimal(0))
     _finish(engine, call_id, state="unknown")
 

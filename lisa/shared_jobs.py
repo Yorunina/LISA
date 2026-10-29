@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from lisa.model_calls import (
     BudgetExceeded,
+    MaintenancePriceUnavailable,
     ModelBusy,
     ModelCallFailed,
     ModelCallUnknown,
@@ -127,6 +128,8 @@ async def execute_shared(settings, engine, task_id, *, fetch=None, generate=None
         error = "budget_or_concurrency"
     except ModelCallUnknown:
         error = "model_unknown"
+    except MaintenancePriceUnavailable:
+        error = "shared_price_unavailable"
     except (ModelCallFailed, ModelInputTooLarge):
         error = "model_failed"
     except (OSError, ValueError, TypeError, KeyError):

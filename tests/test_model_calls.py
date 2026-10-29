@@ -60,22 +60,22 @@ def task_account(db):
     return task.id, user.id
 
 
-def test_distillation_uses_shared_daily_budget_without_individual_money_cap(
+def test_distillation_and_text_keep_accounting_without_consumption_caps(
     model_settings, engine, db, task_account
 ):
-    chat_id, user_id = task_account
+    task_id, user_id = task_account
     style = Task(user_id=user_id, kind="style_distill", source="web", status="running")
     db.add(style)
     db.commit()
-    with pytest.raises(BudgetExceeded):
-        model_calls._reserve(model_settings, engine, chat_id, user_id, Decimal("0.20"))
-    model_calls._reserve(model_settings, engine, style.id, user_id, Decimal("0.20"))
-    with pytest.raises(BudgetExceeded, match="Daily"):
-        model_calls._reserve(model_settings, engine, style.id, user_id, Decimal("0.35"))
+    first = model_calls._reserve(model_settings, engine, task_id, user_id, Decimal("0.20"))
+    model_calls._finish(engine, first, state="succeeded", charged=Decimal("0.20"))
+    second = model_calls._reserve(model_settings, engine, style.id, user_id, Decimal("0.35"))
+    model_calls._finish(engine, second, state="succeeded", charged=Decimal("0.35"))
     db.expire_all()
     day = db.scalar(select(BudgetDay))
-    assert day.reserved_usd == Decimal("0.20")
-    assert len(db.scalars(select(ModelCall)).all()) == 1
+    assert day.spent_usd == Decimal("0.55")
+    assert day.reserved_usd == 0
+    assert len(db.scalars(select(ModelCall)).all()) == 2
 
 
 def test_chat_commission_interpretation_keeps_billing_without_consumption_caps(
@@ -202,7 +202,7 @@ async def test_reservation_precedes_request_and_usage_settles_cost(
     assert calls[0].state == "succeeded"
     assert calls[0].input_tokens == 100 and calls[0].output_tokens == 20
     assert calls[0].charged_usd == Decimal("0.002000")
-    assert calls[0].configuration == {
+    expected_config = {
         "model": model_name,
         "base_url": "https://model.invalid/v1",
         "max_output_tokens": 600,
@@ -215,6 +215,10 @@ async def test_reservation_precedes_request_and_usage_settles_cost(
         "schema_fingerprint": structured_schema(model_calls.Reply).fingerprint,
         "reasoning_effort": "low",
     }
+    assert all(calls[0].configuration.get(k) == v for k, v in expected_config.items())
+    assert calls[0].configuration["dispatch_state"] == "sent"
+    assert calls[0].configuration["cost_source"] == "estimate"
+    assert calls[0].configuration["price_known"] is True
     assert days[0].spent_usd == calls[0].charged_usd
     assert days[0].reserved_usd == 0
     assert sdk.configurations[0]["max_retries"] == 0
@@ -274,14 +278,13 @@ async def test_history_trimming_uses_actual_request_size_and_keeps_current_input
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("setting", ["model_daily_usd", "model_task_usd"])
-async def test_budget_rejection_never_invokes_provider(
+async def test_legacy_money_caps_do_not_reject_provider(
     setting, model_settings, engine, task_account, sdk
 ):
     model_settings = model_settings.model_copy(update={setting: Decimal("0.001")})
-    with pytest.raises(BudgetExceeded):
-        await generate(model_settings, engine, task_account)
-    assert records(engine)[0] == []
-    sdk.create.assert_not_called()
+    await generate(model_settings, engine, task_account)
+    assert len(records(engine)[0]) == 1
+    sdk.create.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -291,14 +294,12 @@ async def test_completed_attempts_accumulate_cost_and_max_call_count(
 ):
     with Session(engine) as db, db.begin():
         db.get(Task, task_account[0]).kind = kind
-    for _ in range(limit):
+    for _ in range(limit + 1):
         await generate(model_settings, engine, task_account)
-    with pytest.raises(BudgetExceeded, match="Task"):
-        await generate(model_settings, engine, task_account)
-    assert sdk.create.await_count == limit
+    assert sdk.create.await_count == limit + 1
     calls, days = records(engine)
-    assert len(calls) == limit
-    assert days[0].spent_usd == Decimal("0.002000") * limit
+    assert len(calls) == limit + 1
+    assert days[0].spent_usd == Decimal("0.002000") * (limit + 1)
 
 
 @pytest.mark.asyncio
@@ -308,9 +309,8 @@ async def test_task_cost_includes_previous_attempts(model_settings, engine, task
     value.usage = SimpleNamespace(input_tokens=2000, output_tokens=200)
     sdk.create.return_value = value
     await generate(model_settings, engine, task_account)
-    with pytest.raises(BudgetExceeded, match="Task"):
-        await generate(model_settings, engine, task_account)
-    assert sdk.create.await_count == 1
+    await generate(model_settings, engine, task_account)
+    assert sdk.create.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -339,7 +339,9 @@ async def test_inflight_reservation_blocks_second_provider_call(
 
 
 @pytest.mark.asyncio
-async def test_daily_budget_counts_inflight_reservations(model_settings, engine, task_account, sdk):
+async def test_old_daily_budget_does_not_replace_concurrency(
+    model_settings, engine, task_account, sdk
+):
     model_settings = model_settings.model_copy(
         update={
             "model_concurrency": 2,
@@ -357,12 +359,14 @@ async def test_daily_budget_counts_inflight_reservations(model_settings, engine,
     first = asyncio.create_task(generate(model_settings, engine, task_account))
     await asyncio.wait_for(entered.wait(), 2)
     try:
-        with pytest.raises(BudgetExceeded, match="Daily"):
-            await generate(model_settings, engine, task_account)
-        assert len(records(engine)[0]) == 1
+        second = asyncio.create_task(
+            generate(model_settings, engine, task_account)
+        )
+        await asyncio.sleep(0.05)
+        assert len(records(engine)[0]) == 2
     finally:
         release.set()
-        await first
+        await asyncio.gather(first, second)
 
 
 @pytest.mark.asyncio
@@ -532,13 +536,18 @@ async def test_chat_wire_contract_survives_prose_persona(
     assert actual == expected
     request = sdk.create.call_args.kwargs
     assert request["instructions"].startswith(persona)
+    assert "max_output_tokens" not in request
     assert request["input"][0]["role"] == "developer"
     assert "JSON传输协议" in request["input"][0]["content"]
     shape = json.loads(request["input"][0]["content"].rsplit("\n", 1)[1])
     assert request["input"][-1] == {"role": "user", "content": "在做什么"}
     assert set(shape) == set(request["text"]["format"]["schema"]["required"])
     schema.model_validate(shape)
-    assert records(engine)[0][0].configuration["request_bytes"] == model_calls.request_size(request)
+    call = records(engine)[0][0]
+    assert call.configuration["request_bytes"] == model_calls.request_size(request)
+    assert call.configuration["max_output_tokens"] is None
+    assert call.configuration["output_capacity"] == "provider_default"
+    assert call.configuration["cost_source"] == "unknown"
     assert sdk.create.await_count == 1
 
 
@@ -587,7 +596,7 @@ async def test_explicit_chat_completions_uses_json_mode_and_shared_ledger(
     assert actual == expected
     request = sdk.chat_create.call_args.kwargs
     assert request["response_format"] == {"type": "json_object"}
-    assert request["max_tokens"] == 600 and request["reasoning_effort"] == "high"
+    assert "max_tokens" not in request and request["reasoning_effort"] == "high"
     assert request["store"] is False
     assert request["messages"][0]["role"] == "system"
     assert "JSON Schema" in request["messages"][0]["content"]
@@ -851,3 +860,69 @@ async def test_malformed_sdk_response_is_settled_without_freeing_unknown_budget(
     assert calls[0].charged_usd == days[0].spent_usd == calls[0].reserved_usd
     assert days[0].reserved_usd == 0
     assert sdk.create.await_count == 1
+
+def test_d20_only_limits_nontext_maintenance(model_settings, engine, db):
+    configured = model_settings.model_copy(update={
+        "shared_daily_usd": Decimal("0.01"), "model_daily_usd": Decimal("0.001"),
+    })
+    task = Task(user_id=None, kind="shared_analyze", source="system", status="running")
+    db.add(task)
+    db.commit()
+    text_call = model_calls._reserve(configured, engine, task.id, None, Decimal("99"),
+                                     configuration={"schema": "Analysis"})
+    model_calls._finish(engine, text_call, state="succeeded", charged=Decimal("99"))
+    visual = model_calls._reserve(configured, engine, task.id, None, Decimal("0.01"),
+                                  configuration={"api": "vision", "input_per_million": "1",
+                                                 "output_per_million": "1"})
+    model_calls._finish(engine, visual, state="succeeded", charged=Decimal("0.01"))
+    with pytest.raises(BudgetExceeded, match="shared maintenance"):
+        model_calls._reserve(configured, engine, task.id, None, Decimal("0.001"),
+                             configuration={"api": "vision", "input_per_million": "1",
+                                                 "output_per_million": "1"})
+    text_call = model_calls._reserve(configured, engine, task.id, None, Decimal("99"),
+                                     configuration={"schema": "Analysis"})
+    model_calls._finish(engine, text_call, state="succeeded", charged=Decimal("99"))
+
+
+@pytest.mark.asyncio
+async def test_missing_text_price_still_generates_with_unknown_cost(
+    model_settings, engine, task_account, sdk
+):
+    configured = model_settings.model_copy(update={
+        "model_input_per_million": Decimal("0"), "model_output_per_million": Decimal("0"),
+    })
+    await generate(configured, engine, task_account)
+    call = records(engine)[0][0]
+    assert call.configuration["price_known"] is False
+    assert call.configuration["cost_source"] == "unknown"
+    assert call.configuration["dispatch_state"] == "sent"
+
+@pytest.mark.parametrize("api", ["vision", "embeddings"])
+def test_shared_nontext_unknown_price_cannot_bypass_maintenance_cap(
+    model_settings, engine, db, task_account, api
+):
+    from lisa.model_calls import MaintenancePriceUnavailable
+
+    task = Task(user_id=None, kind="shared_analyze" if api == "vision" else "shared_index",
+                source="system", status="running")
+    db.add(task)
+    db.commit()
+    with pytest.raises(MaintenancePriceUnavailable, match="price unavailable"):
+        model_calls._reserve(model_settings, engine, task.id, None, Decimal("0"),
+                             configuration={"api": api})
+    # The same missing price does not block an ordinary personal request.
+    personal = model_calls._reserve(model_settings, engine, *task_account, Decimal("0"),
+                                     configuration={"api": api})
+    model_calls._finish(engine, personal, state="succeeded")
+    # Historical unpriced platform rows cannot be retroactively assumed free.
+    db.add(ModelCall(
+        task_id=task.id, user_id=None, budget_day=datetime.now(UTC).date(),
+        state="succeeded", reserved_usd=Decimal("0"), charged_usd=Decimal("0"),
+        configuration={"api": api},
+    ))
+    db.commit()
+    with pytest.raises(MaintenancePriceUnavailable, match="cost pending"):
+        model_calls._reserve(
+            model_settings, engine, task.id, None, Decimal("0.001"),
+            configuration={"api": api, "input_per_million": "1", "output_per_million": "1"},
+        )

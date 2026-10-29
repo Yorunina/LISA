@@ -1,6 +1,6 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
 from time import perf_counter
 from uuid import uuid4
 
@@ -9,7 +9,6 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from lisa import (
     account_deletion,
@@ -21,6 +20,7 @@ from lisa import (
     life_plans,
     memory,
     onboarding,
+    operations,
     retrieval_config,
     scheduling,
     shared,
@@ -31,7 +31,7 @@ from lisa import (
     works,
 )
 from lisa.db import make_engine
-from lisa.models import BudgetDay
+from lisa.runtime_status import ApiMeasurements, cleanup_observations, process_pulse
 from lisa.settings import ROOT, Settings
 
 logger = logging.getLogger("lisa.api")
@@ -40,10 +40,15 @@ logger = logging.getLogger("lisa.api")
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     engine = make_engine(settings)
+    measurements = ApiMeasurements()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
+        async with process_pulse(engine, settings, ["api"], details=measurements.snapshot):
+            await asyncio.to_thread(
+                cleanup_observations, engine, settings.operations_retention_days
+            )
+            yield
         engine.dispose()
 
     app = FastAPI(title="LISA", lifespan=lifespan)
@@ -66,11 +71,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 response = await call_next(request)
             status = response.status_code
         finally:
+            measurements.record(status, (perf_counter() - started) * 1000)
             # Only a registered route template, never URL values, tokens or private bodies.
             route = getattr(request.scope.get("route"), "path", "unmatched")
             logger.info(
                 "request=%s method=%s route=%s status=%s duration_ms=%.1f",
-                request.state.request_id, request.method, route, status,
+                request.state.request_id,
+                request.method,
+                route,
+                status,
                 (perf_counter() - started) * 1000,
             )
         response.headers["X-Request-ID"] = request.state.request_id
@@ -96,6 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(auth.router)
+    app.include_router(operations.router)
     app.include_router(account_deletion.router)
     app.include_router(onboarding.router)
     app.include_router(works.router)
@@ -120,18 +130,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             or not settings.model_api_key.get_secret_value()
         ):
             return {"status": "unavailable", "message": "正常对话尚未开放，绑定与性格设置已保存。"}
-        with Session(engine) as db:
-            day = db.get(BudgetDay, datetime.now(UTC).date())
-            minimum = (
-                settings.model_max_output_tokens * settings.model_output_per_million / 1_000_000
-            )
-            if day and day.spent_usd + day.reserved_usd + minimum > settings.model_daily_usd:
-                return {
-                    "status": "budget_exhausted",
-                    "message": "今日文字服务额度已用尽，阅读、手动保存与图片委托仍可使用。"
-                    if images.image_enabled(settings)
-                    else "今日服务额度已用尽，阅读和手动保存仍可使用。",
-                }
         return {
             "status": "ready",
             "message": (

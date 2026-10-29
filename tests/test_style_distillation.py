@@ -778,7 +778,9 @@ async def test_trial_uses_server_scoped_card_but_keeps_editor_changes(
 
 
 @pytest.mark.asyncio
-async def test_distillation_ledger_and_trial_limits(settings, engine, db, style_owner, monkeypatch):
+async def test_distillation_and_trial_record_calls_without_consumption_cap(
+    settings, engine, db, style_owner, monkeypatch
+):
     config = settings.model_copy(
         update={
             "model_api_key": SecretStr("synthetic"),
@@ -811,18 +813,17 @@ async def test_distillation_ledger_and_trial_limits(settings, engine, db, style_
             [{"role": "user", "content": "写一个片段"}],
             schema=TrialOutput,
         )
-    with pytest.raises(BudgetExceeded):
-        await model_calls.generate_structured(
-            config,
-            engine,
-            task.id,
-            style_owner,
-            "隔离试用",
-            [{"role": "user", "content": "写一个片段"}],
-            schema=TrialOutput,
-        )
+    await model_calls.generate_structured(
+        config,
+        engine,
+        task.id,
+        style_owner,
+        "隔离试用",
+        [{"role": "user", "content": "写一个片段"}],
+        schema=TrialOutput,
+    )
     calls = db.scalars(select(ModelCall).where(ModelCall.task_id == task.id)).all()
-    assert len(calls) == 4
+    assert len(calls) == 5
     assert all(
         "写一个片段" not in json.dumps(call.configuration, ensure_ascii=False) for call in calls
     )
@@ -838,13 +839,12 @@ async def test_distillation_ledger_and_trial_limits(settings, engine, db, style_
         [{"role": "user", "content": "写一个片段"}],
         schema=TrialOutput,
     )
-    with pytest.raises(BudgetExceeded):
-        await model_calls.generate_structured(
-            config,
-            engine,
-            trial.id,
-            style_owner,
-            "隔离试用",
-            [{"role": "user", "content": "写一个片段"}],
-            schema=TrialOutput,
-        )
+    await model_calls.generate_structured(
+        config,
+        engine,
+        trial.id,
+        style_owner,
+        "隔离试用",
+        [{"role": "user", "content": "写一个片段"}],
+        schema=TrialOutput,
+    )

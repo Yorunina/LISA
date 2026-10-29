@@ -1023,3 +1023,179 @@ Chromium 在 1440/1024/390px 检查上传插图与封面、失败保留旧图、
 最终全量结果与正式加载状态以下方追加记录及活跃B17为准。个人库在本轮只读复核时仍为b15e8a102810；未升级个人库、重载应用或改变运行配置，正式启用需要迁移和相应进程一并加载。
 
 最终追加验证：使用 scripts/test_app.py 在普通 Windows 执行环境完成全套后端1041项通过（148.08秒），另有一项非失败的SQLAlchemy空主键警告；完整升级/降级/升级、alembic check、重复 lisa migrate 和隔离worker启动通过，临时数据库删除。全仓 Ruff、差异空白及新文档链接/锚点检查通过。完整日志 runtime/reports/b17-complete-20261028.log；原失败日志保留，不以最终成功抹除先前问题。测试后业务代码未再改动；未执行前端构建或浏览器验证，本批无网页改动。正式个人库未迁移/服务未重载，当前运行中能力不能据此宣称已生效。
+
+## B16 运行仪表盘与消费额度调整
+
+2026年10月29日用户授权subagent实现本需求。主实施agent负责schema/迁移、鉴权/API、心跳及集成；两个子agent负责调用/RAG和维护者网页；父agent只读审查，问题回传统一修复。无commit/push、个人库迁移、正式服务重载、runtime/.env修改、实际模型消费或QQ出站。
+
+实现：RuntimeHeartbeat、RetrievalObservation、RagEvaluationRun及 `b16a9c102901` 迁移；维护账号由部署allowlist明确指定，旧is_admin不继承。复用原任务/调用/出站/索引表，提供脱敏总览、分页筛选及本地日趋势，不返回原始聊天、作品、记忆正文、完整prompt或密钥。worker/gateway无消息也心跳；QQ登录过期/退出与连接分开；--once不永久等待。新观测保留30天，API启动及每小时清理。
+
+文本、个人索引/查询向量移除旧日额、任务金额及消费次数拦截；容量、有限阶段、并发/超时、取消/未知/权限/顺序/自主暂停保留。D25无消费额度，D20仅非文本维护保留1元，当前或历史未知价不能以零金额绕过。ModelCall记录purpose、dispatch_state、price_known及互斥费用来源；SDK max_retries=0，等名额不算真实请求。
+
+RAG按来源/条目归一（含世界书中段/重复切片），观测检索、组装及最终装入，省略/失效/无来源/关闭/空/兜底分开。个人/共有表情分开，空结果率带实际执行分母，缺失耗时/费用不填零。40题含聊天、作者记忆/世界书/当前章节、角色及越权/失效/容量负例；来源快照去除随机ID，工作树源码指纹绑定实际检索/装箱/seed。
+
+| 验收范围 | 工程证据 | 外部剩余 |
+| --- | --- | --- |
+| A01/A14 | 部署allowlist、匿名401/普通用户403、无正文API、观测级联删除及过期/失败回归 | 正式维护账号配置与保留周期运维 |
+| A02/A03/A07 | --once、心跳过期/掉登录、合批/实际可执行等待、未入队过期计划、本地日界及空样本回归 | 真实故障与多日 |
+| A04—A06 | 用途/发送阶段、未知结果、token缺失、费用互斥、旧零价未知及D20回归 | 供应商实际账单 |
+| A08—A10 | 版本/空间、无资料/关闭、长条/请求省略、最终装入及40题生产链路基准 | 人工语义标注、真实embedding/长篇 |
+| A11—A13 | 多用途、旧高日账/次数/缺价、有限阶段/并发/取消/未知及自主暂停回归 | 正式进程加载后的真实使用 |
+| A15 | 最终7项mock、2项真实API/UI浏览器；1440/1024/390px及截图目视 | 真人长期使用 |
+
+完整后端1069项通过（149.74秒），迁移升降升、check及队列迁移通过。最后新增D20历史未知价guard后，模型调用75项单独复验通过（1.82秒，与全量重叠）。真实API/维护者登录/页面/RAG/普通用户403及service-status两项Chromium通过（12.4秒）；最终7项mock通过（15.9秒）。Ruff、TypeScript、隔离构建通过，产物 `runtime/reports/b16-build-20261029`，未覆盖runtime/dist。
+
+首轮相关272通过8失败，修正SQL DISTINCT排序参数、观测字段业务等价及旧消费断言。第一次完整1061通过7失败1error，其中四项旧断言，另外为受限环境runtime临时目录ACL。修正后以独立basetemp/cache、正常权限完成最终1069项；未删他人旧目录或改ACL，首轮日志保留，不当作一次全绿。
+
+独立报告 `runtime/reports/rag-dashboard-baseline-20261029.json`：40/40工程预设结果通过，31题有目标，宏平均Recall@5=0.903226、相关占比=1.0、最终覆盖=0.806452。包含刻意容量省略/失效负例，与40/40工程断言通过不矛盾；标deterministic_pipeline、human_semantic_review=pending，不作为线上召回达标证据。
+
+本机日志位于 `runtime/reports/b16-final-verification-20261029.log`、`b16-modelcalls-final-20261029.log`、`b16-rag-baseline-20261029.log`；mock报告 `runtime/reports/b16-web-20261029`。真实截图 `runtime/reports/playwright/operations-live-real-opera-7c132-oyment-maintainer-allowlist/` 下desktop及rag-390。正式加载、维护账号参数及报告publish方法见[开发环境](../../DEVELOPMENT.md#运行仪表盘与文本无消费额度)，本轮未publish个人库。
+
+
+### B16 NapCat 状态与原生管理台入口扩展
+
+2026年10月29日用户明确要求监控 NapCat 是否启动，并从 LISA 进入其管理台执行重启/登录。新增独立本机进程/WebUI观测，API周期采集、仪表盘读取快照；专用 Node 路径识别不依赖旧PID文件，不将网关或QQ状态当成NapCat进程状态。超时/无权限/未知页面保持未知，探测异常不阻断其他心跳。原管理台承接鉴权及实际操作，LISA不发送管理请求或传递令牌。
+
+变更：lisa/napcat_status.py、runtime_status.py、operations.py、settings.py；web/operations.tsx及样式；配置模板、tests/test_napcat_status.py、tests/test_operations.py及operations浏览器用例。无需新增迁移，复用B16心跳表。LISA_NAPCAT_WEBUI_PROBE_URL用于服务端，LISA_NAPCAT_WEBUI_URL用于维护者浏览器，默认回环地址；URL拒绝凭据/query/fragment，异机访问需配置正确入口。
+
+验证：scripts/test_app.py使用唯一basetemp/cache、两个定向测试文件及operations/operations-live浏览器用例；迁移升降升/check和worker单次启动通过，20项后端通过（4.44秒）、8项Chromium通过（24.8秒），临时测试库已清理。Ruff、TypeScript及隔离构建通过（runtime/reports/b16-napcat-build-20261029），未覆盖runtime/dist；1440/1024/390px截图无横向溢出，桌面/390px已目视检查管理台入口。
+
+首轮验证环境：数据库未运行导致连接超时，已通过既有dev_env.py db-start启动本项目PostgreSQL后完成隔离测试；受限环境Vite spawn EPERM在自动审核获准的正常环境复验通过，未改变ACL或删除其他任务目录。最后一次无鉴权只读探测确认本机专用NapCat进程未检测到、管理页不可达；未为此启动/重启NapCat或扫码/登录QQ。实际管理台操作保留给维护者，正式运行配置、个人库迁移、正式API/worker/gateway及网页产物均未变更。
+
+
+### B16 NapCat 保存token的按需自动传入
+
+2026年10月29日用户明确希望保存NapCat启动token并自动传入。本机已由初始化流程将token保存在runtime/.env及NapCat配置中，经只输出布尔值的核对确认两者存在且一致，未读取控制台日志或新建凭据副本。新增/api/operations/napcat/open入口：再次校验维护资格后才读取token并303跳转；状态只返回干净管理地址和本应用入口，不返回原始token。跳转禁止缓存与Referer，LISA日志仅记录路由模板，调用方不能覆盖目标URL。
+
+本机probe地址才读取本机webui.json，并在点击时取当前值，配置轮换无需复制第二份；读取失败回退已有SecretStr。远端probe不使用本机配置文件凭据，需明确配置目标token。缺失/无效配置保留Native手动登录，额外验证与QQ扫码仍由NapCat处理；该改动不代发重启或QQ登录。
+
+验证：23项后端定向通过（2.99秒），覆盖token变更、编码、远端不取本机token、401/403、目标不可覆盖、状态/API日志不泄漏及基础NapCat观测；8项Chromium通过（22.3秒），包括真实登录/API/UI及桌面/窄屏入口。迁移检查/worker单次启动、Ruff/TypeScript、隔离构建通过，构建在runtime/reports/b16-napcat-autologin-build-20261029，未覆盖runtime/dist。首轮21项通过、2项因新basetemp父目录未建立发生setup错误；补建本轮报告目录后同批完整复验通过，临时测试库已删除。
+
+本轮未改真实token、runtime/.env、个人库或正式服务，未用真实凭据验证Native登录或绕过额外验证；当前安装版本的原生WebUI代码确认读取query token并主动调用token登录，官方WebUI说明也提供该入口。正式生效需要重载LISA应用及新版网页。
+
+## 2026-10-29 共同底座参照蒸馏小样本验证
+
+用户要求直接验证“以已有共有交流底座为参照，提炼条件化个性差异”，并明确允许本次所选真实群聊片段发送至当前配置端点。使用当日本地 `gpt-6.1-sol / high`、Responses 严格 JSON；未应用人格候选、改正式配置、重载服务或发送 QQ。所有私人片段、来源定位、候选和逐项结果保留在忽略目录 [b09-base-conditioned-20261029](../../../runtime/reports/b09-base-conditioned-20261029/)。
+
+### 方法与隔离
+
+- 从同一已授权导出选择两位来源说话者，各10/12组显式回复材料，各覆盖7个小时段。排除已有开发/确认题目的实际输入、目标回复，以及共同底座示例的源消息；8道真实题覆盖7个小时段，其中3道来自此前未评测的小时段。同一群、话题及相邻时段仍有关联，不称完全独立新确认。
+- 固定当前 `corpus` 底座；对照为仅底座、底座＋旧方法卡、底座＋以底座为参照的新方法卡。两种蒸馏都只执行一次观察和一次合成，使用相同材料、Schema和容量；复用现有规则编译和场景选择。这是匹配的两阶段方法探索，不是完整生产蒸馏、开发修订及留出流水线的验收。
+- 正常生成使用完整 `_chat_instructions` 与原生 `Conversation` 协议、相同固定时钟和底座，每轮一次生成。8道真实题加4类边界检查×两位来源，共16组、60轮回复；不读取真人参考、真实用户记忆或业务检索，不采用决策或出站。每组每臂只生成一次，顺序复评不是重复生成。
+- 四张卡在回复生成前冻结。终审核对候选和60轮结果与首次完整生成检查点逐项相同；全部卡在4000 UTF-8字节内，原始导出哈希未变。评审只看匿名答复、分析材料和留出真人参考，不读取卡片；真人参考不是事实权威或唯一正确答案。
+
+### 结果与边界
+
+Q10762首个主评120秒读超时，保留unknown，不重发主评或其交换版本。因此有效真实题为7道，其余8组边界检查均完成双向评分；不能把缺测记成平局或全量通过。最终统一使用12000输出预算、240秒超时完成30份三臂评分，保留并单列此前6000预算的评分和失败，不跨预算拼接。没有根据留出结果修改候选或生成回复。
+
+| 真实题模型评分（0—4，7题） | 仅底座 | 旧方法卡 | 新方法卡 |
+| --- | ---: | ---: | ---: |
+| 主评自然度 | 2.857 | 2.714 | 2.714 |
+| 交换自然度 | 2.429 | 2.571 | 2.857 |
+| 两次评分平均自然度 | 2.643 | 2.643 | 2.786 |
+| 主评个性贴合度 | 2.286 | 2.143 | 2.000 |
+| 交换个性贴合度 | 2.143 | 2.286 | 2.429 |
+| 两次评分平均个性贴合度 | 2.214 | 2.214 | 2.214 |
+
+新卡相对旧卡的个性差值主评为−0.143、交换为＋0.143；相对仅底座为−0.286/＋0.286，方向均反转。可评样本也未达到预先设定的个性均差至少＋0.3、两位来源不退步及质量不退步条件。新卡有局部自然度和真实题事实标记收益，但不能据此认定稳定个性改善，更不能替代人评或真实多日效果。
+
+8组边界检查主评的事实失败标记为仅底座1、旧卡3、新卡1；交换为2/1/2。任务失败主评1/2/1、交换0/1/0。评分存在顺序不稳定，不能概括为事实或求助全过。同一助手在读取自动分数前保存了匿名定性笔记：新卡首选3题、旧卡2题、仅底座1题、平局2题；这只是AI复核，不是独立人评。三组仍有逐项复述、顺着来话重复确认，以及围绕陌生游戏词澄清的问题。保守事实核对也保留“没在跑游戏”这类无依据否定当前状态的疑点。
+
+结构诊断：第一位来源的旧卡3条均为局部规则，新卡3条中有1条核心；第二位旧卡3条、新卡5条，均缺少核心。更多规则或增加一条核心没有自动转化成稳定差异。部分反例仍含来源编号，而现有编译器会把反例写入运行时卡；属于后续需考虑的编译边界问题，本轮未静默清理或修业务代码。
+
+结论：**不应用本轮候选，不宣称共同底座参照蒸馏已改善。** 后续可讨论用“同一来话的底座实际回复与真人回复”作直接对照，再提炼有证据的差异；这是建议，尚未实施。不扩大完整人格框架、记忆改造或模型权重训练。真实个人材料、人工偏好、正常 QQ 与多日效果继续待验。
+
+### 容量、故障、消耗与清理
+
+首次分析6000输出预算明确 `output_limit`，没有生成候选或留出回复；保留记录后，在新旧方法输出前统一升至16000。聊天生成统一2400、评审最终12000，均为本次研究容量；正式聊天600、蒸馏1600配置未改，研究结果不等于这些正式容量已足够。一次早期交换评审也在6000预算明确截断，随后统一容量重评，旧有效评分不参与最终均值。未知评分未重试。
+
+共享数据库曾停止，成功分析被复用，没有重发；改用独立临时PostgreSQL继续。启动脚本的权限、输出管道和记账库初始化故障记录全部保留，没有模型调用的故障不计作效果样本。后续共享实例恢复时，仅清理本次残留的临时库、测试账号和一个零费用、非provider占位。独立研究库已删除、服务已停止，预留调用为0。
+
+累计108次provider请求尝试，含2次明确输出截断和1次unknown，应用估算 **2.295670元**，不是供应商账单。终审见 [final_audit.json](../../../runtime/reports/b09-base-conditioned-20261029/final_audit.json)，概要见 [final_summary.json](../../../runtime/reports/b09-base-conditioned-20261029/final_summary.json)，逐项结果与统一评估见 [results.json](../../../runtime/reports/b09-base-conditioned-20261029/results.json) / [assessment.json](../../../runtime/reports/b09-base-conditioned-20261029/assessment.json)。未提交或推送。
+
+## 2026-10-29 对话窗口与个人召回首批改进
+
+用户在专题需求交付后明确授权派子代理实施，要求避免过度设计或过度防御，低可行性或高成本项先咨询。实际采用两个实现子代理及一个轻量评测子代理，主代理整合、交叉只读审查并执行统一隔离验证；没有新开用户聊天。范围为 MR01—MR03/MR06，MR04核心资料与MR05混合召回后置。需求见[专题](../../MEMORY_RETRIEVAL_REQUIREMENTS.md)，现行规则见[主方案](../../PROJECT_PLAN.md#长期记忆与检索)。
+
+### 改动与审查
+
+- `lisa/chat_context.py`：常量调整为50轮/6000字节/24小时，复用原整轮淘汰、修订/绑定清理及确认投递；新增小型 `recall_query`，仅明确指代触发最近2条消息补充，历史连角色/时间包装最多400字符，本轮优先且全查询最多1500字符。不增加模型分类器或话题服务。
+- `lisa/chat.py`：将该查询接入实际聊天召回，历史仍不成为当前轮写入证据或新指令。
+- `lisa/retrieval.py`：仅chat且sources为memory时，候选乘3，默认15切片；全文装入、最终5条/1500字符、作者/角色与公共候选上限沿用。审查修正同一未装入记忆的多切片重复省略计数，首次尝试即按ID去重；非memory来源保持原行为。
+- `scripts/benchmark_memory.py`及合成fixture/口径测试：默认离线；显式live才运行独立库和真实向量，复用生产索引/召回/最终装入。未知或失败停止，不新增后台评测平台。
+
+两个实现子代理交叉审查：窗口/查询未发现阻断性新增问题；候选审查发现并修复省略计数。查询仅覆盖明确指代，不能保证所有转题理解；未堆叠关键词表、分类模型或新回退框架。超容量单轮略过保留、此前有效窗口不清空，沿用原行为，主方案已澄清。
+
+### 隔离验证
+
+主代理执行：
+
+```powershell
+runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests/test_chat_context.py --pytest-target tests/test_recall_query.py --pytest-target tests/test_chat.py --pytest-target tests/test_retrieval.py --pytest-target tests/test_recall_integration.py --pytest-target tests/test_role_retrieval.py --pytest-target tests/test_images.py --pytest-target tests/test_shared.py --pytest-target tests/test_rag_observability.py --pytest-target tests/test_memory_context.py --pytest-target tests/test_retrieval_config.py
+```
+
+268项通过（41.30秒）；审查后对 retrieval/rag_observability/recall_integration/role_retrieval/retrieval_config 五文件复验124项通过（22.85秒，与前者重叠）；新增工具口径测试最终4项通过（0.14秒）。不是全库回归，不能将数量直接相加。真实测试均走既有临时数据库runner，包含迁移升降升/check、重复初始化与空队列worker检查，临时库均删除。pytest缓存写入受限产生警告，测试断言通过；没有为消除警告修改系统权限。涉及9个Python文件Ruff及diff空白检查通过，无前端改动，未重复浏览器或前端构建。
+
+首次测试因本机PostgreSQL未运行而连接超时；受限环境启动遇restricted-token错误，使用授权普通执行权限仅启动现有数据库后复验。没有初始化或迁移个人库、启停正式API/worker/gateway或NapCat。
+
+### 真实向量小样本
+
+```powershell
+runtime/venv/Scripts/python.exe scripts/benchmark_memory.py --live --output runtime/reports/memory-retrieval-comparison-20261029.json
+```
+
+配置为当前text-embedding-v4、1536维，全部合成资料。24题包含20个有目标题及4个无答案题，普通题共享16条记忆；三臂同题、同资料、同预算，只比较本轮原查询、补少量前文及再扩大候选。实际query向量按同一隔离任务复用，不能将各臂耗时当端到端延迟A/B；不生成回答，也不模拟窗口保留来冒充实际生产验证。
+
+| 指标 | 原查询及5切片 | 补前文及5切片 | 补前文及15切片 |
+| --- | --- | --- | --- |
+| 有目标题Recall@5 | 95% | 100% | 100% |
+| 最终完整上下文覆盖 | 95% | 100% | 100% |
+| 6道指代题命中 | 5/6 | 6/6 | 6/6 |
+| 候选Precision@5宏平均，含无答案题 | 0.3139 | 0.3361 | 0.3153 |
+| 4道无答案题最终仍注入无关记忆 | 每题5条 | 每题5条 | 每题5条 |
+
+4道转题题目目标覆盖维持100%。扩大候选在该小样本中没有额外目标覆盖收益，相关项占比也不随候选数增加；重复切片占位改善由隔离回归证明，不宣称真实语义全面提升。无答案误召回为既有单路无阈值行为，未为提高分数添加新过滤或付费重排。实际回答是否忽略无关项、跨时段状态是否正确以及QQ/多日效果仍待验。
+
+57次真实向量请求均succeeded，4758输入token，应用估算0.002390元，未结算数0；不是供应商账单。独立库已删除，不向个人库发布评测。原始报告：[comparison](../../../runtime/reports/memory-retrieval-comparison-20261029.json)，解读及向量复用限制：[assessment](../../../runtime/reports/memory-retrieval-assessment-20261029.json)。报告和数据指纹记录本轮来源，不把上游插件存在作为LISA效果证据。
+
+### 交付边界
+
+第一阶段源码与相关工程验证完成，真实向量小样本提供了局部查询收益；核心资料、混合召回、置信阈值、语义去重及写入权限未扩展。本批无数据库迁移或API/前端变更，没有修改runtime/.env、正式构建或重载应用，没有发送QQ，也未提交或推送。正式启用应与已存在的B16/B17迁移和其他脏改共同核对，不能仅为本轮常量变化直接加载全部未提交工作区。
+
+## 2026-10-29 记忆改进代码复审与精简
+
+用户要求review代码、确认逻辑问题并精简。范围为本聊天首批窗口、查询、个人召回及评测工具；保留工作区其他未提交改动，未扩展核心资料或混合召回。
+
+发现并修复：`recall_query` 原来将最多400字符历史空间依次交给最新消息，较长助手回复可完全占满，导致紧邻用户消息中的人物或地点未进入查询。现在按尚未处理消息数分配当前剩余空间，仍最多2条/400字符、总1500字符，保留本轮优先和窄指代规则。新增“短用户前文+长助手回复”回归；不增加分类器或关键词表。
+
+精简：`scripts/benchmark_memory.py` 不再通过修改 `os.environ` 切换数据库，改为 `Settings(db_name=temporary_database)` 显式传入；迁移子进程仍使用专属环境。用标准库ExitStack在创建资源时登记DROP及dispose，替换多层finally及环境恢复。补充成功/失败两种CLI回归，实际创建并清理临时库，断言外层数据库环境保持不变，模型调用为0。
+
+复核其余路径：50轮/6000字节/24小时的整轮保留、绑定/修订清理及确认投递沿用既有约束；普通聊天15切片候选、最终5条/1500字符、完整记忆去重和作者/角色限额未发现新增阻断问题。明确指代规则无法覆盖所有语义、无答案仍召回无关项属于已记录边界，本轮未追加阈值或复杂重排。
+
+验证命令：
+
+```powershell
+runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests/test_recall_query.py --pytest-target tests/test_chat_context.py --pytest-target tests/test_chat.py --pytest-target tests/test_retrieval.py --pytest-target tests/test_recall_integration.py --pytest-target tests/test_memory_benchmark.py --pytest-target tests/test_rag_observability.py --pytest-target=--basetemp=runtime/reports/memory-review-pytest-20261029-a2 --pytest-target=-p --pytest-target=no:cacheprovider
+```
+
+170项相关隔离回归通过（30.43秒），包含新增长回复和评测CLI成功/失败路径，不是全库测试；临时数据库全部删除。关闭cacheprovider后原cache_dir配置产生警告，不影响断言。变更4个Python文件Ruff及diff空白检查通过，默认离线24题校验通过；对照旧查询函数确认既有24个合成语义样例查询文本全部一致，因此未重复执行真实embedding，历史真实报告仍作为历史小样本证据。
+
+首次回归168项通过，2项新CLI用例在pytest临时目录初始化时因受限Windows权限报错；切换专用目录仍受同类限制。最终在已核对的仓库内专用路径、授权普通权限下运行上述命令通过，没有改系统ACL或删除其他临时目录。启动现有PostgreSQL供隔离回归使用，未迁移个人库、重载正式服务、调用模型、发送QQ、提交或推送。
+
+## 2026-10-29 合并提交前验证
+
+用户先要求提交本聊天代码，随后明确同意“ 一起提交了就行 ”。据此将当前工作区源码、文档、B16迁移与相关测试一并纳入，不继续拆分待提交的仪表盘依赖。保留原已评审结构，未为拆分增加纯数据模块或新抽象；本地runtime、实际环境文件、凭据、个人材料和测试产物不纳入。
+
+初轮完整后端1110项通过、1项旧预算用例失败：`test_optional_memories_do_not_crowd_out_current_chat_input` 写死11000字节，现行必需输入及Schema已超过该值，未进入其原本要验证的可选记忆撤下路径。改为按实际Schema请求大小加固定指令余量设置测试边界，同时断言最终请求装得下、重新加回可选记忆会超限。只修改测试，未提高生产输入上限。该文件13项定向复验通过。
+
+最终完整后端命令：
+
+```powershell
+runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests --pytest-target=--basetemp=runtime/reports/combined-commit-pytest-20261029-a3
+```
+
+1108项全部通过（176.73秒）。同时使用 `scripts/test_app.py --browser --pytest-target tests/test_topics.py --pytest-target=--basetemp=runtime/reports/combined-commit-pytest-20261029-a2` 完成完整94项Chromium检查（3.1分钟），含真实本地API及操作页、记忆/作品/风格入口；测试禁用实际模型/QQ，临时库均已删除。整库复验期间纳入的源码指纹保持稳定，过程记录在忽略的 `runtime/reports/combined-commit-validation-inputs-20261029.json`，历史批次数字不与本次相加。
+
+`python -m ruff check lisa scripts tests`通过；`npm.cmd run build -- --outDir runtime/reports/combined-commit-build-20261029`通过TypeScript和Vite，未覆盖正式runtime/dist。暂存前后diff空白检查通过，453个既有文档文件链接有效。暂存范围无runtime、实际.env或私有代理目录，凭据模式扫描无命中；`.env.example`只含占位与公开配置说明。
+
+源码、运行参数和部署分开：提交动作不加载B16/B17迁移到个人库，不重载API/worker/gateway，不操作NapCat登录或发送QQ。正式运行验收仍见各批次剩余项。

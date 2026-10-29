@@ -78,7 +78,7 @@ export const SharedLibrary = forwardRef<SharedHandle>(function SharedLibrary(_, 
           else { setJob(null); setNotice('任务仍在处理，可稍后刷新查看结果。'); }
         } else {
           setJob(null); setRefresh(value => value + 1);
-          setNotice(state.status === 'completed' ? '共有资料已更新。' : '本次更新未完成，已有资料保留。可检查来源或额度后重试。');
+          setNotice(state.status === 'completed' ? '共有资料已更新。' : '本次更新未完成，已有资料保留。可查看失败原因后重试。');
         }
       } catch (cause) { if (active) { failure(cause); setJob(null); } }
     }

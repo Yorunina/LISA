@@ -42,6 +42,7 @@ from lisa.models import (
     QQBinding,
     Task,
 )
+from lisa.observability import finalize_context
 from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
 from lisa.scheduling import autonomous_start_allowed
@@ -623,7 +624,7 @@ async def execute_author(
             )
         except ModelInputTooLarge:
             instructions = snapshot["instructions"]
-            recalled = Context()
+            recalled = recalled.discarded()
             messages, packed_stats = _pack_author_messages(settings, instructions, messages)
         if packed_stats is not None:
             with Session(engine) as db, db.begin():
@@ -634,6 +635,7 @@ async def execute_author(
                     snapshot["messages"] = messages
                     snapshot["context_pack"] = packed_stats
                     current.input_snapshot = snapshot
+        finalize_context(engine, recalled)
         with Session(engine) as db, db.begin():
             record_references(db, task_id, recalled)
         attempt = await _cancelable(
@@ -669,6 +671,7 @@ async def execute_author(
         ):
             failure = "writing_scope_exceeded"
     except ContextChanged:
+        finalize_context(engine, recalled.discarded("source_changed"))
         failure = "context_changed"
     except CharacterUnavailable:
         failure = "character_unavailable"

@@ -122,6 +122,92 @@ def test_whole_memory_packing_skips_long_items_and_honors_exact_serialized_bound
     assert partial.text and 0 < partial.references[0]["end"] < 700
 
 
+def test_omitted_memory_slices_count_once_after_final_limit_is_full():
+    first = Source("memory", uuid4(), uuid4(), 1, "已装入。", {}, [("memory", 0, 4)])
+    second = Source("memory", uuid4(), first.user_id, 1, "另一条记忆。", {}, [("memory", 0, 6)])
+    context = _assemble_context([
+        (first, 0, 4, 0, "synthetic"),
+        (second, 0, 3, 0, "synthetic"),
+        (second, 3, 6, 1, "synthetic"),
+    ], 1500, 1)
+    assert context.memory_ids == [first.id]
+    assert context.metrics["omitted"] == {"count_limit": 1, "duplicate": 1}
+
+
+@pytest.mark.asyncio
+async def test_private_chat_reads_beyond_duplicate_slices_and_keeps_whole_memory(
+    db, engine, vector_settings, library, monkeypatch
+):
+    owner, _, project, _, _ = library
+    long = memory(
+        db, owner, "最优切片。" * 400, basis="最优切片。" * 200, allow_writing=True
+    )
+    long_id = long.id
+    first = memory(db, owner, "第一条：现在不再外借，仅周末例外。", basis="合成条件依据。")
+    second = memory(db, owner, "第二条：喜欢海边散步。")
+    expected = [first.id, second.id]
+    db.commit()
+
+    async def ranked_vectors(settings, engine, task_id, user_id, texts):
+        return [
+            [1.0, 0.0, 0.0] if "最优切片" in text else
+            [0.9, 0.1, 0.0] if "第一条" in text else [0.8, 0.2, 0.0]
+            for text in texts
+        ]
+
+    await index_all(engine, vector_settings, embed=ranked_vectors)
+    slices = list(db.scalars(select(IndexChunk).join(IndexState).where(
+        IndexState.source_id == long_id
+    )))
+    assert len(slices) == 5
+
+    monkeypatch.setattr("lisa.retrieval.CHAT_MEMORY_CANDIDATE_MULTIPLIER", 1)
+    baseline = recall(
+        db, vector_settings, owner, project, "chat", [1, 0, 0], sources=["memory"]
+    )
+    assert not baseline.text and baseline.metrics["candidates"] == 5
+    monkeypatch.setattr("lisa.retrieval.CHAT_MEMORY_CANDIDATE_MULTIPLIER", 3)
+    result = recall(
+        db, vector_settings, owner, project, "chat", [1, 0, 0], sources=["memory"]
+    )
+    assert result.memory_ids == expected
+    assert len(result.text) <= 1500
+    assert "现在不再外借，仅周末例外。" in result.text
+    assert "推测依据：合成条件依据。" in result.text
+    assert result.metrics["candidates"] == 7
+    assert result.metrics["deduped"] == 3
+    assert len(result.metrics["candidate_keys"]) == 3
+    assert len(result.metrics["assembled_keys"]) == 2
+    assert len(result.references) == 2
+    assert all(ref["start"] == 0 for ref in result.references)
+    assert result.metrics["omitted"] == {"character_budget": 1, "duplicate": 4}
+
+    # Author and mixed-source calls retain their original five-slice cap.
+    for purpose, sources in [("writing", ["memory"]), ("chat", ["memory", "chapter"])]:
+        unchanged = recall(
+            db, vector_settings, owner, project, purpose, [1, 0, 0], sources=sources
+        )
+        assert not unchanged.text and unchanged.metrics["candidates"] == 5
+
+
+@pytest.mark.asyncio
+async def test_private_chat_larger_pool_still_limits_final_memories_and_references(
+    db, engine, vector_settings, library
+):
+    owner, _, project, _, _ = library
+    for position in range(7):
+        memory(db, owner, f"独立短记忆{position}。")
+    db.commit()
+    await index_all(engine, vector_settings)
+    context = recall(
+        db, vector_settings, owner, project, "chat", [1, 0, 0], sources=["memory"]
+    )
+    assert context.metrics["candidates"] == context.metrics["deduped"] == 7
+    assert len(context.memory_ids) == len(set(context.memory_ids)) == 5
+    assert len(context.references) == len(context.metrics["assembled_keys"]) == 5
+    assert len(context.text) <= 1500
+
+
 @pytest.mark.asyncio
 async def test_filter_before_rank_respects_owner_project_usage_and_active(
     db, engine, vector_settings, library
@@ -135,7 +221,9 @@ async def test_filter_before_rank_respects_owner_project_usage_and_active(
     memory(db, owner, "最近：已经删除", active=False)
     db.commit()
     await index_all(engine, vector_settings)
-    context = recall(db, vector_settings, owner, project, "chat", [1, 0, 0], limit=1)
+    context = recall(
+        db, vector_settings, owner, project, "chat", [1, 0, 0], limit=1, sources=["memory"]
+    )
     assert context.memory_ids == [target_id]
     assert "有效事实" in context.text and "最近" not in context.text
     assert has_ready_context(db, vector_settings, owner, project, "chat")

@@ -126,6 +126,35 @@ def seed_browser_invites(env: dict[str, str]) -> None:
                     prompt=styles_persona.prompt,
                 )
             )
+            # Synthetic operations accounts are independent of signup/recovery/style tests.
+            # Their allowlist exists only in this disposable browser-test environment.
+            for username, qq_id in (
+                ("operations_e2e", "700000088"),
+                ("operations_reader", "700000089"),
+            ):
+                operations_user = Account(
+                    username=username,
+                    password_hash=hash_password("synthetic-password-2026"),
+                )
+                session.add(operations_user)
+                session.flush()
+                session.add(QQBinding(user_id=operations_user.id, qq_id=qq_id))
+                operations_persona = Persona(
+                    user_id=operations_user.id,
+                    name="运行验收小莎",
+                    prompt="合成测试：仅用于隔离仪表盘前后端验收。",
+                    version=1,
+                )
+                session.add(operations_persona)
+                session.flush()
+                session.add(
+                    PersonaVersion(
+                        persona_id=operations_persona.id,
+                        version=1,
+                        name=operations_persona.name,
+                        prompt=operations_persona.prompt,
+                    )
+                )
             env["LISA_TEST_BINDING_CODE"] = issue_code(session, "binding", "700000001")
             env["LISA_TEST_STATUS_BINDING_CODE"] = issue_code(session, "binding", "700000004")
             env["LISA_TEST_RECOVERY_CODE"] = issue_code(
@@ -133,6 +162,8 @@ def seed_browser_invites(env: dict[str, str]) -> None:
             )
             session.commit()
         env["LISA_TEST_INVITES"] = ",".join(codes)
+        env["LISA_OPERATIONS_MAINTAINERS"] = "operations_e2e"
+        os.environ["LISA_OPERATIONS_MAINTAINERS"] = env["LISA_OPERATIONS_MAINTAINERS"]
     finally:
         engine.dispose()
 

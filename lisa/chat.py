@@ -8,7 +8,7 @@ from procrastinate.retry import RetryDecision
 from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.orm import Session, aliased
 
-from lisa.chat_context import context_messages, remember_delivery, remember_turn
+from lisa.chat_context import context_messages, recall_query, remember_delivery, remember_turn
 from lisa.chat_style import expression_guide
 from lisa.dialogue import (
     MEMORY_INSTRUCTIONS,
@@ -44,6 +44,7 @@ from lisa.models import (
     ServiceEvent,
     Task,
 )
+from lisa.observability import finalize_context
 from lisa.queue import CHAT_SILENCE_SECONDS, enqueue_chat, reschedule_chat
 from lisa.recall import ContextChanged, check_memory_revision, retrieve_context
 from lisa.retrieval import Context, record_references
@@ -576,7 +577,8 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     f"[消息时间 {sent_at.isoformat()}]\n" + text
                 )
         recalled = await retrieve_context(
-            settings, engine, task_id, user_id, project_id, "chat", "\n".join(query_texts)
+            settings, engine, task_id, user_id, project_id, "chat",
+            recall_query("\n".join(query_texts), history),
         )
         with Session(engine) as db:
             check_memory_revision(db, user_id, memory_revision)
@@ -610,7 +612,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
         except ModelInputTooLarge:
             # Keep persona/current input and work constraints before optional observations/memories.
             memory_ids = []
-            recalled = Context()
+            recalled = recalled.discarded()
             instructions = instructions_without_optional
             share_ids = set()
             try:
@@ -637,6 +639,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
                     schema=Conversation,
                 )
                 creative, context_limited = False, True
+        finalize_context(engine, recalled)
         with Session(engine) as db, db.begin():
             record_references(db, task_id, recalled)
         generator = generate or (generate_dialogue if creative else generate_conversation)
@@ -660,6 +663,7 @@ async def execute_chat(settings: Settings, engine, task_id: str, *, generate=Non
 
             reference_data = await reference_bytes(decision.image_action, reference_urls)
     except ContextChanged:
+        finalize_context(engine, recalled.discarded("source_changed"))
         reply, error = (
             "记忆已更新，这次回复未采用。请重新发送消息继续。",
             "context_changed",

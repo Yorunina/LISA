@@ -1,0 +1,69 @@
+{
+  "version": "memory-retrieval-synthetic-v1",
+  "provenance": "Hand-labelled synthetic short-message scenarios; no private chat copied. Retrieval only, not answer-quality or window-retention evidence.",
+  "corpora": {
+    "places": [
+      {"id": "qingdao", "content": "用户小时候在青岛生活过，最怀念的是傍晚沿海边散步。"},
+      {"id": "xiamen", "content": "用户去年去厦门旅行，最喜欢沙坡尾的小店。"},
+      {"id": "chengdu", "content": "用户曾在成都工作两年，常去附近面馆吃牛肉面。"},
+      {"id": "hiking", "content": "用户爬山时喜欢走林间缓坡，不喜欢拥挤的观景台。"}
+    ],
+    "people": [
+      {"id": "linlan", "content": "林岚是用户的姐姐，在杭州做建筑设计，周末常去看展。"},
+      {"id": "zhouhe", "content": "周禾是用户的大学同学，在南京教数学，喜欢打羽毛球。"},
+      {"id": "mumu", "content": "木木是用户养的橘猫，小时候因腿受伤被用户收养。"}
+    ],
+    "objects": [
+      {"id": "camera", "content": "用户保存着爷爷留下的胶片相机，每年会带它出去拍一次照。"},
+      {"id": "novel", "content": "用户正在写一部名为《潮汐来信》的小说，主人公是一名修船工。"},
+      {"id": "teacup", "content": "用户最常用的蓝色茶杯是姐姐送的生日礼物。"}
+    ],
+    "code": [
+      {"id": "encoding", "content": "用户在 Windows 的 PowerShell 中遇到中文乱码，后来通过显式指定 UTF-8 读取文件解决。"},
+      {"id": "database", "content": "用户的本地 PostgreSQL 曾因服务未启动而连接被拒绝，启动数据库后恢复。"},
+      {"id": "python", "content": "用户项目的 Python 虚拟环境放在 runtime/venv，运行测试时使用其中的解释器。"}
+    ],
+    "crowded": [
+      {"id": "bridge_log", "content": "青石桥每逢周末进行维修，桥面维护要记录裂缝，雨后巡查排水。", "repeat": 60},
+      {"id": "bridge_notes", "content": "青石桥维修期间巡查栏杆，桥面维护完成后整理值守记录，周末安排人员检查。", "repeat": 50},
+      {"id": "bridge_route", "content": "青石桥维修期间，用户回家的替代路线是沿河走到东门桥过河，不用绕到车站。"},
+      {"id": "old_bridge", "content": "旧城南桥因雨季封闭，居民改走西门桥，与青石桥维修无关。"}
+    ],
+    "budget": [
+      {"id": "archive_long", "content": "潮汐来信档案整理涉及旧船厂、信件编号、海潮测量及修船工的工作记录。", "repeat": 50},
+      {"id": "archive_box", "content": "《潮汐来信》中，修船工把母亲的信藏在船厂办公室窗边的红色铁盒里。"},
+      {"id": "archive_other", "content": "另一部作品《山中客》的旅人把地图放在背包侧袋，与潮汐来信不同。"}
+    ],
+    "daily": [
+      {"id": "trip_plan", "content": "用户昨天说今天计划去植物园，但尚未确认已经出发或到达。"},
+      {"id": "work", "content": "用户平时周一到周五上班，午休时偶尔看小说。"},
+      {"id": "food", "content": "用户不喜欢在咖啡里放糖，喝奶茶时通常选三分糖。"}
+    ]
+  },
+  "cases": [
+    {"id": "reference-01", "group": "reference", "corpus": "places", "input": "那里我还是挺想再去的", "history": [{"role": "user", "content": "刚才说的是青岛", "age_minutes": 5}], "expected": ["qingdao"]},
+    {"id": "reference-02", "group": "reference", "corpus": "places", "input": "那边有什么让我怀念的？", "history": [{"role": "user", "content": "想起小时候在青岛的日子", "age_minutes": 12}], "expected": ["qingdao"]},
+    {"id": "reference-03", "group": "reference", "corpus": "people", "input": "那位周末一般喜欢做什么？", "history": [{"role": "user", "content": "刚才提到我姐姐林岚", "age_minutes": 4}], "expected": ["linlan"]},
+    {"id": "reference-04", "group": "reference", "corpus": "people", "input": "之前说的那个人在哪里教书？", "history": [{"role": "user", "content": "我大学同学周禾你还记得吧", "age_minutes": 15}], "expected": ["zhouhe"]},
+    {"id": "reference-05", "group": "reference", "corpus": "objects", "input": "刚才那个是谁留下来的？", "history": [{"role": "user", "content": "今天翻出了那台胶片相机", "age_minutes": 3}], "expected": ["camera"]},
+    {"id": "reference-06", "group": "reference", "corpus": "objects", "input": "那个项目的主角是做什么的？", "history": [{"role": "user", "content": "接着聊我的小说潮汐来信吧", "age_minutes": 9}], "expected": ["novel"]},
+    {"id": "shift-01", "group": "topic_shift", "corpus": "code", "input": "这个乱码以前怎么解决的？", "history": [{"role": "user", "content": "青岛海边散步真舒服", "age_minutes": 2}], "expected": ["encoding"]},
+    {"id": "shift-02", "group": "topic_shift", "corpus": "code", "input": "换个话题，数据库拒绝连接怎么回事", "history": [{"role": "assistant", "content": "我们刚才在说厦门旅行", "age_minutes": 1}], "expected": ["database"]},
+    {"id": "shift-03", "group": "topic_shift", "corpus": "places", "input": "说点别的，我在成都干过多久？", "history": [{"role": "user", "content": "那台胶片相机是爷爷留下的", "age_minutes": 6}], "expected": ["chengdu"]},
+    {"id": "shift-04", "group": "topic_shift", "corpus": "objects", "input": "我那个蓝色茶杯是谁送的？", "history": [{"role": "user", "content": "青岛海边让我想起小时候", "age_minutes": 4}], "expected": ["teacup"]},
+    {"id": "duplicate-01", "group": "duplicate_slices", "corpus": "crowded", "input": "青石桥维修时我怎么回家？", "history": [], "expected": ["bridge_route"], "relevant": ["bridge_route", "bridge_log", "bridge_notes"]},
+    {"id": "duplicate-02", "group": "duplicate_slices", "corpus": "crowded", "input": "桥面周末维护，我原来说走哪座桥？", "history": [], "expected": ["bridge_route"], "relevant": ["bridge_route", "bridge_log", "bridge_notes"]},
+    {"id": "duplicate-03", "group": "duplicate_slices", "corpus": "crowded", "input": "那边维修封路时我走哪条路？", "history": [{"role": "user", "content": "青石桥周末又要维修了", "age_minutes": 8}], "expected": ["bridge_route"], "relevant": ["bridge_route", "bridge_log", "bridge_notes"]},
+    {"id": "duplicate-04", "group": "duplicate_slices", "corpus": "crowded", "input": "回家不用绕到车站，是怎么走的？", "history": [], "expected": ["bridge_route"]},
+    {"id": "budget-01", "group": "long_budget", "corpus": "budget", "input": "潮汐来信里母亲的信放在哪？", "history": [], "expected": ["archive_box"], "relevant": ["archive_box", "archive_long"]},
+    {"id": "budget-02", "group": "long_budget", "corpus": "budget", "input": "修船工把信藏在什么盒子里？", "history": [], "expected": ["archive_box"], "relevant": ["archive_box", "archive_long"]},
+    {"id": "budget-03", "group": "long_budget", "corpus": "budget", "input": "那个项目里存信的盒子在哪里？", "history": [{"role": "user", "content": "继续说潮汐来信的船厂", "age_minutes": 5}], "expected": ["archive_box"], "relevant": ["archive_box", "archive_long"]},
+    {"id": "budget-04", "group": "long_budget", "corpus": "budget", "input": "船厂办公室窗边留下了什么？", "history": [], "expected": ["archive_box"], "relevant": ["archive_box", "archive_long"]},
+    {"id": "no-answer-01", "group": "no_answer", "corpus": "places", "input": "我的护照号码是多少？", "history": [], "expected": []},
+    {"id": "no-answer-02", "group": "no_answer", "corpus": "people", "input": "我姐姐的银行卡号是多少？", "history": [], "expected": []},
+    {"id": "no-answer-03", "group": "no_answer", "corpus": "objects", "input": "那台相机的机身序列号是多少？", "history": [], "expected": []},
+    {"id": "no-answer-04", "group": "no_answer", "corpus": "code", "input": "服务器的登录密码是什么？", "history": [], "expected": []},
+    {"id": "time-01", "group": "time_context", "corpus": "daily", "input": "那里我已经去过了吗？", "history": [{"role": "user", "content": "昨天说好今天去植物园", "age_minutes": 600}], "expected": ["trip_plan"], "answer_check": "未确认出发或到达，计划不等于已去过；本工具不生成回答。"},
+    {"id": "time-02", "group": "time_context", "corpus": "daily", "input": "那边我现在还待着吗？", "history": [{"role": "user", "content": "早上准备去植物园", "age_minutes": 480}], "expected": ["trip_plan"], "answer_check": "早晨计划不能断言当前仍在园内；本工具不生成回答。"}
+  ]
+}

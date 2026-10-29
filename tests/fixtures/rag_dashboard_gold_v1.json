@@ -1,0 +1,368 @@
+{
+  "version": "rag-dashboard-synthetic-v1",
+  "evaluation_kind": "deterministic_pipeline",
+  "label_source": "explicit synthetic fixtures and permission rules",
+  "human_semantic_review": "not performed; this is an engineering regression baseline",
+  "cases": [
+    {
+      "id": "chat-01",
+      "purpose": "chat",
+      "scenario": "single",
+      "question": "合成单条事实问题01：航标01对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "目标为当前账号可读来源"
+    },
+    {
+      "id": "chat-02",
+      "purpose": "chat",
+      "scenario": "paraphrase",
+      "question": "合成换种问法问题02：航标02对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "确定性向量映射同一合成概念"
+    },
+    {
+      "id": "chat-03",
+      "purpose": "chat",
+      "scenario": "two_targets",
+      "question": "合成两条关联问题03：航标03对应的保存信息是什么？",
+      "target_count": 2,
+      "expected_final_coverage": 1,
+      "scope_check": "两个目标来源应同时找到"
+    },
+    {
+      "id": "chat-04",
+      "purpose": "chat",
+      "scenario": "duplicate_slices",
+      "question": "合成重复切片问题04：航标04对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "长来源多个切片按来源字段去重"
+    },
+    {
+      "id": "chat-05",
+      "purpose": "chat",
+      "scenario": "long_budget",
+      "question": "合成完整长条问题05：航标05对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "长条候选可命中但整条不装入"
+    },
+    {
+      "id": "chat-06",
+      "purpose": "chat",
+      "scenario": "request_budget",
+      "question": "合成请求装箱问题06：航标06对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "检索后请求容量不足可诊断"
+    },
+    {
+      "id": "chat-07",
+      "purpose": "chat",
+      "scenario": "foreign_owner",
+      "question": "合成账号隔离问题07：航标07对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "其他账号同概念来源不能被读到"
+    },
+    {
+      "id": "chat-08",
+      "purpose": "chat",
+      "scenario": "other_project",
+      "question": "合成作品隔离问题08：航标08对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "同账号其他作品来源不能被读到"
+    },
+    {
+      "id": "chat-09",
+      "purpose": "chat",
+      "scenario": "disabled",
+      "question": "合成用途关闭问题09：航标09对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "关闭或排除用途不计召回失败"
+    },
+    {
+      "id": "chat-10",
+      "purpose": "chat",
+      "scenario": "no_sources",
+      "question": "合成无资料问题10：航标10对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "空来源不虚报召回成功"
+    },
+    {
+      "id": "chat-11",
+      "purpose": "chat",
+      "scenario": "no_answer",
+      "question": "合成无答案问题11：航标11对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "无相关目标的题独立报告"
+    },
+    {
+      "id": "chat-12",
+      "purpose": "chat",
+      "scenario": "revision",
+      "question": "合成来源更新问题12：航标12对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "索引旧版本不得成为有效候选"
+    },
+    {
+      "id": "writing-01",
+      "purpose": "writing",
+      "scenario": "single",
+      "question": "合成单条事实问题01：航标01对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "目标为当前账号可读来源"
+    },
+    {
+      "id": "writing-02",
+      "purpose": "writing",
+      "scenario": "paraphrase",
+      "question": "合成换种问法问题02：航标02对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "确定性向量映射同一合成概念"
+    },
+    {
+      "id": "writing-03",
+      "purpose": "writing",
+      "scenario": "two_targets",
+      "question": "合成两条关联问题03：航标03对应的保存信息是什么？",
+      "target_count": 2,
+      "expected_final_coverage": 1,
+      "scope_check": "两个目标来源应同时找到"
+    },
+    {
+      "id": "writing-04",
+      "purpose": "writing",
+      "scenario": "duplicate_slices",
+      "question": "合成重复切片问题04：航标04对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "长来源多个切片按来源字段去重"
+    },
+    {
+      "id": "writing-05",
+      "purpose": "writing",
+      "scenario": "long_budget",
+      "question": "合成完整长条问题05：航标05对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "长条候选可命中但整条不装入"
+    },
+    {
+      "id": "writing-06",
+      "purpose": "writing",
+      "scenario": "request_budget",
+      "question": "合成请求装箱问题06：航标06对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "检索后请求容量不足可诊断"
+    },
+    {
+      "id": "writing-07",
+      "purpose": "writing",
+      "scenario": "foreign_owner",
+      "question": "合成账号隔离问题07：航标07对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "其他账号同概念来源不能被读到"
+    },
+    {
+      "id": "writing-08",
+      "purpose": "writing",
+      "scenario": "other_project",
+      "question": "合成作品隔离问题08：航标08对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "同账号其他作品来源不能被读到"
+    },
+    {
+      "id": "writing-09",
+      "purpose": "writing",
+      "scenario": "disabled",
+      "question": "合成用途关闭问题09：航标09对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "关闭或排除用途不计召回失败"
+    },
+    {
+      "id": "writing-10",
+      "purpose": "writing",
+      "scenario": "no_sources",
+      "question": "合成无资料问题10：航标10对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "空来源不虚报召回成功"
+    },
+    {
+      "id": "writing-11",
+      "purpose": "writing",
+      "scenario": "no_answer",
+      "question": "合成无答案问题11：航标11对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "无相关目标的题独立报告"
+    },
+    {
+      "id": "writing-12",
+      "purpose": "writing",
+      "scenario": "revision",
+      "question": "合成来源更新问题12：航标12对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "索引旧版本不得成为有效候选"
+    },
+    {
+      "id": "role-01",
+      "purpose": "role",
+      "scenario": "single",
+      "question": "合成单条事实问题01：航标01对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "目标为当前账号可读来源"
+    },
+    {
+      "id": "role-02",
+      "purpose": "role",
+      "scenario": "paraphrase",
+      "question": "合成换种问法问题02：航标02对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "确定性向量映射同一合成概念"
+    },
+    {
+      "id": "role-03",
+      "purpose": "role",
+      "scenario": "two_targets",
+      "question": "合成两条关联问题03：航标03对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "两个目标来源应同时找到"
+    },
+    {
+      "id": "role-04",
+      "purpose": "role",
+      "scenario": "duplicate_slices",
+      "question": "合成重复切片问题04：航标04对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "长来源多个切片按来源字段去重"
+    },
+    {
+      "id": "role-05",
+      "purpose": "role",
+      "scenario": "long_budget",
+      "question": "合成完整长条问题05：航标05对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "长条候选可命中但整条不装入"
+    },
+    {
+      "id": "role-06",
+      "purpose": "role",
+      "scenario": "role_scope",
+      "question": "合成角色知情问题06：航标06对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "检索后请求容量不足可诊断"
+    },
+    {
+      "id": "role-07",
+      "purpose": "role",
+      "scenario": "foreign_owner",
+      "question": "合成账号隔离问题07：航标07对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "其他账号同概念来源不能被读到"
+    },
+    {
+      "id": "role-08",
+      "purpose": "role",
+      "scenario": "other_project",
+      "question": "合成作品隔离问题08：航标08对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "同账号其他作品来源不能被读到"
+    },
+    {
+      "id": "role-09",
+      "purpose": "role",
+      "scenario": "disabled",
+      "question": "合成用途关闭问题09：航标09对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "关闭或排除用途不计召回失败"
+    },
+    {
+      "id": "role-10",
+      "purpose": "role",
+      "scenario": "no_sources",
+      "question": "合成无资料问题10：航标10对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "空来源不虚报召回成功"
+    },
+    {
+      "id": "role-11",
+      "purpose": "role",
+      "scenario": "no_answer",
+      "question": "合成无答案问题11：航标11对应的保存信息是什么？",
+      "target_count": 0,
+      "expected_final_coverage": null,
+      "scope_check": "无相关目标的题独立报告"
+    },
+    {
+      "id": "role-12",
+      "purpose": "role",
+      "scenario": "revision",
+      "question": "合成来源更新问题12：航标12对应的保存信息是什么？",
+      "target_count": 1,
+      "expected_final_coverage": 0,
+      "scope_check": "索引旧版本不得成为有效候选"
+    },
+    {
+      "id": "writing-13",
+      "purpose": "writing",
+      "scenario": "worldbook_title",
+      "question": "请依据《灯塔值守条例》解释航标13的保存信息。",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "只召回当前作品有效版本；条目/章节来源按固定粒度去重"
+    },
+    {
+      "id": "writing-14",
+      "purpose": "writing",
+      "scenario": "worldbook_middle",
+      "question": "请依据世界书中段命中解释航标14的保存信息。",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "只召回当前作品有效版本；条目/章节来源按固定粒度去重"
+    },
+    {
+      "id": "writing-15",
+      "purpose": "writing",
+      "scenario": "chapter_current",
+      "question": "请依据章节当前正文解释航标15的保存信息。",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "只召回当前作品有效版本；条目/章节来源按固定粒度去重"
+    },
+    {
+      "id": "writing-16",
+      "purpose": "writing",
+      "scenario": "chapter_history",
+      "question": "请依据章节旧版本排除解释航标16的保存信息。",
+      "target_count": 1,
+      "expected_final_coverage": 1,
+      "scope_check": "只召回当前作品有效版本；条目/章节来源按固定粒度去重"
+    }
+  ]
+}

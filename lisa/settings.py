@@ -2,6 +2,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from psycopg.conninfo import make_conninfo
 from pydantic import Field, SecretStr, field_validator
@@ -30,6 +31,42 @@ class Settings(BaseSettings):
     onebot_token: SecretStr = SecretStr("")
     qq_test_user: str | None = None
     web_url: str = "http://127.0.0.1:8000"
+    # An explicit deployment allowlist, independent from legacy group-management is_admin.
+    operations_maintainers: str = ""
+    operations_timezone: str = "Asia/Shanghai"
+    operations_refresh_seconds: int = Field(default=30, ge=10, le=300)
+    operations_heartbeat_seconds: int = Field(default=20, ge=5, le=60)
+    operations_stale_seconds: int = Field(default=90, ge=30, le=600)
+    operations_task_warning_seconds: int = Field(default=300, ge=30, le=3600)
+    operations_retention_days: int = Field(default=30, ge=1, le=365)
+    # The probe runs on the server; the management link is opened on the maintainer's device.
+    napcat_webui_probe_url: str = "http://127.0.0.1:6099/webui"
+    napcat_webui_url: str = "http://127.0.0.1:6099/webui"
+    # Already persisted by the local dependency initializer; never returned in status views.
+    napcat_webui_token: SecretStr = SecretStr("")
+
+    @field_validator("napcat_webui_probe_url", "napcat_webui_url")
+    @classmethod
+    def safe_napcat_webui_url(cls, value: str) -> str:
+        url = urlsplit(value)
+        if (
+            url.scheme not in {"http", "https"} or not url.hostname
+            or url.username is not None or url.password is not None
+            or url.query or url.fragment or any(ord(char) < 33 for char in value)
+        ):
+            raise ValueError("NapCat WebUI URL must be HTTP(S), without credentials or tokens")
+        # Force validation of malformed/out-of-range ports too.
+        url.port
+        return value
+
+    @field_validator("operations_timezone")
+    @classmethod
+    def valid_operations_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError("Unknown operations timezone") from exc
+        return value
 
     @field_validator("web_url")
     @classmethod
@@ -37,8 +74,12 @@ class Settings(BaseSettings):
         value = value.strip().rstrip("/")
         parsed = urlsplit(value)
         if (
-            parsed.scheme not in {"http", "https"} or not parsed.hostname
-            or parsed.username or parsed.password or parsed.query or parsed.fragment
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
         ):
             raise ValueError("web_url must be an absolute HTTP(S) base URL")
         return value
@@ -49,6 +90,7 @@ class Settings(BaseSettings):
     model_api_protocol: Literal["responses", "chat_completions"] = "responses"
     model_reasoning_effort: Literal["low", "medium", "high"] | None = None
     dialogue_skill_mode: Literal["off", "core", "examples", "corpus"] = "off"
+    # Legacy research estimate; normal conversational schemas use provider capacity.
     dialogue_skill_output_tokens: int = Field(default=2400, ge=600, le=4096)
 
     @field_validator("model_reasoning_effort", mode="before")
@@ -57,10 +99,16 @@ class Settings(BaseSettings):
         return None if value == "" else value
 
     # Amounts use CNY; legacy *_usd names remain compatible with stored data and clients.
-    model_daily_usd: Decimal = Field(default=Decimal("10.00"), gt=0)
-    model_task_usd: Decimal = Field(default=Decimal("0.15"), gt=0)
-    model_input_per_million: Decimal = Field(default=Decimal("2"), gt=0)
-    model_output_per_million: Decimal = Field(default=Decimal("10"), gt=0)
+    model_daily_usd: Decimal = Field(default=Decimal("10.00"), ge=0)
+    model_task_usd: Decimal = Field(default=Decimal("0.15"), ge=0)
+    model_input_per_million: Decimal = Field(default=Decimal("2"), ge=0)
+    model_output_per_million: Decimal = Field(default=Decimal("10"), ge=0)
+
+    @field_validator("model_input_per_million", "model_output_per_million", mode="before")
+    @classmethod
+    def unknown_model_price(cls, value):
+        return Decimal(0) if value is None or value == "" else value
+
     # Conservative application cap in serialized UTF-8 bytes. The provider
     # model supports a much larger token window; this protects cost and latency.
     model_max_input_bytes: int = Field(default=64_000, ge=16_000, le=4_194_304)

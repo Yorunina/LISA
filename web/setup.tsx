@@ -17,6 +17,7 @@ const Memory = lazy(() => import('./memory').then(module => ({ default: module.M
 const SharedLibrary = lazy(() => import('./shared').then(module => ({ default: module.SharedLibrary })));
 const ContactSettingsPanel = lazy(() => import('./contact-settings').then(module => ({ default: module.ContactSettingsPanel })));
 const StyleProfiles = lazy(() => import('./style-profiles').then(module => ({ default: module.StyleProfiles })));
+const OperationsDashboard = lazy(() => import('./operations').then(module => ({ default: module.OperationsDashboard })));
 
 type Setup = {
   qq_id: string | null;
@@ -25,9 +26,9 @@ type Setup = {
   presets: unknown[];
 };
 type Binding = { qq_id: string; expires_at: string };
-type LeaveAction = 'logout' | 'overview' | 'works' | 'memory' | 'account' | 'contact' | 'styles' | 'shared';
+type LeaveAction = 'logout' | 'overview' | 'works' | 'memory' | 'account' | 'contact' | 'styles' | 'shared' | 'operations';
 type ServiceStatus = {
-  status: 'ready' | 'unavailable' | 'budget_exhausted';
+  status: 'ready' | 'unavailable';
   message: string;
 };
 
@@ -60,7 +61,8 @@ function ServiceNotice() {
 }
 
 export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () => Promise<void>; onDeleted: () => void }) {
-  const [section, setSection] = useState<'account' | 'works' | 'memory' | 'contact' | 'styles' | 'shared'>('account');
+  const [section, setSection] = useState<'account' | 'works' | 'memory' | 'contact' | 'styles' | 'shared' | 'operations'>('account');
+  const [maintenanceAllowed, setMaintenanceAllowed] = useState(false);
   const works = useRef<WorksHandle>(null);
   const memory = useRef<MemoryHandle>(null);
   const shared = useRef<SharedHandle>(null);
@@ -103,6 +105,13 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
   }
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void request<{ allowed: boolean }>('/operations/access', undefined, undefined, { signal: controller.signal })
+      .then(value => { if (!controller.signal.aborted) setMaintenanceAllowed(value.allowed); })
+      .catch(() => { if (!controller.signal.aborted) setMaintenanceAllowed(false); });
+    return () => controller.abort();
+  }, []);
   useEffect(() => { heading.current?.focus(); }, [editing, setup?.qq_id]);
   useEffect(() => {
     if (!dirty) return;
@@ -132,7 +141,7 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
 
   async function leavePage(action: LeaveAction, discard = false) {
     setError('');
-    if (action === 'works' || action === 'memory' || action === 'account' || action === 'contact' || action === 'styles' || action === 'shared') {
+    if (action === 'works' || action === 'memory' || action === 'account' || action === 'contact' || action === 'styles' || action === 'shared' || action === 'operations') {
       if (discard) { setName(setup?.persona?.name ?? ''); setPrompt(setup?.persona?.prompt ?? ''); }
       setSection(action);
       return;
@@ -223,8 +232,9 @@ export function Study({ user, onLogout, onDeleted }: { user: User; onLogout: () 
       <button className="text-button" aria-current={section === 'memory' ? 'page' : undefined} onClick={() => { if (section !== 'memory') requestLeave('memory'); }} disabled={busy}>记忆</button>
       <button className="text-button" aria-current={section === 'shared' ? 'page' : undefined} onClick={() => { if (section !== 'shared') requestLeave('shared'); }} disabled={busy}>共有记忆</button>
       <button className="text-button" aria-current={section === 'account' || section === 'contact' ? 'page' : undefined} onClick={() => { if (section !== 'account') requestLeave('account'); }} disabled={busy}>个人设置</button>
+      {maintenanceAllowed && <button className="text-button" aria-current={section === 'operations' ? 'page' : undefined} onClick={() => { if (section !== 'operations') requestLeave('operations'); }} disabled={busy}>运行仪表盘</button>}
     </nav><button className="text-button" onClick={() => requestLeave('logout')} disabled={busy}>退出登录</button></header>
-    {section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} initialProjectId={styleEntry.projectId} onStyles={projectId => { setStyleEntry({ kind: 'writing', projectId, back: 'works' }); void leavePage('styles'); }} /></Suspense> : section === 'shared' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取共有记忆…</main>}><SharedLibrary ref={shared} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : section === 'styles' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取风格方案…</main>}><StyleProfiles ref={styles} initialized={!!setup?.initialized} initialKind={styleEntry.kind} initialProjectId={styleEntry.projectId} backLabel={styleEntry.back === 'works' ? '返回我的作品' : '返回账号设置'} onBack={() => requestLeave(styleEntry.back)} onApplied={() => { void request<Setup>('/setup').then(state => { setSetup(state); setName(state.persona?.name ?? ''); setPrompt(state.persona?.prompt ?? ''); setEditing(!state.persona); }).catch(showFailure); }} /></Suspense> : <main id="main" tabIndex={-1}>
+    {section === 'operations' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取运行记录…</main>}><OperationsDashboard /></Suspense> : section === 'works' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开作品…</main>}><Works ref={works} initialProjectId={styleEntry.projectId} onStyles={projectId => { setStyleEntry({ kind: 'writing', projectId, back: 'works' }); void leavePage('styles'); }} /></Suspense> : section === 'shared' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取共有记忆…</main>}><SharedLibrary ref={shared} /></Suspense> : section === 'memory' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开记忆…</main>}><Memory ref={memory} /></Suspense> : section === 'contact' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在打开联系偏好…</main>}><ContactSettingsPanel ref={contact} onBack={() => requestLeave('account')} /></Suspense> : section === 'styles' ? <Suspense fallback={<main id="main" className="study-page" role="status">正在读取风格方案…</main>}><StyleProfiles ref={styles} initialized={!!setup?.initialized} initialKind={styleEntry.kind} initialProjectId={styleEntry.projectId} backLabel={styleEntry.back === 'works' ? '返回我的作品' : '返回账号设置'} onBack={() => requestLeave(styleEntry.back)} onApplied={() => { void request<Setup>('/setup').then(state => { setSetup(state); setName(state.persona?.name ?? ''); setPrompt(state.persona?.prompt ?? ''); setEditing(!state.persona); }).catch(showFailure); }} /></Suspense> : <main id="main" tabIndex={-1}>
       <div className="study-page">
         <p className="eyebrow">我的书房</p><h1 ref={heading} tabIndex={-1}>欢迎，{user.username}。</h1>
         <p className="page-subtitle">{setup?.initialized ? '绑定与性格设置已保存。' : '完成 QQ 绑定与性格设置，准备与你的 LISA 相识。'}</p>

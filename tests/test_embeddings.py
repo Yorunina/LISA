@@ -14,7 +14,6 @@ from sqlalchemy.orm import Session
 
 from lisa import model_calls
 from lisa.model_calls import (
-    BudgetExceeded,
     EmbeddingUnavailable,
     ModelBusy,
     ModelCallFailed,
@@ -129,7 +128,7 @@ async def test_ordered_vectors_and_shared_cost_metadata(
     assert calls[0].state == "succeeded" and calls[0].input_tokens == 100
     assert calls[0].output_tokens == 0 and calls[0].charged_usd == Decimal("0.001000")
     assert days[0].reserved_usd == 0 and days[0].spent_usd == calls[0].charged_usd
-    assert calls[0].configuration == {
+    expected_config = {
         "api": "embeddings",
         "model": "synthetic-embedding-model",
         "base_url": "https://embedding.invalid/v1",
@@ -137,6 +136,10 @@ async def test_ordered_vectors_and_shared_cost_metadata(
         "input_per_million": "10",
         "output_per_million": "0",
     }
+    assert all(calls[0].configuration.get(k) == v for k, v in expected_config.items())
+    assert calls[0].configuration["dispatch_state"] == "sent"
+    assert calls[0].configuration["cost_source"] == "estimate"
+    assert calls[0].configuration["price_known"] is True
     assert sdk.configurations[0]["max_retries"] == 0
     assert sdk.configurations[0]["http_client"].follow_redirects is False
 
@@ -171,7 +174,7 @@ async def test_separate_embedding_provider_preserves_chat_credentials(
 
 
 @pytest.mark.asyncio
-async def test_embeddings_and_responses_share_task_call_limit(
+async def test_embeddings_and_responses_keep_accounting_without_consumption_count_cap(
     embedding_settings, engine, task_account, sdk
 ):
     await generate_reply(
@@ -179,15 +182,14 @@ async def test_embeddings_and_responses_share_task_call_limit(
     )
     await generate_embeddings(embedding_settings, engine, *task_account, ["one"])
     await generate_embeddings(embedding_settings, engine, *task_account, ["two"])
-    with pytest.raises(BudgetExceeded):
-        await generate_embeddings(embedding_settings, engine, *task_account, ["three"])
+    await generate_embeddings(embedding_settings, engine, *task_account, ["three"])
     calls, _ = records(engine)
-    assert len(calls) == 3 and sdk.embeddings.await_count == 2 and sdk.responses.await_count == 1
+    assert len(calls) == 4 and sdk.embeddings.await_count == 3 and sdk.responses.await_count == 1
 
 
 @pytest.mark.parametrize("scope", ["daily", "task"])
 @pytest.mark.asyncio
-async def test_embedding_reservation_honors_shared_allowance(
+async def test_personal_embedding_ignores_legacy_money_allowance(
     embedding_settings, engine, db, task_account, sdk, scope
 ):
     day = BudgetDay(day=datetime.now(UTC).date(), spent_usd=Decimal("0.499"))
@@ -206,9 +208,8 @@ async def test_embedding_reservation_honors_shared_allowance(
             )
         )
     db.commit()
-    with pytest.raises(BudgetExceeded):
-        await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
-    sdk.embeddings.assert_not_awaited()
+    await generate_embeddings(embedding_settings, engine, *task_account, ["text"])
+    sdk.embeddings.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -376,7 +377,6 @@ async def test_embedding_input_bounded_before_reservation(
     "update",
     [
         {"embedding_model": ""},
-        {"embedding_input_per_million": Decimal(0)},
         {"embedding_base_url": "https://no-key.invalid/v1"},
         {"embedding_api_key": SecretStr("no-endpoint-synthetic-key")},
     ],
@@ -392,3 +392,15 @@ async def test_embedding_placeholder_config_does_not_call_provider(
         )
     assert records(engine)[0] == []
     sdk.embeddings.assert_not_awaited()
+
+@pytest.mark.asyncio
+async def test_unknown_embedding_price_is_observed_without_disabling_retrieval(
+    embedding_settings, engine, task_account, sdk
+):
+    configured = embedding_settings.model_copy(update={"embedding_input_per_million": Decimal("0")})
+    assert indexing_enabled(configured)
+    await generate_embeddings(configured, engine, *task_account, ["synthetic"])
+    call = records(engine)[0][0]
+    assert call.configuration["price_known"] is False
+    assert call.configuration["cost_source"] == "unknown"
+    assert call.input_tokens == 20

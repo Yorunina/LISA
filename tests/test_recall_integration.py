@@ -242,7 +242,9 @@ async def test_fallback_keeps_billing_and_each_consumers_current_allowance(
         data=[], tokens=20 if exhausted == "calls" else 1_000_000
     )
     sdk.responses.return_value = SimpleNamespace(
-        status="completed", output_text=Dialogue(**dialogue()).model_dump_json(),
+        status="completed", output_text=(Dialogue(**dialogue()).model_dump_json()
+                                       if consumer == "chat"
+                                       else WritingResult(**RESULT).model_dump_json()),
         usage=SimpleNamespace(input_tokens=100, output_tokens=20),
     )
     await (execute_chat if consumer == "chat" else execute_author)(
@@ -251,15 +253,10 @@ async def test_fallback_keeps_billing_and_each_consumers_current_allowance(
     db.expire_all()
     sdk.embeddings.assert_awaited_once()
     calls = list(db.scalars(select(ModelCall).where(ModelCall.task_id == task_id)))
-    if consumer == "chat":
-        assert db.get(Task, task_id).status == "completed"
-        sdk.responses.assert_awaited_once()
-        assert sorted(call.state for call in calls) == ["failed", "succeeded"]
-        assert all(not call.budget_exempt for call in calls)
-    else:
-        assert db.get(Task, task_id).error == "budget_exhausted"
-        sdk.responses.assert_not_awaited()
-        assert len(calls) == 1 and calls[0].state == "failed"
+    assert db.get(Task, task_id).status == "completed"
+    sdk.responses.assert_awaited_once()
+    assert sorted(call.state for call in calls) == ["failed", "succeeded"]
+    assert all(not call.budget_exempt for call in calls)
     assert db.get(BudgetDay, calls[0].budget_day).reserved_usd == 0
 
 

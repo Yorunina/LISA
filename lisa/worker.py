@@ -13,26 +13,32 @@ async def run_worker(*, once: bool = False) -> None:
 
     settings = Settings()
     engine = make_engine(settings)
+    from lisa.runtime_status import process_pulse
+
     try:
         await asyncio.to_thread(recover_tasks, engine)
+        app = create_queue(settings)
+        async with process_pulse(engine, settings, ["worker", "image_worker"]):
+            async with app.open_async():
+                # Each consumer keeps the original concurrency and queue ownership.
+                async with asyncio.TaskGroup() as group:
+                    for queue, concurrency in (
+                        ("lisa", 2),
+                        ("lisa_author", 1),
+                        ("lisa_index", 1),
+                        ("lisa_style", 1),
+                        ("lisa_image", 1),
+                    ):
+                        group.create_task(
+                            app.run_worker_async(
+                                queues=[queue],
+                                concurrency=concurrency,
+                                wait=not once,
+                                install_signal_handlers=False,
+                            )
+                        )
     finally:
         engine.dispose()
-    app = create_queue(settings)
-    async with app.open_async():
-        # Separate consumers ensure a slow author never occupies the chat worker slots.
-        async with asyncio.TaskGroup() as group:
-            for queue, concurrency in (
-                ("lisa", 2), ("lisa_author", 1), ("lisa_index", 1), ("lisa_style", 1),
-                ("lisa_image", 1),
-            ):
-                group.create_task(
-                    app.run_worker_async(
-                        queues=[queue],
-                        concurrency=concurrency,
-                        wait=not once,
-                        install_signal_handlers=False,
-                    )
-                )
 
 
 def main() -> None:

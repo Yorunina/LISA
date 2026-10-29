@@ -180,6 +180,7 @@ def recall_shared(db, settings, user_id, purpose, query, vector=None, max_chars=
             ranked.append((score, item))
     ranked.sort(key=lambda pair: pair[0], reverse=True)
     context, lines, memes = Context(), [], 0
+    context.metrics = {"candidates": len(ranked), "omitted": {}}
     for _, item in ranked:
         if len(lines) >= 6:
             break
@@ -223,6 +224,7 @@ def recall_shared(db, settings, user_id, purpose, query, vector=None, max_chars=
                 else "\n共有资料仅按创作任务需要参考，不扩大角色知识范围。"
             )
         )
+    context.metrics.update(assembled=len(context.references), assembled_chars=len(context.text))
     return context
 
 

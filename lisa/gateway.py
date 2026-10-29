@@ -292,6 +292,10 @@ class OneBotConnection:
         self.timeout = timeout
         self.allow_old_messages = allow_old_messages
         self.bot_id: str | None = None
+        self.last_received_at: str | None = None
+        self.last_sent_at: str | None = None
+        self.logged_in: bool | None = None
+        self.status_observed_at: datetime | None = None
         self.pending: dict[str, asyncio.Future] = {}
         self.events: asyncio.Queue[PrivateMessage | GroupMessageEvent | None] = asyncio.Queue()
 
@@ -304,6 +308,15 @@ class OneBotConnection:
                     continue
                 if not isinstance(payload, dict):
                     continue
+                if (
+                    payload.get("post_type") == "meta_event"
+                    and payload.get("meta_event_type") == "heartbeat"
+                ):
+                    status = payload.get("status")
+                    if isinstance(status, dict):
+                        online = status.get("online")
+                        self.logged_in = online if isinstance(online, bool) else None
+                        self.status_observed_at = datetime.now(UTC)
                 echo = payload.get("echo")
                 if isinstance(echo, str) and echo in self.pending:
                     future = self.pending[echo]
@@ -319,6 +332,7 @@ class OneBotConnection:
                     if event is None and self.allow_qq is None:
                         event = parse_group_message(payload, bot_id=self.bot_id)
                     if event:
+                        self.last_received_at = datetime.now(UTC).isoformat()
                         self.events.put_nowait(event)
         except WebSocketException:
             pass
@@ -350,6 +364,8 @@ class OneBotConnection:
         data = response.get("data")
         if not isinstance(data, dict):
             raise OneBotUnknown("Invalid action result")
+        if action == "send_private_msg":
+            self.last_sent_at = datetime.now(UTC).isoformat()
         return data
 
     async def identify(self) -> None:
@@ -359,6 +375,8 @@ class OneBotConnection:
         if not bot_id or not version.get("app_name") or not version.get("app_version"):
             raise OneBotFailure("Gateway identity/version unavailable")
         self.bot_id = bot_id
+        self.logged_in = True
+        self.status_observed_at = datetime.now(UTC)
 
     async def send_private(self, qq_id: str, text: str) -> str:
         if (self.allow_qq is not None and qq_id != self.allow_qq) or qq_id == self.bot_id:
@@ -386,6 +404,7 @@ async def deliver_outbox(
             message = claim_outbound(db, allow_qq, settings=settings)
             if message is not None:
                 from lisa.shared_retrieval import outbound_segments
+
                 segments = outbound_segments(db, message)
         if message is None:
             await asyncio.sleep(0.5)
@@ -426,16 +445,39 @@ async def serve_connection(
     connection = OneBotConnection(websocket, allow_qq=allow_qq, allow_old_messages=chat_enabled)
     receiver = asyncio.create_task(connection.receive())
     sender = None
+    pulse = None
     try:
         await connection.identify()
+        from lisa.runtime_status import process_pulse
+
+        pulse = process_pulse(
+            engine,
+            settings or Settings(),
+            ["gateway", "qq"],
+            details=lambda: {
+                "connected": True,
+                "logged_in": connection.logged_in
+                if connection.status_observed_at
+                and (datetime.now(UTC) - connection.status_observed_at).total_seconds()
+                <= (settings or Settings()).operations_stale_seconds
+                else None,
+                "last_received_at": connection.last_received_at,
+                "last_sent_at": connection.last_sent_at,
+                "mode": "test" if allow_qq else "normal",
+            },
+        )
+        await pulse.__aenter__()
         if chat_enabled:
             # A previous connection/process may have sent without recording the outcome.
             with Session(engine) as db, db.begin():
                 pending = (
                     select(OutboundMessage.id)
                     .where(OutboundMessage.status == "sending")
-                    .order_by(OutboundMessage.user_id, OutboundMessage.created_at,
-                              OutboundMessage.sequence)
+                    .order_by(
+                        OutboundMessage.user_id,
+                        OutboundMessage.created_at,
+                        OutboundMessage.sequence,
+                    )
                 )
                 if allow_qq is not None:
                     pending = pending.where(OutboundMessage.qq_id == allow_qq)
@@ -509,6 +551,8 @@ async def serve_connection(
                     record_delivery(db, event_key, status)
                 logger.info("QQ service reply outcome: %s", status)
     finally:
+        if pulse is not None:
+            await pulse.__aexit__(None, None, None)
         sender_error = None
         if sender:
             sender.cancel()
@@ -553,6 +597,10 @@ async def run_gateway(settings: Settings, *, allow_qq: str | None = None) -> Non
                         settings=settings,
                     )
             except (OSError, WebSocketException, OneBotFailure, OneBotUnknown):
+                from lisa.runtime_status import heartbeat
+
+                await asyncio.to_thread(heartbeat, engine, "gateway", "offline", {})
+                await asyncio.to_thread(heartbeat, engine, "qq", "offline", {})
                 logger.warning("QQ gateway unavailable; reconnecting in 3 seconds")
             await asyncio.sleep(3)
     finally:

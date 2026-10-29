@@ -33,7 +33,7 @@ test('service status polling preserves edits and stops on logout', async ({ page
   await expect(notice).toHaveText('合成服务状态：ready')
   await page.getByRole('button', { name: '调整 LISA 性格' }).click()
   await page.getByLabel('LISA 性格 prompt', { exact: true }).fill('尚未保存的合成人格内容')
-  for (const nextStatus of ['budget_exhausted', 'unavailable', 'ready']) {
+  for (const nextStatus of ['unavailable', 'ready']) {
     status = nextStatus
     await page.clock.fastForward(16_000)
     await expect(notice).toHaveText(`合成服务状态：${nextStatus}`)

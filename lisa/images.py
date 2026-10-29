@@ -28,6 +28,7 @@ from lisa.model_calls import (
     _finish,
     _reserve,
     generate_structured,
+    mark_dispatch,
 )
 from lisa.models import (
     Chapter,
@@ -687,18 +688,21 @@ async def generate_image(settings, engine, task_id, user_id, prompt, reference=N
                 size="1024x1024",
                 output_format="png",
             )
+            mark_dispatch(engine, call_id, "dispatching")
             if reference:
                 result = await client.images.edit(
                     image=("reference.png", reference, "image/png"), **params
                 )
             else:
                 result = await client.images.generate(**params)
+            mark_dispatch(engine, call_id, "sent")
         encoded = result.data[0].b64_json
         if not encoded:
             raise ValueError("Provider did not return image bytes")
         data, _mime = normalize_image(base64.b64decode(encoded, validate=True))
         usage = result.usage.model_dump() if result.usage else None
     except APIStatusError as exc:
+        mark_dispatch(engine, call_id, "sent")
         unknown = exc.status_code >= 500 or exc.status_code in {408, 409}
         _finish(
             engine,
@@ -709,6 +713,7 @@ async def generate_image(settings, engine, task_id, user_id, prompt, reference=N
         )
         raise (ModelCallUnknown if unknown else ModelCallFailed)("Image provider failed") from None
     except OpenAIError:
+        mark_dispatch(engine, call_id, "unknown")
         _finish(engine, call_id, state="unknown", error="image_transport_unknown")
         raise ModelCallUnknown("Image outcome unknown") from None
     except (ValueError, TypeError, AttributeError, IndexError):

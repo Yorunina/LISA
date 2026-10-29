@@ -50,8 +50,6 @@ def vision_enabled(settings: Settings) -> bool:
         settings.vision_model
         and settings.vision_base_url
         and settings.vision_api_key.get_secret_value()
-        and settings.vision_input_per_million > 0
-        and settings.vision_output_per_million > 0
     )
 
 

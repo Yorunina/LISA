@@ -55,7 +55,7 @@ const taskErrors: Record<string, string> = {
   reference_unavailable: '指定参考图已不可用，请重新指定。',
   image_failed: '这次绘图失败，原图仍保留。',
   model_busy: '创作服务暂时繁忙，请稍后重试。',
-  budget_exhausted: '可用额度已用尽，本次创作已停止。',
+  budget_exhausted: '此任务曾因旧消费限额停止；当前文本生成已取消消费额度。',
   model_unknown: '调用结果尚未确认，已停止重试，原文保留。',
   input_too_large: '本次创作资料过长，请缩减相关内容后重试。',
   model_failed: '模型调用失败，原文保留，可稍后重试。',
@@ -85,8 +85,8 @@ function ScheduleNote({ schedule, failed, projectId, compact = false }: { schedu
     <div className="task-heading"><strong>自主续写</strong><span>{failed ? '状态暂不可用' : !status ? '正在读取计划…' : elsewhere ? '计划属于另一部作品' : scheduleNames[status]}</span></div>
     {failed ? <p>暂时无法读取后续计划，稍后自动重试。正文编辑与手动创作仍可使用。</p>
       : elsewhere ? <p>这项计划不会写入当前查看的作品。</p>
-        : status === 'paused' ? <><p>{pauseReasons[schedule?.pause_reason ?? ''] ?? '当前不满足自主续写条件。'}</p><p className="field-hint">自主续写暂停不影响网页编辑与单次手动创作；模型调用仍受可用额度限制。</p></>
-          : status === 'scheduled' || status === 'waiting' ? <><p>{schedule?.goal}</p>{status === 'scheduled' && schedule?.due_at && <p className="field-hint">计划时间：<time dateTime={schedule.due_at}>{new Date(schedule.due_at).toLocaleString('zh-CN')}</time></p>}<p className="field-hint">计划不代表已经开始；执行前仍会检查共识、活跃状态与可用额度。</p></>
+        : status === 'paused' ? <><p>{pauseReasons[schedule?.pause_reason ?? ''] ?? '当前不满足自主续写条件。'}</p><p className="field-hint">自主续写暂停不影响网页编辑与单次手动创作；文本生成不设消费额度，仍遵守运行并发与有限任务规则。</p></>
+          : status === 'scheduled' || status === 'waiting' ? <><p>{schedule?.goal}</p>{status === 'scheduled' && schedule?.due_at && <p className="field-hint">计划时间：<time dateTime={schedule.due_at}>{new Date(schedule.due_at).toLocaleString('zh-CN')}</time></p>}<p className="field-hint">计划不代表已经开始；执行前仍会检查共识、活跃状态与有限推进条件。</p></>
             : status === 'no_plan' ? <p>目前没有排定下一段自主创作。可以继续在 QQ 商量，或在网页发起一次创作。</p>
               : status === 'disabled' ? <p>可以在网页发起一次创作，或继续编辑已有正文。</p> : null}
   </div>;
