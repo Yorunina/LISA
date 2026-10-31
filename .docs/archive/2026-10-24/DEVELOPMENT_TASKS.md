@@ -1199,3 +1199,17 @@ runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests --pyte
 `python -m ruff check lisa scripts tests`通过；`npm.cmd run build -- --outDir runtime/reports/combined-commit-build-20261029`通过TypeScript和Vite，未覆盖正式runtime/dist。暂存前后diff空白检查通过，453个既有文档文件链接有效。暂存范围无runtime、实际.env或私有代理目录，凭据模式扫描无命中；`.env.example`只含占位与公开配置说明。
 
 源码、运行参数和部署分开：提交动作不加载B16/B17迁移到个人库，不重载API/worker/gateway，不操作NapCat登录或发送QQ。正式运行验收仍见各批次剩余项。
+
+## 2026-10-31 角色选择与正文生成职责修复
+
+用户授权修复角色选择器直接产出正文的问题并完成相关测试。原 AuthorChoice 同时接受角色 ID 或 WritingResult，而选择器只接收精简任务包，导致存在直接采用缺少世界书、写作风格及检索资料的结果路径。
+
+本次 AuthorChoice 只保留必填且可为 null 的 character_id，拒绝额外 result 字段；选择提示明确不生成正文。不选角色时继续调用完整作者，选角色时先取得受限角色建议再调用完整作者。无可用角色仍为一次作者调用；有可用角色时，不参与为选择加作者两次，参与为选择、角色、作者三次。所有调用继续归属同一个有限任务，不新增服务或表结构，不更改既有作者输入预算裁剪、采用、知识增量、取消和未知结果规则。
+
+回归补充覆盖两个选择分支的完整作者资料（世界书、约束、人物档案、有效写法及允许写作的记忆）、旧格式夹带正文或空 result 时拒绝采用、发送给 SDK 的选择 Schema 不再包含 WritingResult，以及两次/三次调用同任务记账。原无角色单次调用、跨作品/账号隔离、取消、失败保留正文及知识同事务采用测试继续执行。
+
+隔离命令：`runtime/venv/Scripts/python.exe scripts/test_app.py --pytest-target tests/test_character_calls.py --pytest-target tests/test_author.py --pytest-target tests/test_diary.py --pytest-target tests/test_model_calls.py --pytest-target tests/test_recall_integration.py --pytest-target tests/test_works.py`，进程设置 `PYTEST_ADDOPTS=--basetemp=runtime/reports/selector-fix-20261031`。
+
+验证：上述六个文件共 227 项通过（312.06 秒），迁移升降升、Alembic 差异、队列初始化及隔离 worker 单次执行通过，一次性测试库已删除。`ruff check lisa/author.py tests/test_character_calls.py` 与 `git diff --check` 通过。pytest 仅有缓存目录写权限告警，不影响测试结果。首次测试因 PostgreSQL 未启动而连接超时；沙箱 db-start 遇 Windows restricted-token 87，正常权限启动数据库后完成隔离验证。未启动正式 API/worker/gateway，未调用真实模型或发送 QQ，未提交或推送；保留工作区既有改动。
+
+提交前复查：按用户要求仅选取本轮四个文件的修复差异，保留其他模型配置、输出上限及聊天改动。将暂存树导出为独立快照，使用原已提交代码的模型配置规则执行上述六个测试文件，214 项通过（287.60 秒），Ruff 及暂存差异空白检查通过；迁移及队列检查通过，一次性测试库已删除。该数量与前述包含其他未提交改动的工作区 227 项分别记录，不相加。快照首次启动遇本机 none 思考档位不兼容旧配置枚举，在测试进程显式设置 high 后通过，未改正式配置。仅有 pytest 缓存 ACL 告警。复查未发现本轮修复的阻断问题；用户已授权检查通过后提交并推送，不包含正式服务加载或真实模型/QQ验收。

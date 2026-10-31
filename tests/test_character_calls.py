@@ -143,22 +143,82 @@ def test_character_choice_context_drops_detailed_project_material():
 
 
 @pytest.mark.asyncio
-async def test_author_can_directly_finish_without_consulting_available_character(
-    settings, engine, db, owner, project
+@pytest.mark.parametrize("consult", [False, True])
+async def test_final_author_receives_full_context_after_character_selection(
+    settings, engine, db, owner, project, monkeypatch, consult
 ):
-    character_id = add_character(db, project["id"])
+    character_id = add_character(
+        db, project["id"], definition={"identity": "调查记者"}
+    )
+    work = db.get(Project, UUID(project["id"]))
+    work.worldbook = "核心设定：车站里没有电灯。"
+    work.constraints = "不得改变主角的身份。"
+    work.author_prompt = "本作品补充写法：使用第三人称。"
+    db.add(Memory(
+        user_id=owner, kind="preference", content="创作偏好：保留安静的留白。",
+        allow_writing=True,
+    ))
+    db.commit()
+    monkeypatch.setattr("lisa.author.resolve_writing_style", lambda *args, **kwargs: {
+        "prompt": "已应用风格：使用简短、克制的句子。",
+        "effective_profile_name": "合成写作风格",
+    })
+    task_id = pending_task(db, owner, project)
+    calls = []
+
+    async def decide(*args):
+        calls.append("decide")
+        available = json.loads(args[-1][-1]["content"])["available_characters"]
+        assert available == [{"id": str(character_id), "name": "林舟"}]
+        assert "核心设定" not in json.dumps(args[-1], ensure_ascii=False)
+        return {"character_id": str(character_id) if consult else None}
+
+    async def role(*args):
+        calls.append("role")
+        return {"suggestion": "我再等一会儿。"}
+
+    async def generate(*args):
+        calls.append("final")
+        instructions, messages = args[-2:]
+        packet = json.loads(messages[0]["content"])
+        assert packet["worldbook"] == work.worldbook
+        assert packet["constraints"] == work.constraints
+        assert packet["characters"]["entries"][0]["definition"]["identity"] == "调查记者"
+        assert work.author_prompt in instructions
+        assert "已应用风格：使用简短、克制的句子。" in instructions
+        assert "创作偏好：保留安静的留白。" in instructions
+        return RESULT
+
+    await execute_author(
+        settings, engine, task_id, generate=generate, decide=decide,
+        character_generate=role if consult else forbidden,
+    )
+    db.expire_all()
+    assert calls == (["decide", "role", "final"] if consult else ["decide", "final"])
+    assert db.get(Task, task_id).status == "completed"
+    assert db.scalar(select(func.count()).select_from(CharacterParticipation)) == int(consult)
+    assert db.scalar(select(func.count()).select_from(ChapterVersion)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [None, RESULT])
+async def test_selector_cannot_return_a_writing_result(
+    settings, engine, db, owner, project, result
+):
+    add_character(db, project["id"])
     task_id = pending_task(db, owner, project)
 
     async def decide(*args):
-        available = json.loads(args[-1][-1]["content"])["available_characters"]
-        assert available == [{"id": str(character_id), "name": "林舟"}]
-        return {"character_id": None, "result": RESULT}
+        return {"character_id": None, "result": result}
 
     await execute_author(
         settings, engine, task_id, generate=forbidden, decide=decide, character_generate=forbidden
     )
     db.expire_all()
-    assert db.get(Task, task_id).status == "completed"
+    task = db.get(Task, task_id)
+    assert task.status == "failed" and task.error == "invalid_writing_result"
+    assert task.adopted_at is None
+    assert db.scalar(select(func.count()).select_from(ChapterVersion)) == 0
     assert db.scalar(select(func.count()).select_from(CharacterParticipation)) == 0
 
 
@@ -187,7 +247,7 @@ async def test_character_receives_only_own_knowledge_and_suggestion_is_not_persi
 
     async def decide(*args):
         calls.append(("decide", args[2], args[3]))
-        return {"character_id": str(character_id), "result": None}
+        return {"character_id": str(character_id)}
 
     async def role(*args):
         calls.append(("role", args[2], args[3]))
@@ -254,7 +314,7 @@ async def test_author_cannot_select_character_outside_this_project(
     task_id = pending_task(db, owner, project)
 
     async def decide(*args):
-        return {"character_id": str(foreign_id), "result": None}
+        return {"character_id": str(foreign_id)}
 
     await execute_author(
         settings, engine, task_id, generate=forbidden, decide=decide, character_generate=forbidden
@@ -278,7 +338,7 @@ async def test_cancel_character_discards_late_suggestion_without_final_author(
     final_calls = []
 
     async def decide(*args):
-        return {"character_id": str(character_id), "result": None}
+        return {"character_id": str(character_id)}
 
     async def role(*args):
         started.set()
@@ -327,7 +387,7 @@ async def test_role_or_final_failure_keeps_formal_body_unchanged(
     calls = []
 
     async def decide(*args):
-        return {"character_id": str(character_id), "result": None}
+        return {"character_id": str(character_id)}
 
     async def role(*args):
         calls.append("role")
@@ -414,14 +474,16 @@ async def test_rejected_writing_never_seeds_character_configuration(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("consult", [False, True])
 async def test_real_stage_wrappers_charge_same_task_without_nested_tasks(
-    model_settings, sdk, engine, db, owner, project
+    model_settings, sdk, engine, db, owner, project, consult
 ):
     character_id = add_character(db, project["id"])
     task_id = pending_task(db, owner, project)
     results = [
-        {"character_id": str(character_id), "result": None},
-        CharacterSuggestion(suggestion="我先等下一班车。").model_dump(mode="json"),
+        {"character_id": str(character_id) if consult else None},
+        *([CharacterSuggestion(suggestion="我先等下一班车。").model_dump(mode="json")]
+          if consult else []),
         WritingResult.model_validate(RESULT).model_dump(mode="json"),
     ]
     sdk.create.side_effect = [
@@ -442,14 +504,19 @@ async def test_real_stage_wrappers_charge_same_task_without_nested_tasks(
     db.expire_all()
     assert db.get(Task, task_id).status == "completed"
     rows = list(db.scalars(select(ModelCall).order_by(ModelCall.started_at)))
-    assert len(rows) == 3
+    assert len(rows) == (3 if consult else 2)
     assert all(row.task_id == task_id and row.user_id == owner for row in rows)
     assert all(row.state == "succeeded" and row.charged_usd > 0 for row in rows)
     assert [call.kwargs["max_output_tokens"] for call in sdk.create.call_args_list] == [
         model_settings.writing_output_tokens,
-        900,
+        *([900] if consult else []),
         model_settings.writing_output_tokens,
     ]
+    selector_schema = sdk.create.call_args_list[0].kwargs["text"]["format"]["schema"]
+    assert set(selector_schema["properties"]) == {"character_id"}
+    assert selector_schema["required"] == ["character_id"]
+    assert selector_schema["additionalProperties"] is False
+    assert "WritingResult" not in selector_schema.get("$defs", {})
     assert db.scalar(select(func.count()).select_from(Task)) == 1
 
 
@@ -463,7 +530,7 @@ async def test_adopted_role_knowledge_keeps_evidence_and_inference_without_dupli
     original = db.get(Character, role_id).known_information
 
     async def decide(*args):
-        return {"character_id": str(role_id), "result": None}
+        return {"character_id": str(role_id)}
 
     async def role(*args):
         return {
@@ -541,8 +608,8 @@ async def test_knowledge_adoption_skips_without_blocking_formal_writing(
 
     async def decide(*args):
         if reason == "unused_attempt":
-            return {"character_id": None, "result": RESULT}
-        return {"character_id": str(role_id), "result": None}
+            return {"character_id": None}
+        return {"character_id": str(role_id)}
 
     async def role(*args):
         return {"suggestion": "我再等等。", "knowledge": LIGHT_KNOWLEDGE}
@@ -574,7 +641,7 @@ async def test_knowledge_adoption_and_formal_body_roll_back_together(
     task_id = pending_task(db, owner, project)
 
     async def decide(*args):
-        return {"character_id": str(role_id), "result": None}
+        return {"character_id": str(role_id)}
 
     async def role(*args):
         return {"suggestion": "我再等等。", "knowledge": LIGHT_KNOWLEDGE}

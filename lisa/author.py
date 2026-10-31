@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import HTTPException
 from procrastinate.exceptions import JobRetry
 from procrastinate.retry import RetryDecision
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -66,14 +66,9 @@ class WritingResult(BaseModel):
 
 class AuthorChoice(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    character_id: UUID | None = None
-    result: WritingResult | None = None
-
-    @model_validator(mode="after")
-    def one_action(self):
-        if (self.character_id is None) == (self.result is None):
-            raise ValueError("Choose one character or directly finish writing")
-        return self
+    character_id: UUID | None = Field(
+        description="需要角色参与时返回一名可用角色的ID，否则返回null；不生成正文。"
+    )
 
 
 async def choose_character(settings, engine, task_id, user_id, instructions, messages):
@@ -177,7 +172,8 @@ def _character_choice_context(messages: list[dict]) -> tuple[str, list[dict]]:
     reduced = {key: payload[key] for key in keep if key in payload}
     instructions = (
         "你是作者的角色参与判断器。只判断本次有限任务是否需要一个已有角色提供自身反应。"
-        "根据任务目标、当前剧情、场景和明确约束判断；简单任务直接完成，不要调用角色。"
+        "根据任务目标、当前剧情、场景和明确约束判断；简单任务返回character_id=null。"
+        "无论是否选择角色，正式正文都由后续作者使用完整上下文生成。"
         "不要创作正文，不要补全未提供的设定，不要把角色猜测写成事实。"
     )
     return instructions, [{"role": "user", "content": json.dumps(reduced, ensure_ascii=False)}]
@@ -221,7 +217,7 @@ async def _write_with_character(
                 user_id,
                 choice_instructions
                 + "\n仅当本次场景涉及某角色、其独立反应确有帮助时，"
-                "返回一名可用角色的ID且result为空。"
+                "返回一名可用角色的ID；否则返回character_id=null。"
                 "角色只能读取自己保存的已知信息；作者判断阶段不传入角色秘密或自由文本问题。",
                 [
                     *choice_messages,
@@ -237,8 +233,10 @@ async def _write_with_character(
                 ],
             )
         )
-        if choice.result is not None:
-            return _WritingAttempt(choice.result)
+    else:
+        choice = AuthorChoice(character_id=None)
+    # The selector has only a reduced task packet and must never author the result.
+    if choice.character_id is not None:
         if str(choice.character_id) not in {row["id"] for row in available}:
             raise CharacterUnavailable
         suggestion = await consult_character(
